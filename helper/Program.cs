@@ -9,8 +9,8 @@ public static class Program
         var o = ParseOptions(args.Skip(1));
         switch (mode)
         {
-            case "toggle": return Native.Toggle(o) ? 0 : 1;
-            case "enter": return Native.Enter(Native.FindPlayer(), o) ? 0 : 1;
+            case "toggle": return OneShot(Native.Toggle(o), o);
+            case "enter": return OneShot(Native.Enter(Native.FindPlayer(), o), o);
             case "exit": return Native.Exit() ? 0 : 1;
             case "status":
                 var status = Native.Status();
@@ -21,6 +21,14 @@ public static class Program
             case "stop": File.WriteAllText(RequestFile.RequestPath, "stop"); return 0;
             default: Console.Error.WriteLine($"unknown mode: {mode}"); return 2;
         }
+    }
+
+    // one-shot (no daemon ticks): converge the minimal-look region here, sleeps are harmless
+    static int OneShot(bool ok, PipOptions o)
+    {
+        if (ok && Native.InPip())
+            for (var i = 0; i < 6; i++) { Thread.Sleep(150); Native.MaintainRegion(o); } // debounce needs ~4 ticks: measure, resize, measure, region
+        return ok ? 0 : 1;
     }
 
     public static PipOptions ParseOptions(IEnumerable<string> args)
@@ -37,6 +45,7 @@ public static class Program
                 "h" when int.TryParse(v, out var n) => o with { H = n },
                 "c" => o with { Corner = v },
                 "m" when int.TryParse(v, out var n) => o with { Margin = n },
+                "min" => o with { Min = v != "0" && !v.Equals("false", StringComparison.OrdinalIgnoreCase) },
                 _ => o,
             };
         }

@@ -3,7 +3,7 @@ using System.Text;
 
 namespace PipHelper;
 
-public record PipOptions(int W = 480, int H = 270, string Corner = "br", int Margin = 16);
+public record PipOptions(int W = 480, int H = 270, string Corner = "br", int Margin = 16, bool Min = true);
 
 public static class Native
 {
@@ -29,6 +29,12 @@ public static class Native
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool GetMonitorInfoW(IntPtr mon, ref MONITORINFO mi);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+    [DllImport("user32.dll")] static extern int SetWindowRgn(IntPtr h, IntPtr rgn, bool redraw);
+    [DllImport("user32.dll")] static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
 
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
@@ -90,6 +96,7 @@ public static class Native
         if (s is null) return false;
         var h = new IntPtr(s.Hwnd);
         if (!IsWindow(h)) { File.Delete(PipState.StatePath); return false; } // VLC gone; clear stale state
+        SetWindowRgn(h, IntPtr.Zero, true); // drop the minimal-look clip before restoring
         SetWindowLongPtrW(h, GWL_STYLE, s.Style);
         SetWindowLongPtrW(h, GWL_EXSTYLE, s.ExStyle);
         var ok = SetWindowPos(h, HWND_NOTOPMOST, s.X, s.Y, s.W, s.H, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
@@ -98,6 +105,88 @@ public static class Native
     }
 
     public static bool Toggle(PipOptions o) => InPip() ? Exit() : Enter(FindPlayer(), o);
+
+    // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area ----
+    // VLC 3.x hosts the video in a native child whose class starts with "VLC video main".
+    static IntPtr FindVideoChild(IntPtr top)
+    {
+        IntPtr found = IntPtr.Zero;
+        EnumChildWindows(top, (c, _) =>
+        {
+            if (!IsWindowVisible(c)) return true;
+            var sb = new StringBuilder(128);
+            GetClassName(c, sb, 128);
+            if (sb.ToString().StartsWith("VLC video main", StringComparison.Ordinal)) { found = c; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    static bool HasRegion(IntPtr h)
+    {
+        var probe = CreateRectRgn(0, 0, 0, 0);
+        try { return GetWindowRgn(h, probe) != 0; } // 0 = ERROR (no region)
+        finally { DeleteObject(probe); }
+    }
+
+    static RECT _prevWin, _prevChild;
+    static bool _havePrev;
+
+    static bool SameRect(RECT a, RECT b) =>
+        a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
+
+    /// Converging per-tick maintenance, called by the daemon timer (and one-shot enter):
+    /// no video -> clear region; video child not yet at target size -> resize window with
+    /// chrome compensation; child at target -> clip window to the video area.
+    /// Acts only on STABLE frames (window+child rects unchanged since the previous tick):
+    /// VLC re-fits the child asynchronously after our resize, so a fresh measurement can be
+    /// stale and yield garbage chrome (observed: perpetual resize thrash in the daemon).
+    public static void MaintainRegion(PipOptions o)
+    {
+        if (!o.Min) return;
+        var s = PipState.Load(PipState.StatePath);
+        if (s is null) { _havePrev = false; return; }
+        var h = new IntPtr(s.Hwnd);
+        if (!IsWindow(h)) { _havePrev = false; return; }
+
+        var child = FindVideoChild(h);
+        if (child == IntPtr.Zero)
+        {
+            _havePrev = false;
+            if (HasRegion(h)) SetWindowRgn(h, IntPtr.Zero, true); // playback stopped: show full mini UI
+            return;
+        }
+
+        GetWindowRect(h, out var wr);
+        GetWindowRect(child, out var cr);
+        bool stable = _havePrev && SameRect(wr, _prevWin) && SameRect(cr, _prevChild);
+        _prevWin = wr; _prevChild = cr; _havePrev = true;
+        if (!stable) return; // wait until VLC's re-layout settles
+
+        int relL = cr.Left - wr.Left, relT = cr.Top - wr.Top;
+        int cw = cr.Right - cr.Left, ch = cr.Bottom - cr.Top;
+        int chromeW = (wr.Right - wr.Left) - cw, chromeH = (wr.Bottom - wr.Top) - ch;
+        if (chromeW < 0 || chromeW > 300 || chromeH < 0 || chromeH > 300) return; // child not re-fit yet
+
+        if (Math.Abs(cw - o.W) > 2 || Math.Abs(ch - o.H) > 2)
+        {
+            // chrome = window minus video child; grow the window so the video itself is WxH
+            var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+            GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), ref mi);
+            var (vx, vy) = PipGeometry.ComputeCorner(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom, o.W, o.H, o.Corner, o.Margin);
+            int tw = o.W + chromeW, th = o.H + chromeH, tx = vx - relL, ty = vy - relT;
+            if (tw <= 0 || th <= 0) return;
+            if (wr.Left != tx || wr.Top != ty || wr.Right - wr.Left != tw || wr.Bottom - wr.Top != th)
+            {
+                SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED);
+                _havePrev = false; // our own resize invalidates the measurement
+            }
+            return;
+        }
+
+        if (!HasRegion(h))
+            SetWindowRgn(h, CreateRectRgn(relL, relT, relL + cw, relT + ch), true); // system owns the HRGN
+    }
 
     public static string StatusPath => Path.Combine(Path.GetTempPath(), "vlc-pip-status.json");
 
@@ -110,6 +199,7 @@ public static class Native
         long ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         bool caption = (style & WS_CAPTION) == WS_CAPTION;
         bool topmost = (ex & WS_EX_TOPMOST) != 0;
-        return $$"""{"found":true,"hwnd":{{h.ToInt64()}},"x":{{r.Left}},"y":{{r.Top}},"w":{{r.Right - r.Left}},"h":{{r.Bottom - r.Top}},"caption":{{(caption ? "true" : "false")}},"topmost":{{(topmost ? "true" : "false")}},"inPip":{{(InPip() ? "true" : "false")}}}""";
+        bool minimal = HasRegion(h);
+        return $$"""{"found":true,"hwnd":{{h.ToInt64()}},"x":{{r.Left}},"y":{{r.Top}},"w":{{r.Right - r.Left}},"h":{{r.Bottom - r.Top}},"caption":{{(caption ? "true" : "false")}},"topmost":{{(topmost ? "true" : "false")}},"inPip":{{(InPip() ? "true" : "false")}},"minimal":{{(minimal ? "true" : "false")}}}""";
     }
 }

@@ -9,8 +9,9 @@ public static class Daemon
     const uint VK_P = 0x50, VK_F = 0x46;
     const uint WM_HOTKEY = 0x0312, WM_TIMER = 0x0113;
     const int WH_KEYBOARD_LL = 13, WH_MOUSE_LL = 14;
-    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104, WM_LBUTTONDOWN = 0x0201;
+    const int WM_KEYDOWN = 0x0100, WM_SYSKEYDOWN = 0x0104, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202;
     const uint GA_ROOT = 2;
+    const int SM_CXDOUBLECLK = 36, SM_CYDOUBLECLK = 37;
 
     // ---- P/Invoke ----
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint mods, uint vk);
@@ -27,6 +28,7 @@ public static class Daemon
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
     [DllImport("user32.dll")] static extern uint GetDoubleClickTime();
+    [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string? name);
 
     delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
@@ -42,8 +44,9 @@ public static class Daemon
     static HookProc? _kbProc, _mouseProc;
     static IntPtr _kbHook, _mouseHook;
     static PipOptions _options = new();
-    static uint _lastClickTime;
-    static POINT _lastClickPt;
+    static uint _lastAllowedClickTime;
+    static POINT _lastAllowedClickPt;
+    static bool _swallowNextUp;
 
     public static int Run(PipOptions o)
     {
@@ -66,7 +69,7 @@ public static class Daemon
             while (GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
             {
                 if (msg.message == WM_HOTKEY) Native.Toggle(_options);
-                else if (msg.message == WM_TIMER) PollRequest();
+                else if (msg.message == WM_TIMER) { PollRequest(); Native.MaintainRegion(_options); }
                 TranslateMessage(ref msg);
                 DispatchMessage(ref msg);
             }
@@ -116,19 +119,31 @@ public static class Daemon
         return CallNextHookEx(_kbHook, code, wParam, lParam);
     }
 
+    // Rate-limit clicks over the PiP window: swallow every button-down within double-click
+    // time+rect of the last ALLOWED button-down, so no two clicks the OS actually receives
+    // can ever pair into a synthesized WM_LBUTTONDBLCLK. (Swallowing only the 2nd click let
+    // a TRIPLE click through: the OS paired clicks 1+3 and VLC fullscreened.)
     static IntPtr MouseHook(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code >= 0 && (long)wParam == WM_LBUTTONDOWN)
+        if (code >= 0)
         {
-            var m = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-            if (Native.InPip() && OverPipWindow(m.pt))
+            if ((long)wParam == WM_LBUTTONDOWN)
             {
-                bool isSecond = m.time - _lastClickTime <= GetDoubleClickTime()
-                                && Math.Abs(m.pt.X - _lastClickPt.X) <= 4
-                                && Math.Abs(m.pt.Y - _lastClickPt.Y) <= 4;
-                _lastClickTime = m.time;
-                _lastClickPt = m.pt;
-                if (isSecond) { _lastClickTime = 0; return new IntPtr(1); } // swallow 2nd click -> no dblclick fullscreen
+                var m = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                if (Native.InPip() && OverPipWindow(m.pt))
+                {
+                    bool burst = m.time - _lastAllowedClickTime <= GetDoubleClickTime()
+                                 && Math.Abs(m.pt.X - _lastAllowedClickPt.X) <= GetSystemMetrics(SM_CXDOUBLECLK)
+                                 && Math.Abs(m.pt.Y - _lastAllowedClickPt.Y) <= GetSystemMetrics(SM_CYDOUBLECLK);
+                    if (burst) { _swallowNextUp = true; return new IntPtr(1); }
+                    _lastAllowedClickTime = m.time;
+                    _lastAllowedClickPt = m.pt;
+                }
+            }
+            else if ((long)wParam == WM_LBUTTONUP && _swallowNextUp)
+            {
+                _swallowNextUp = false; // keep the input stream paired: drop the up of a dropped down
+                return new IntPtr(1);
             }
         }
         return CallNextHookEx(_mouseHook, code, wParam, lParam);

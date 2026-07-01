@@ -12,7 +12,19 @@ function Check($name, $cond) { if ($cond) { Write-Host "PASS $name" } else { Wri
 
 Add-Type -Namespace Smoke -Name Keys -MemberDefinition @'
 [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 '@
+function ClickAt($x, $y, $times) {
+    [Smoke.Keys]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 100
+    for ($i = 0; $i -lt $times; $i++) {
+        [Smoke.Keys]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)  # LEFTDOWN
+        [Smoke.Keys]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)  # LEFTUP
+        Start-Sleep -Milliseconds 80                              # well inside double-click time
+    }
+    Start-Sleep -Milliseconds 700
+}
 function SendCtrlAltP {
     [Smoke.Keys]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero)      # Ctrl down
     [Smoke.Keys]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)      # Alt down
@@ -26,23 +38,37 @@ function SendCtrlAltP {
 Check "daemon alive" (Test-Path "$env:TEMP\vlc-pip-daemon.alive")
 
 if (-not (Get-Process vlc -ErrorAction SilentlyContinue)) {
-    Start-Process "C:\Program Files\VideoLAN\VLC\vlc.exe"; Start-Sleep 3
+    # screen:// = live playing video, so the video child window and minimal-look region exist
+    Start-Process "C:\Program Files\VideoLAN\VLC\vlc.exe" -ArgumentList 'screen://'; Start-Sleep 4
 }
 $before = Status
 Check "vlc found" $before.found
 Check "starts with caption" $before.caption
 
-Req "toggle"; $pip = Status
+Req "toggle"; Start-Sleep 1; $pip = Status
 Check "enter: borderless" (-not $pip.caption)
 Check "enter: topmost" $pip.topmost
-Check "enter: 480x270" ($pip.w -eq 480 -and $pip.h -eq 270)
+Check "enter: video width 480" ($pip.w -eq 480)
 Check "enter: inPip" $pip.inPip
+Check "enter: minimal look (region)" $pip.minimal
+
+# the two reported bugs: double-click and TRIPLE-click over the PiP video must not fullscreen/resize
+$cx = $pip.x + [int]($pip.w / 2); $cy = $pip.y + [int]($pip.h / 2)
+ClickAt $cx $cy 2; $afterDbl = Status
+Check "double-click: rect unchanged" ($afterDbl.x -eq $pip.x -and $afterDbl.w -eq $pip.w -and $afterDbl.h -eq $pip.h)
+Check "double-click: still inPip" $afterDbl.inPip
+ClickAt $cx $cy 3; $afterTri = Status
+Check "triple-click: rect unchanged" ($afterTri.x -eq $pip.x -and $afterTri.w -eq $pip.w -and $afterTri.h -eq $pip.h)
+Check "triple-click: still inPip" $afterTri.inPip
+ClickAt $cx $cy 5; $afterSpam = Status
+Check "click-spam: rect unchanged" ($afterSpam.x -eq $pip.x -and $afterSpam.w -eq $pip.w -and $afterSpam.h -eq $pip.h)
 
 Req "toggle"; $after = Status
 Check "exit: caption restored" $after.caption
 Check "exit: topmost cleared" (-not $after.topmost)
 Check "exit: exact rect" ($after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
 Check "exit: not inPip" (-not $after.inPip)
+Check "exit: region cleared" (-not $after.minimal)
 
 # global hotkey enters, request-file exits: both paths share one state
 SendCtrlAltP; $hot = Status
