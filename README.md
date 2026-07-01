@@ -34,7 +34,9 @@ Restart VLC afterwards, then use **View → PiP Mode** or **Ctrl+Alt+P**.
 
 ## Configure
 
-The daemon and one-shot modes accept `w= h= c=br|bl|tr|tl m=` (size, corner, margin), e.g. in the startup shortcut arguments: `daemon w=640 h=360 c=tr m=24`. Defaults: 480x270, bottom-right, margin 16.
+The daemon and one-shot modes accept `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look), e.g. in the startup shortcut arguments: `daemon w=640 h=360 c=tr m=24`. Defaults: 480x270, bottom-right, margin 16, `min=1`.
+
+**Minimal look:** while video is playing, the PiP window is clipped (`SetWindowRgn`) to just the video area - no menu bar, no control bar, like Ctrl+H - and the window is grown by the chrome height so the visible video is exactly `w x h`. Stops/starts of playback while in PiP are handled automatically (the daemon re-checks every 150 ms). Pass `min=0` to keep VLC's controls visible in PiP.
 
 CLI modes: `pip-helper.exe toggle|enter|exit|status|daemon|stop` (`status` also writes `%TEMP%\vlc-pip-status.json`).
 
@@ -53,5 +55,5 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 ## Notes
 
 - VLC 3.x only (3.0.23 verified). VLC 4.0 changes the video window architecture (DirectComposition) and needs re-validation.
-- While in PiP, the `F` key and double-click fullscreen are swallowed (only when VLC is focused / clicked); they work normally outside PiP.
+- While in PiP, the `F` key is swallowed and clicks over the PiP are rate-limited to one per double-click interval, so double/triple/spam clicks can never form a fullscreen double-click; everything works normally outside PiP.
 - If VLC is closed while in PiP, the stale state is detected and cleared on the next toggle.
