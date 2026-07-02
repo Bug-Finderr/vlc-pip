@@ -1,23 +1,24 @@
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
     VK_F, VK_P,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, IsWindow, PostQuitMessage, SetTimer, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT,
-    SM_CXDOUBLECLK, SM_CYDOUBLECLK, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_HOTKEY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SYSKEYDOWN, WM_TIMER,
+    GetSystemMetrics, IsWindow, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG,
+    MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use crate::options::PipOptions;
-use crate::{native, request, state};
+use crate::{geometry, native, request, state};
 
 // Read replica of the state file for the LL hooks: disk I/O inside a hook callback risks
 // the LowLevelHooksTimeout, after which Windows SILENTLY removes the hook and the
@@ -36,6 +37,31 @@ static SWALLOW_NEXT_UP: AtomicBool = AtomicBool::new(false);
 // crash deletes the heartbeat (v1's finally did) and pip.lua respawns immediately instead
 // of treating the dead daemon as alive for up to 15s
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
+
+// Drag gesture state. Hook-owned; the pump reads mode from wParam and validates the
+// generation from lParam, so a hook-side reset or rapid re-arm can never make a queued
+// message mix stale deltas with fresh statics.
+const DRAG_IDLE: u8 = 0;
+const DRAG_ARMED: u8 = 1;
+const DRAG_MOVING: u8 = 2;
+const DRAG_RESIZING: u8 = 3;
+const WM_APP_DRAG: u32 = WM_APP;
+const WM_APP_DRAGEND: u32 = WM_APP + 1;
+static DRAG_STATE: AtomicU8 = AtomicU8::new(DRAG_IDLE);
+static DRAG_ZONE: AtomicU8 = AtomicU8::new(0);
+static DRAG_GEN: AtomicU32 = AtomicU32::new(0);
+static DRAG_HWND: AtomicIsize = AtomicIsize::new(0);
+static DRAG_ORIGIN_X: AtomicI32 = AtomicI32::new(0);
+static DRAG_ORIGIN_Y: AtomicI32 = AtomicI32::new(0);
+static DRAG_START_L: AtomicI32 = AtomicI32::new(0);
+static DRAG_START_T: AtomicI32 = AtomicI32::new(0);
+static DRAG_START_R: AtomicI32 = AtomicI32::new(0);
+static DRAG_START_B: AtomicI32 = AtomicI32::new(0);
+static DRAG_VIS_W: AtomicI32 = AtomicI32::new(0);
+static DRAG_VIS_H: AtomicI32 = AtomicI32::new(0);
+static LATEST_X: AtomicI32 = AtomicI32::new(0);
+static LATEST_Y: AtomicI32 = AtomicI32::new(0);
+static MOVE_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
@@ -177,10 +203,55 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     LAST_ALLOWED_TIME.store(m.time, Relaxed);
                     LAST_ALLOWED_X.store(m.pt.x, Relaxed);
                     LAST_ALLOWED_Y.store(m.pt.y, Relaxed);
+                    // arm a potential drag; the zone (interior vs 16px band) picks move vs resize
+                    DRAG_GEN.fetch_add(1, Relaxed); // invalidates any queued message from a prior drag
+                    if let (Some(vis), Some(wr)) = (native::visible_rect(h), native::window_rect(h)) {
+                        DRAG_ZONE.store(geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h)) as u8, Relaxed);
+                        DRAG_VIS_W.store(vis.right - vis.left, Relaxed);
+                        DRAG_VIS_H.store(vis.bottom - vis.top, Relaxed);
+                        DRAG_START_L.store(wr.left, Relaxed);
+                        DRAG_START_T.store(wr.top, Relaxed);
+                        DRAG_START_R.store(wr.right, Relaxed);
+                        DRAG_START_B.store(wr.bottom, Relaxed);
+                        DRAG_ORIGIN_X.store(m.pt.x, Relaxed);
+                        DRAG_ORIGIN_Y.store(m.pt.y, Relaxed);
+                        DRAG_HWND.store(h, Relaxed);
+                        DRAG_STATE.store(DRAG_ARMED, Relaxed);
+                    } // either probe failed: window vanished under the click - stay idle
                 }
-            } else if wparam as u32 == WM_LBUTTONUP && SWALLOW_NEXT_UP.load(Relaxed) {
-                SWALLOW_NEXT_UP.store(false, Relaxed);
-                return 1; // keep the input stream paired: drop the up of a dropped down
+            } else if wparam as u32 == WM_MOUSEMOVE {
+                // hot path for ALL system mouse movement: one atomic load when idle
+                let mut st = DRAG_STATE.load(Relaxed);
+                if st != DRAG_IDLE {
+                    let m = &*(lparam as *const MSLLHOOKSTRUCT);
+                    if st == DRAG_ARMED
+                        && ((m.pt.x - DRAG_ORIGIN_X.load(Relaxed)).abs() > GetSystemMetrics(SM_CXDRAG)
+                            || (m.pt.y - DRAG_ORIGIN_Y.load(Relaxed)).abs() > GetSystemMetrics(SM_CYDRAG))
+                    {
+                        st = if DRAG_ZONE.load(Relaxed) == geometry::DragZone::Interior as u8 {
+                            DRAG_MOVING
+                        } else {
+                            DRAG_RESIZING
+                        };
+                        DRAG_STATE.store(st, Relaxed);
+                    }
+                    if st >= DRAG_MOVING {
+                        LATEST_X.store(m.pt.x, Relaxed);
+                        LATEST_Y.store(m.pt.y, Relaxed);
+                        if !MOVE_PENDING.swap(true, Relaxed) {
+                            PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAG, st as usize, DRAG_GEN.load(Relaxed) as isize);
+                        }
+                    }
+                }
+            } else if wparam as u32 == WM_LBUTTONUP {
+                let st = DRAG_STATE.swap(DRAG_IDLE, Relaxed);
+                if st >= DRAG_MOVING {
+                    PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, st as usize, DRAG_GEN.load(Relaxed) as isize);
+                }
+                if SWALLOW_NEXT_UP.load(Relaxed) {
+                    SWALLOW_NEXT_UP.store(false, Relaxed);
+                    return 1; // keep the input stream paired: drop the up of a dropped down
+                }
             }
         }
         CallNextHookEx(MOUSE_HOOK.load(Relaxed) as _, code, wparam, lparam)
