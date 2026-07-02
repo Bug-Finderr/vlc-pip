@@ -20,6 +20,13 @@ Restart VLC afterwards. Uninstall the same way with `scripts\uninstall.ps1`.
 
 The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look) as startup-shortcut arguments, e.g. `daemon w=640 h=360 c=tr`. Defaults: 480x270, bottom-right, margin 16, `min=1` - minimal look clips the PiP to just the video, no menu or control bar.
 
+## Controls
+
+- **Move**: drag anywhere inside the PiP - it stays where you drop it.
+- **Resize**: drag the outer 16px edge or corner band - aspect-locked, from 256px wide up to 80% of the screen's work area.
+- Size and nearest corner persist to `%APPDATA%\vlc\pip\config.txt` on release and are reused on the next PiP enter (startup arguments still win; delete the file to reset).
+- **Volume**: the mouse wheel already works over the PiP without focusing it (Windows' "scroll inactive windows" is on by default); Ctrl+wheel scales subtitles.
+
 ## Notes
 
 - Windows 10/11 x64; VLC 3.x only (3.0.23 verified). VLC 4.0 changes the video window architecture and needs re-validation.
