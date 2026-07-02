@@ -1,6 +1,6 @@
 # VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is a Rust rewrite targeting ~130KB with **identical observable behavior**. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (165KB) with **identical observable behavior**. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
@@ -57,24 +57,18 @@ VLC's Lua extension API **cannot** do any of this (no window-geometry API). So t
 
 ## 4. Architecture
 
+```mermaid
+flowchart TD
+    MENU["VLC View menu<br>pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle'<br>pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
+    HK["Ctrl+Alt+P global hotkey<br>WM_HOTKEY"] --> D
+    REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon<br>Rust, GUI subsystem, login-started<br>raw Win32 message pump"]
+    D -- "WM_TIMER 150 ms: heartbeat ~3 s,<br>consume request, refresh hook cache,<br>converge minimal-look region" --> D
+    D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
+    D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
+    WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.json in TEMP"]
 ```
-VLC View menu  (pip.lua, capabilities={"trigger"})
-      |  trigger()  ->  write %TEMP%\vlc-pip-request.txt = "toggle"     (pure Lua I/O, no flash)
-      v
-pip-helper.exe  (Rust, GUI subsystem, started at login; raw Win32 message pump)
-      |  WM_TIMER every 150 ms: heartbeat (~3 s), consume request file, refresh hook
-      |    cache, converge minimal-look region
-      |  WM_HOTKEY Ctrl+Alt+P            ->  Toggle
-      |  WH_KEYBOARD_LL  -> swallow F while in PiP & VLC focused (no fullscreen)
-      |  WH_MOUSE_LL     -> rate-limit clicks over the PiP: one allowed down per
-      |                     double-click interval (no synthesized dblclick possible)
-      v
-Win32: find player -> save state -> strip frame + topmost + corner   (Enter)
-                   -> restore styles + rect from saved state          (Exit)
 
-Single source of truth: a VALID %TEMP%\vlc-pip.json  <=>  currently in PiP.
-Toggle = InPip ? Exit : Enter.  Menu and hotkey BOTH call the same Toggle.
-```
+Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ---
 
@@ -233,7 +227,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~130KB).
+- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~165KB).
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
 - **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (21 end-to-end checks against live VLC; requires install first and VLC closed).
