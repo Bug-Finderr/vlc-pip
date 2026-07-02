@@ -1,0 +1,25 @@
+[package]
+name = "pip-helper"
+version = "2.0.0"
+edition = "2024"
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true          # explicit: with codegen-units=1 the default (false) performs NO LTO
+codegen-units = 1
+panic = "abort"
+strip = true
