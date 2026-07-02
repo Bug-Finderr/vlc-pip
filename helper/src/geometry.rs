@@ -72,6 +72,52 @@ pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
     }
 }
 
+/// New window rect for a live resize drag. The dominant relative delta drives the scale
+/// (edges have one axis by construction); the other dimension follows start's aspect,
+/// including at the clamps. i64 products: screen coords can make i32 overflow.
+pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) -> Rect {
+    use DragZone::*;
+    let (w0, h0) = (start.right - start.left, start.bottom - start.top);
+    if w0 < 1 || h0 < 1 {
+        return *start; // garbage measurement: no-op
+    }
+    let dw = match zone {
+        Right | TopRight | BottomRight => dx,
+        Left | TopLeft | BottomLeft => -dx,
+        _ => 0,
+    };
+    let dh = match zone {
+        Bottom | BottomLeft | BottomRight => dy,
+        Top | TopLeft | TopRight => -dy,
+        _ => 0,
+    };
+    let width_driven = i64::from(dw.abs()) * i64::from(h0) >= i64::from(dh.abs()) * i64::from(w0);
+    let min_w = 256;
+    let max_w = ((work.right - work.left) * 4 / 5)
+        .min((i64::from(work.bottom - work.top) * 4 / 5 * i64::from(w0) / i64::from(h0)) as i32)
+        .max(min_w); // tiny work area: clamp() must never see min > max
+    let raw_w = if width_driven { w0 + dw } else { (i64::from(h0 + dh) * i64::from(w0) / i64::from(h0)) as i32 };
+    let w = raw_w.clamp(min_w, max_w);
+    let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
+    let (left, right) = match zone {
+        Left | TopLeft | BottomLeft => (start.right - w, start.right),
+        Right | TopRight | BottomRight => (start.left, start.left + w),
+        _ => {
+            let l = start.left + (w0 - w) / 2;
+            (l, l + w)
+        }
+    };
+    let (top, bottom) = match zone {
+        Top | TopLeft | TopRight => (start.bottom - h, start.bottom),
+        Bottom | BottomLeft | BottomRight => (start.top, start.top + h),
+        _ => {
+            let t = start.top + (h0 - h) / 2;
+            (t, t + h)
+        }
+    };
+    Rect { left, top, right, bottom }
+}
+
 #[allow(clippy::too_many_arguments)] // 4 rect edges + size + corner + margin; keeps this module windows-sys-free
 pub fn compute_corner(
     work_left: i32, work_top: i32, work_right: i32, work_bottom: i32,
@@ -151,5 +197,64 @@ mod tests {
         for z in [Interior, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight] {
             assert_eq!(DragZone::from_u8(z as u8), z);
         }
+    }
+
+    const WORK: Rect = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
+
+    fn rc(l: i32, t: i32, r: i32, b: i32) -> Rect {
+        Rect { left: l, top: t, right: r, bottom: b }
+    }
+
+    #[test]
+    fn resize_br_grows_anchored_tl() {
+        // 480x270 at (100,100); +48/+27 is width-driven (48*270 >= 27*480): 528x297
+        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::BottomRight, 48, 27, &WORK), rc(100, 100, 628, 397));
+    }
+
+    #[test]
+    fn resize_tl_anchors_br() {
+        // dw = -dx = 48: 528x297 anchored at (right,bottom)
+        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::TopLeft, -48, 0, &WORK), rc(52, 73, 580, 370));
+    }
+
+    #[test]
+    fn resize_right_edge_keeps_vertical_center() {
+        // edge zone: dy ignored; 576x324, v-center 235 fixed
+        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::Right, 96, 500, &WORK), rc(100, 73, 676, 397));
+    }
+
+    #[test]
+    fn resize_top_edge_keeps_horizontal_center() {
+        // dh = -dy = 54 -> h-driven: 576x324, anchored bottom, h-center 340 fixed
+        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::Top, 500, -54, &WORK), rc(52, 46, 628, 370));
+    }
+
+    #[test]
+    fn resize_corner_height_driven_when_dy_dominates() {
+        // 100*480 > 30*270: h = 370 -> w = 370*480/270 = 657 -> h = 657*270/480 = 369
+        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 30, 100, &WORK), rc(0, 0, 657, 369));
+    }
+
+    #[test]
+    fn resize_clamps_min_256() {
+        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, -400, &WORK), rc(0, 0, 256, 144));
+    }
+
+    #[test]
+    fn resize_clamps_max_80pct_work() {
+        // max_w = min(1536, 832*480/270 = 1479) = 1479; h = 1479*270/480 = 831
+        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 5000, 0, &WORK), rc(0, 0, 1479, 831));
+    }
+
+    #[test]
+    fn resize_degenerate_start_is_noop() {
+        assert_eq!(plan_resize(&rc(0, 0, 0, 270), DragZone::BottomRight, 50, 50, &WORK), rc(0, 0, 0, 270));
+    }
+
+    #[test]
+    fn resize_tiny_work_area_clamp_does_not_panic() {
+        // 80% of 200 < 256: max floors to min - clamp() must not see min > max
+        let tiny = rc(0, 0, 200, 200);
+        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, 0, &tiny), rc(0, 0, 256, 144));
     }
 }
