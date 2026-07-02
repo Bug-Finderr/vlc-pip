@@ -157,7 +157,8 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // gather only - nothing is mutated in this block
+    // gather (plus a restore-from-iconic, which Windows makes losslessly reversible) -
+    // no geometry or styles are mutated in this block
     let (r, style, ex, pid) = unsafe {
         if IsIconic(hw(h)) != 0 {
             ShowWindow(hw(h), SW_RESTORE); // else the off-screen iconic rect gets saved as the restore state
