@@ -17,6 +17,7 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+[DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 '@
 }
 function ClickAt($x, $y, $times) {
@@ -39,12 +40,17 @@ function SendCtrlAltP {
     Start-Sleep -Milliseconds 600
 }
 function DragFrom($x1, $y1, $x2, $y2) {
+    # movement must go through injected mouse_event MOVEs: SetCursorPos repositions the
+    # cursor without generating input events, so WH_MOUSE_LL (the daemon) never sees it
+    $sw = [Smoke.Keys]::GetSystemMetrics(0); $sh = [Smoke.Keys]::GetSystemMetrics(1)
     [Smoke.Keys]::SetCursorPos($x1, $y1) | Out-Null
     Start-Sleep -Milliseconds 150
     [Smoke.Keys]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)   # LEFTDOWN
     Start-Sleep -Milliseconds 80
     for ($i = 1; $i -le 10; $i++) {
-        [Smoke.Keys]::SetCursorPos($x1 + [int](($x2 - $x1) * $i / 10), $y1 + [int](($y2 - $y1) * $i / 10)) | Out-Null
+        $px = $x1 + [int](($x2 - $x1) * $i / 10); $py = $y1 + [int](($y2 - $y1) * $i / 10)
+        # MOVE|ABSOLUTE (0x8001), coords normalized to 0..65535 over the primary screen
+        [Smoke.Keys]::mouse_event(0x8001, [uint32]($px * 65535 / ($sw - 1)), [uint32]($py * 65535 / ($sh - 1)), 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 25
     }
     [Smoke.Keys]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)   # LEFTUP
