@@ -157,7 +157,8 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    unsafe {
+    // gather only - nothing is mutated in this block
+    let (r, style, ex, pid) = unsafe {
         if IsIconic(hw(h)) != 0 {
             ShowWindow(hw(h), SW_RESTORE); // else the off-screen iconic rect gets saved as the restore state
         }
@@ -167,25 +168,28 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
         let mut pid = 0u32;
         GetWindowThreadProcessId(hw(h), &mut pid);
-        let s = PipState {
-            hwnd: h as i64,
-            x: r.left,
-            y: r.top,
-            w: r.right - r.left,
-            h: r.bottom - r.top,
-            style: style as i64,
-            ex_style: ex as i64,
-            target_w: o.w,
-            target_h: o.h,
-            corner: o.corner.to_string(),
-            margin: o.margin,
-            min: o.min,
-            pid,
-        };
-        if state::save(&s, &state::state_path()).is_err() {
-            return false; // nothing mutated yet: fail cleanly, retry next toggle
-        }
-
+        (r, style, ex, pid)
+    };
+    // save state FIRST, so a failed save can never leave a mutated window with no restore data
+    let s = PipState {
+        hwnd: h as i64,
+        x: r.left,
+        y: r.top,
+        w: r.right - r.left,
+        h: r.bottom - r.top,
+        style: style as i64,
+        ex_style: ex as i64,
+        target_w: o.w,
+        target_h: o.h,
+        corner: o.corner.to_string(),
+        margin: o.margin,
+        min: o.min,
+        pid,
+    };
+    if state::save(&s, &state::state_path()).is_err() {
+        return false; // nothing mutated yet: fail cleanly, retry next toggle
+    }
+    unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect
         SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
@@ -365,40 +369,123 @@ pub fn maintain_region(t: &mut RegionTracker) {
             return; // wait until VLC's re-layout settles
         }
 
-        let rel_l = cr.left - wr.left;
-        let rel_t = cr.top - wr.top;
-        let cw = cr.right - cr.left;
-        let ch = cr.bottom - cr.top;
-        let chrome_w = (wr.right - wr.left) - cw;
-        let chrome_h = (wr.bottom - wr.top) - ch;
-        // real chrome (menu + controller + borders) is well under 300px; negative or huge
-        // delta = stale rects from VLC's async re-layout
-        if !(0..=300).contains(&chrome_w) || !(0..=300).contains(&chrome_h) {
-            return;
-        }
-
-        if (cw - s.target_w).abs() > 2 || (ch - s.target_h).abs() > 2 {
-            // chrome = window minus video child; grow the window so the video itself is WxH
-            let wa = work_area(h);
-            let (vx, vy) = geometry::compute_corner(
-                wa.left, wa.top, wa.right, wa.bottom, s.target_w, s.target_h, &s.corner, s.margin,
-            );
-            let (tw, th, tx, ty) = (s.target_w + chrome_w, s.target_h + chrome_h, vx - rel_l, vy - rel_t);
-            if tw <= 0 || th <= 0 {
-                return;
-            }
-            if wr.left != tx || wr.top != ty || wr.right - wr.left != tw || wr.bottom - wr.top != th {
-                SetWindowPos(hw(h), HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED);
+        match plan_region(&wr, &cr, s.target_w, s.target_h, &s.corner, s.margin, || work_area(h)) {
+            RegionPlan::Skip => {}
+            RegionPlan::Resize { x, y, w, h: th } => {
+                SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED);
                 t.have_prev = false; // our own resize invalidates the measurement
             }
-            return;
-        }
-
-        if !has_region(h) {
-            let rgn = CreateRectRgn(rel_l, rel_t, rel_l + cw, rel_t + ch);
-            if SetWindowRgn(hw(h), rgn, 1) == 0 {
-                DeleteObject(rgn); // system owns rgn only on success
+            RegionPlan::Clip { left, top, right, bottom } => {
+                if !has_region(h) {
+                    let rgn = CreateRectRgn(left, top, right, bottom);
+                    if SetWindowRgn(hw(h), rgn, 1) == 0 {
+                        DeleteObject(rgn); // system owns rgn only on success
+                    }
+                }
             }
         }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum RegionPlan {
+    Skip,
+    Resize { x: i32, y: i32, w: i32, h: i32 },
+    Clip { left: i32, top: i32, right: i32, bottom: i32 },
+}
+
+// Pure planning math for the minimal-look convergence (v1 gotcha #8 lives here): given a
+// STABLE window+child measurement, either resize the window (child not at target size:
+// grow by chrome so the video itself is exactly target WxH, positioned so the CHILD lands
+// at the corner) or clip to the child area. `work` is lazy - it costs two user32 calls
+// and only the resize branch needs it.
+fn plan_region(
+    wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: &str, margin: i32,
+    work: impl FnOnce() -> RECT,
+) -> RegionPlan {
+    let rel_l = cr.left - wr.left;
+    let rel_t = cr.top - wr.top;
+    let cw = cr.right - cr.left;
+    let ch = cr.bottom - cr.top;
+    let chrome_w = (wr.right - wr.left) - cw;
+    let chrome_h = (wr.bottom - wr.top) - ch;
+    // real chrome (menu + controller + borders) is well under 300px; negative or huge
+    // delta = stale rects from VLC's async re-layout
+    if !(0..=300).contains(&chrome_w) || !(0..=300).contains(&chrome_h) {
+        return RegionPlan::Skip;
+    }
+    if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
+        let wa = work();
+        let (vx, vy) =
+            geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, target_w, target_h, corner, margin);
+        let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
+        if tw <= 0 || th <= 0 {
+            return RegionPlan::Skip; // hostile/garbage state values: do nothing
+        }
+        if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
+            return RegionPlan::Skip; // defensive (v1 parity): never issue a no-op SetWindowPos
+        }
+        return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };
+    }
+    RegionPlan::Clip { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
+        RECT { left: l, top: t, right: r, bottom: b }
+    }
+
+    fn work() -> RECT {
+        rect(0, 0, 1920, 1040) // 480x270 br margin 16 => video corner at (1424, 754)
+    }
+
+    #[test]
+    fn negative_chrome_is_stale_measurement() {
+        // child wider than its own window = mid-relayout garbage
+        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, "br", 16, work);
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn chrome_clamp_boundary_300_ok_301_stale() {
+        // child at target, chrome_h exactly 300 -> clip; 301 -> stale
+        let cr = rect(0, 0, 480, 270);
+        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, "br", 16, work);
+        assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
+        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, "br", 16, work);
+        assert_eq!(stale, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn two_px_tolerance_clips_three_resizes() {
+        // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
+        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, "br", 16, work);
+        assert!(matches!(at_2, RegionPlan::Clip { .. }));
+        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, "br", 16, work);
+        assert!(matches!(at_3, RegionPlan::Resize { .. }));
+    }
+
+    #[test]
+    fn resize_grows_by_chrome_and_lands_child_at_corner() {
+        // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
+        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, "br", 16, work);
+        // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
+        assert_eq!(plan, RegionPlan::Resize { x: 1414, y: 724, w: 500, h: 405 });
+    }
+
+    #[test]
+    fn clip_is_child_rect_relative_to_window() {
+        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, "br", 16, work);
+        assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
+    }
+
+    #[test]
+    fn hostile_negative_target_skips() {
+        // a hand-crafted state file with TargetW=-500 must not produce a resize
+        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, "br", 16, work);
+        assert_eq!(plan, RegionPlan::Skip);
     }
 }

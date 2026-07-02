@@ -43,8 +43,11 @@ fn run() -> i32 {
         }
         "status" => {
             let s = native::status();
-            println!("{s}"); // visible only when stdout is a real pipe (GUI subsystem)
-            let _ = std::fs::write(native::status_path(), &s); // the reliable channel for scripts
+            let _ = std::fs::write(native::status_path(), &s); // the reliable channel for scripts: written FIRST
+            // stdout is best-effort on a GUI-subsystem exe, and println! PANICS on a broken
+            // pipe (only NULL handles are forgiven) - status must always exit 0 with the file written
+            use std::io::Write;
+            let _ = writeln!(std::io::stdout(), "{s}");
             0
         }
         "daemon" => daemon::run(&o),

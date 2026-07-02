@@ -61,10 +61,10 @@ pub fn run(o: &PipOptions) -> i32 {
         // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves
         // one that would kill us on the first tick); only "stop", so a queued toggle survives
         let rp = request::request_path();
-        if let Ok(c) = std::fs::read_to_string(&rp) {
-            if c.trim() == "stop" {
-                let _ = std::fs::remove_file(&rp);
-            }
+        if let Ok(c) = std::fs::read_to_string(&rp)
+            && c.trim() == "stop"
+        {
+            let _ = std::fs::remove_file(&rp);
         }
 
         let hot = RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0;

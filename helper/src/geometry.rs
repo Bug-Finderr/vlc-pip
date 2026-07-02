@@ -1,3 +1,4 @@
+#[allow(clippy::too_many_arguments)] // 4 rect edges + size + corner + margin; keeps this module windows-sys-free
 pub fn compute_corner(
     work_left: i32, work_top: i32, work_right: i32, work_bottom: i32,
     w: i32, h: i32, corner: &str, margin: i32,

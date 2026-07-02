@@ -13,8 +13,8 @@ impl Default for PipOptions {
 }
 
 /// The state-file writer does not JSON-escape strings, so corners are pinned to the
-/// four legal values at the boundary (unknown = "br", matching compute_corner's fallback).
-pub fn normalize_corner(v: &str) -> &'static str {
+/// four legal values at the boundary (unknown = "br", matching `compute_corner`'s fallback).
+fn normalize_corner(v: &str) -> &'static str {
     match v {
         "tl" => "tl",
         "tr" => "tr",

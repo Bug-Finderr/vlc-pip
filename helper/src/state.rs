@@ -132,7 +132,7 @@ fn i32_field(b: &[u8], i: &mut usize) -> Option<i32> {
     i32::try_from(int(b, i)?).ok()
 }
 
-pub fn parse_state(s: &str) -> Option<PipState> {
+fn parse_state(s: &str) -> Option<PipState> {
     let b = s.as_bytes();
     let mut i = 0usize;
     eat(b, &mut i, b'{')?;
@@ -200,7 +200,7 @@ pub fn parse_state(s: &str) -> Option<PipState> {
 
 // Byte-identical to the C# System.Text.Json source-gen output. Corner is NOT escaped:
 // options::normalize_corner pins it to {br,bl,tr,tl} before it ever reaches a PipState.
-pub fn write_state(s: &PipState) -> String {
+fn write_state(s: &PipState) -> String {
     format!(
         r#"{{"Hwnd":{},"X":{},"Y":{},"W":{},"H":{},"Style":{},"ExStyle":{},"TargetW":{},"TargetH":{},"Corner":"{}","Margin":{},"Min":{},"Pid":{}}}"#,
         s.hwnd, s.x, s.y, s.w, s.h, s.style, s.ex_style,

@@ -60,4 +60,5 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 - If VLC is closed while in PiP, the stale state is detected and cleared on the next toggle (the saved owner PID also guards against Windows recycling the window handle to another app).
 - If the Windows profile path contains characters not representable in the system ANSI codepage, the Lua trigger (View menu) cannot resolve %TEMP%/%APPDATA% and reports an error in VLC's log; the Ctrl+Alt+P hotkey is handled entirely inside the daemon and is unaffected.
 - Unhandled helper crashes leave a trace at `%TEMP%\vlc-pip-crash.txt`.
+- Security model: the helper's IPC files live in per-user `%TEMP%`, so any process running as the same user can drive the helper (toggle/reshape same-user windows). That grants nothing such a process couldn't already do directly via Win32 - but for that reason, never run the daemon elevated.
 - The release exe is not code-signed: on first run of a downloaded copy, SmartScreen shows "Windows protected your PC" - click "More info" then "Run anyway" (or build from source with `scripts\install.ps1`).
