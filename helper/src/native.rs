@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn, MonitorFromRect,
-    MonitorFromWindow, SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
-    NULLREGION,
+    ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn,
+    MonitorFromRect, MonitorFromWindow, SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL, NULLREGION,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowLongPtrW, GetWindowRect,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
     HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
@@ -249,6 +249,38 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
     ok
 }
 
+// Client-relative chrome around the video child (menu above, controller below). These are
+// Qt widgets in the CLIENT area, so the offsets survive the border strip and predict where
+// the child lands after the PiP resize. None when not playing or mid-relayout garbage.
+fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
+    let child = find_video_child(h);
+    if child == 0 {
+        return None;
+    }
+    unsafe {
+        let mut client: RECT = std::mem::zeroed();
+        let mut origin = POINT { x: 0, y: 0 };
+        let mut cr: RECT = std::mem::zeroed();
+        if GetClientRect(hw(h), &mut client) == 0
+            || ClientToScreen(hw(h), &mut origin) == 0
+            || GetWindowRect(hw(child), &mut cr) == 0
+        {
+            return None;
+        }
+        let l = cr.left - origin.x;
+        let t = cr.top - origin.y;
+        let r = (origin.x + client.right) - cr.right;
+        let b = (origin.y + client.bottom) - cr.bottom;
+        // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
+        // stale measurement, and a rect the converger would forever Skip must never land
+        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=300).contains(&(l + r)) && (0..=300).contains(&(t + b)) {
+            Some((l, t, r, b))
+        } else {
+            None
+        }
+    }
+}
+
 pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
@@ -286,14 +318,29 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if state::save(&s, &state::state_path()).is_err() {
         return false; // nothing mutated yet: fail cleanly, retry next toggle
     }
+    // measured pre-strip: with it, enter lands in ONE SetWindowPos at the final
+    // chrome-compensated rect with the region applied immediately - no visible
+    // grow-then-clip pass from the converger (it only verifies afterwards)
+    let chrome = if o.min { client_chrome(h) } else { None };
     unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect
         SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
         let wa = work_area(h);
-        let (x, y) = geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, o.w, o.h, o.corner, o.margin);
-        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, o.w, o.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
-        if !ok {
+        let (vx, vy) = geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, o.w, o.h, o.corner, o.margin);
+        let (x, y, tw, th) = match chrome {
+            Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
+            None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
+        };
+        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
+        if ok {
+            if let Some((cl, ct, _, _)) = chrome {
+                let rgn = CreateRectRgn(cl, ct, cl + o.w, ct + o.h);
+                if SetWindowRgn(hw(h), rgn, 1) == 0 {
+                    DeleteObject(rgn); // system owns rgn only on success
+                }
+            }
+        } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
             SetWindowLongPtrW(hw(h), GWL_STYLE, style);
             state::try_delete(&state::state_path());
