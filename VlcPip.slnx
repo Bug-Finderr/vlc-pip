@@ -1,8 +1,0 @@
-<Solution>
-  <Folder Name="/helper.Tests/">
-    <Project Path="helper.Tests/PipHelper.Tests.csproj" />
-  </Folder>
-  <Folder Name="/helper/">
-    <Project Path="helper/PipHelper.csproj" />
-  </Folder>
-</Solution>
