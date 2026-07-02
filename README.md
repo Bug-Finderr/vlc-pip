@@ -1,6 +1,6 @@
 # VLC PiP
 
-Turns the **real** VLC 3.0.x window into a borderless, always-on-top, corner-parked mini window ("PiP"), toggled from **VLC's View menu** ("PiP Mode") or **Ctrl+Alt+P**, and restores VLC to its exact original size, position, borders, and z-order on exit.
+Turns the **real** VLC 3.0.x window into a borderless, always-on-top, corner-parked mini window ("PiP"), toggled from **VLC's View menu** ("PiP Mode") or **Ctrl+Alt+P**, and restores VLC to its exact original size, position, and borders, clearing always-on-top on exit.
 
 No mirroring, no second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and every VLC feature/shortcut keeps working inside the PiP.
 
@@ -56,4 +56,6 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 
 - VLC 3.x only (3.0.23 verified). VLC 4.0 changes the video window architecture (DirectComposition) and needs re-validation.
 - While in PiP, the `F` key is swallowed and clicks over the PiP are rate-limited to one per double-click interval, so double/triple/spam clicks can never form a fullscreen double-click; everything works normally outside PiP.
-- If VLC is closed while in PiP, the stale state is detected and cleared on the next toggle.
+- If VLC is closed while in PiP, the stale state is detected and cleared on the next toggle (the saved owner PID also guards against Windows recycling the window handle to another app).
+- If the Windows profile path contains characters not representable in the system ANSI codepage, the Lua trigger (View menu) cannot resolve %TEMP%/%APPDATA% and reports an error in VLC's log; the Ctrl+Alt+P hotkey is handled entirely inside the daemon and is unaffected.
+- Unhandled helper crashes leave a trace at `%TEMP%\vlc-pip-crash.txt`.

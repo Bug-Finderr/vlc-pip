@@ -27,6 +27,7 @@ public static class Daemon
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetDoubleClickTime();
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string? name);
@@ -48,15 +49,35 @@ public static class Daemon
     static POINT _lastAllowedClickPt;
     static bool _swallowNextUp;
 
+    // Read replica of the state file for the LL hooks: disk I/O inside a hook callback risks
+    // the LowLevelHooksTimeout, after which Windows SILENTLY removes the hook and the
+    // fullscreen-block guarantee dies with no error. Refreshed only on the pump thread; hook
+    // callbacks dispatch on that same thread, so no synchronization is needed. Read-only by
+    // design: stale-file DELETION stays in Native (toggle paths + MaintainRegion tick).
+    static PipState? _pipState;
+    static void RefreshState()
+    {
+        var s = PipState.Load(PipState.StatePath);
+        _pipState = s is not null && IsWindow(new IntPtr(s.Hwnd)) ? s : null;
+    }
+
     public static int Run(PipOptions o)
     {
         _options = o;
         using var mutex = new Mutex(initiallyOwned: true, "VlcPipDaemon", out var isNew);
         if (!isNew) return 0; // already running
 
-        File.WriteAllText(AlivePath, Environment.ProcessId.ToString());
-        RegisterHotKey(IntPtr.Zero, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P); // WM_HOTKEY -> thread queue
-        SetTimer(IntPtr.Zero, UIntPtr.Zero, 150, IntPtr.Zero);                      // WM_TIMER  -> thread queue
+        // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves one
+        // that would kill us on the first tick); only "stop", so a queued user toggle survives
+        try
+        {
+            if (File.Exists(RequestFile.RequestPath) && File.ReadAllText(RequestFile.RequestPath).Trim() == "stop")
+                File.Delete(RequestFile.RequestPath);
+        }
+        catch { }
+
+        bool hot = RegisterHotKey(IntPtr.Zero, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P); // WM_HOTKEY -> thread queue
+        var timer = SetTimer(IntPtr.Zero, UIntPtr.Zero, 150, IntPtr.Zero);                     // WM_TIMER  -> thread queue
 
         _kbProc = KeyboardHook;
         _mouseProc = MouseHook;
@@ -64,12 +85,40 @@ public static class Daemon
         _kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, _kbProc, mod, 0);
         _mouseHook = SetWindowsHookExW(WH_MOUSE_LL, _mouseProc, mod, 0);
 
+        // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
+        // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
+        // diagnostics readable with Get-Content when debugging.
+        long lastBeat = 0;
+        void Beat()
+        {
+            lastBeat = Environment.TickCount64;
+            try
+            {
+                File.WriteAllText(AlivePath,
+                    $"{DateTimeOffset.UtcNow.ToUnixTimeSeconds()} pid={Environment.ProcessId} hotkey={(hot ? 1 : 0)} timer={(timer != UIntPtr.Zero ? 1 : 0)} kb={(_kbHook != IntPtr.Zero ? 1 : 0)} mouse={(_mouseHook != IntPtr.Zero ? 1 : 0)}");
+            }
+            catch { } // transient lock (AV/indexer): retry next beat; NEVER let this kill the pump
+        }
+        Beat();
+        RefreshState(); // daemon restarted while already in PiP must be guarded from the first message
+
         try
         {
             while (GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
             {
-                if (msg.message == WM_HOTKEY) Native.Toggle(_options);
-                else if (msg.message == WM_TIMER) { PollRequest(); Native.MaintainRegion(_options); }
+                try
+                {
+                    if (msg.message == WM_HOTKEY) { Native.Toggle(_options); RefreshState(); }
+                    else if (msg.message == WM_TIMER)
+                    {
+                        if (Environment.TickCount64 - lastBeat > 3000) Beat();
+                        PollRequest();
+                        RefreshState();
+                        Native.MaintainRegion();
+                    }
+                }
+                catch (IOException) { }             // transient %TEMP% lock: same retry-next-tick
+                catch (UnauthorizedAccessException) { } // semantics RequestFile.Consume already has
                 TranslateMessage(ref msg);
                 DispatchMessage(ref msg);
             }
@@ -97,15 +146,14 @@ public static class Daemon
 
     static bool VlcIsForeground()
     {
-        var s = PipState.Load(PipState.StatePath);
+        var s = _pipState;
         return s is not null && GetForegroundWindow() == new IntPtr(s.Hwnd);
     }
 
     static bool OverPipWindow(POINT pt)
     {
-        var s = PipState.Load(PipState.StatePath);
-        if (s is null) return false;
-        return GetAncestor(WindowFromPoint(pt), GA_ROOT) == new IntPtr(s.Hwnd);
+        var s = _pipState;
+        return s is not null && GetAncestor(WindowFromPoint(pt), GA_ROOT) == new IntPtr(s.Hwnd);
     }
 
     static IntPtr KeyboardHook(int code, IntPtr wParam, IntPtr lParam)
@@ -113,7 +161,7 @@ public static class Daemon
         if (code >= 0 && ((long)wParam == WM_KEYDOWN || (long)wParam == WM_SYSKEYDOWN))
         {
             var k = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-            if (k.vkCode == VK_F && Native.InPip() && VlcIsForeground())
+            if (k.vkCode == VK_F && _pipState is not null && VlcIsForeground())
                 return new IntPtr(1); // swallow F -> no fullscreen while in PiP
         }
         return CallNextHookEx(_kbHook, code, wParam, lParam);
@@ -130,7 +178,7 @@ public static class Daemon
             if ((long)wParam == WM_LBUTTONDOWN)
             {
                 var m = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
-                if (Native.InPip() && OverPipWindow(m.pt))
+                if (_pipState is not null && OverPipWindow(m.pt))
                 {
                     bool burst = m.time - _lastAllowedClickTime <= GetDoubleClickTime()
                                  && Math.Abs(m.pt.X - _lastAllowedClickPt.X) <= GetSystemMetrics(SM_CXDOUBLECLK)

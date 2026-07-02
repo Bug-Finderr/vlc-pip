@@ -9,18 +9,21 @@ public static class Native
 {
     // ---- constants ----
     const int GWL_STYLE = -16, GWL_EXSTYLE = -20;
-    const long WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
+    const long WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000, WS_MAXIMIZE = 0x01000000;
     const uint SWP_FRAMECHANGED = 0x0020, SWP_SHOWWINDOW = 0x0040;
     static readonly IntPtr HWND_TOPMOST = new(-1), HWND_NOTOPMOST = new(-2);
     const long WS_EX_TOPMOST = 0x00000008;
     const uint MONITOR_DEFAULTTONEAREST = 2;
+    const int SW_RESTORE = 9;
 
     // ---- P/Invoke ----
     delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-    [DllImport("user32.dll")] static extern IntPtr SetProcessDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder sb, int max);
     [DllImport("user32.dll")] static extern long GetWindowLongPtrW(IntPtr h, int idx);
@@ -44,7 +47,9 @@ public static class Native
     // ---- find the VLC player window ----
     public static IntPtr FindPlayer()
     {
-        var vlcPids = System.Diagnostics.Process.GetProcessesByName("vlc").Select(p => (uint)p.Id).ToHashSet();
+        var procs = System.Diagnostics.Process.GetProcessesByName("vlc");
+        var vlcPids = procs.Select(p => (uint)p.Id).ToHashSet();
+        foreach (var p in procs) p.Dispose();
         if (vlcPids.Count == 0) return IntPtr.Zero;
 
         IntPtr best = IntPtr.Zero, biggest = IntPtr.Zero;
@@ -67,27 +72,47 @@ public static class Native
         return best != IntPtr.Zero ? best : biggest;
     }
 
+    // Windows recycles HWND values: after VLC dies, the saved handle can belong to another
+    // app. IsWindow alone would pass and we'd reshape a foreign window; require the owner
+    // PID recorded at Enter. Old state files (Pid=0) read as stale by design.
+    static bool OwnsState(PipState s)
+    {
+        var h = new IntPtr(s.Hwnd);
+        if (!IsWindow(h)) return false;
+        GetWindowThreadProcessId(h, out var p);
+        return p != 0 && p == s.Pid;
+    }
+
+    static void TryDeleteState() { try { File.Delete(PipState.StatePath); } catch { } } // transient lock: next caller retries
+
     public static bool InPip()
     {
         var s = PipState.Load(PipState.StatePath);
         if (s is null) return false;
-        if (!IsWindow(new IntPtr(s.Hwnd))) { File.Delete(PipState.StatePath); return false; } // stale
+        if (!OwnsState(s)) { TryDeleteState(); return false; } // stale: VLC gone or hwnd recycled
         return true;
     }
 
     public static bool Enter(IntPtr h, PipOptions o)
     {
         if (h == IntPtr.Zero || InPip()) return false;
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE); // else the off-screen iconic rect gets saved as the restore state
         GetWindowRect(h, out var r);
         long style = GetWindowLongPtrW(h, GWL_STYLE);
         long ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        PipState.Save(new PipState(h.ToInt64(), r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top, style, ex), PipState.StatePath);
+        GetWindowThreadProcessId(h, out var pid);
+        PipState.Save(new PipState(h.ToInt64(), r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top, style, ex,
+            o.W, o.H, o.Corner, o.Margin, o.Min, pid), PipState.StatePath);
 
-        SetWindowLongPtrW(h, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME));
+        // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
+        // snap the PiP back to Qt's normal placement rect
+        SetWindowLongPtrW(h, GWL_STYLE, style & ~(WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE));
         var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
         GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), ref mi);
         var (x, y) = PipGeometry.ComputeCorner(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom, o.W, o.H, o.Corner, o.Margin);
-        return SetWindowPos(h, HWND_TOPMOST, x, y, o.W, o.H, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        var ok = SetWindowPos(h, HWND_TOPMOST, x, y, o.W, o.H, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        if (!ok) { SetWindowLongPtrW(h, GWL_STYLE, style); TryDeleteState(); } // e.g. UIPI vs elevated VLC: don't claim in-PiP
+        return ok;
     }
 
     public static bool Exit()
@@ -95,12 +120,14 @@ public static class Native
         var s = PipState.Load(PipState.StatePath);
         if (s is null) return false;
         var h = new IntPtr(s.Hwnd);
-        if (!IsWindow(h)) { File.Delete(PipState.StatePath); return false; } // VLC gone; clear stale state
+        if (!OwnsState(s)) { TryDeleteState(); return false; } // stale: VLC gone or hwnd recycled
         SetWindowRgn(h, IntPtr.Zero, true); // drop the minimal-look clip before restoring
         SetWindowLongPtrW(h, GWL_STYLE, s.Style);
         SetWindowLongPtrW(h, GWL_EXSTYLE, s.ExStyle);
-        var ok = SetWindowPos(h, HWND_NOTOPMOST, s.X, s.Y, s.W, s.H, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        File.Delete(PipState.StatePath);
+        // WS_EX_TOPMOST only changes via SetWindowPos: honor the user's own always-on-top
+        var ok = SetWindowPos(h, (s.ExStyle & WS_EX_TOPMOST) != 0 ? HWND_TOPMOST : HWND_NOTOPMOST,
+                              s.X, s.Y, s.W, s.H, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        if (ok || !IsWindow(h)) TryDeleteState(); // live-window restore failure keeps state so the next toggle retries
         return ok;
     }
 
@@ -137,17 +164,19 @@ public static class Native
 
     /// Converging per-tick maintenance, called by the daemon timer (and one-shot enter):
     /// no video -> clear region; video child not yet at target size -> resize window with
-    /// chrome compensation; child at target -> clip window to the video area.
+    /// chrome compensation; child at target -> clip window to the video area. Geometry
+    /// targets come from the state file (recorded at Enter), so daemon and one-shot agree.
     /// Acts only on STABLE frames (window+child rects unchanged since the previous tick):
     /// VLC re-fits the child asynchronously after our resize, so a fresh measurement can be
     /// stale and yield garbage chrome (observed: perpetual resize thrash in the daemon).
-    public static void MaintainRegion(PipOptions o)
+    public static void MaintainRegion()
     {
-        if (!o.Min) return;
         var s = PipState.Load(PipState.StatePath);
         if (s is null) { _havePrev = false; return; }
         var h = new IntPtr(s.Hwnd);
-        if (!IsWindow(h)) { _havePrev = false; return; }
+        if (!OwnsState(s)) { _havePrev = false; TryDeleteState(); return; } // stale: VLC gone or hwnd recycled
+        if (!s.Min) return;
+        var o = new PipOptions(s.TargetW, s.TargetH, s.Corner, s.Margin, s.Min);
 
         var child = FindVideoChild(h);
         if (child == IntPtr.Zero)
@@ -166,7 +195,7 @@ public static class Native
         int relL = cr.Left - wr.Left, relT = cr.Top - wr.Top;
         int cw = cr.Right - cr.Left, ch = cr.Bottom - cr.Top;
         int chromeW = (wr.Right - wr.Left) - cw, chromeH = (wr.Bottom - wr.Top) - ch;
-        if (chromeW < 0 || chromeW > 300 || chromeH < 0 || chromeH > 300) return; // child not re-fit yet
+        if (chromeW < 0 || chromeW > 300 || chromeH < 0 || chromeH > 300) return; // child not re-fit yet: real chrome (menu + controller + borders) is well under 300px; negative or huge delta = stale rects from VLC's async re-layout
 
         if (Math.Abs(cw - o.W) > 2 || Math.Abs(ch - o.H) > 2)
         {
@@ -185,7 +214,10 @@ public static class Native
         }
 
         if (!HasRegion(h))
-            SetWindowRgn(h, CreateRectRgn(relL, relT, relL + cw, relT + ch), true); // system owns the HRGN
+        {
+            var rgn = CreateRectRgn(relL, relT, relL + cw, relT + ch);
+            if (SetWindowRgn(h, rgn, true) == 0) DeleteObject(rgn); // system owns rgn only on success
+        }
     }
 
     public static string StatusPath => Path.Combine(Path.GetTempPath(), "vlc-pip-status.json");

@@ -8,6 +8,9 @@ local ok, err = pcall(function()
         .. " capability=" .. tostring(d.capabilities and d.capabilities[1]))
     trigger()
     vlc.msg.info("pip-test: trigger ok")
+    -- trigger() wrote a real "toggle" request; eat it so a running daemon does not
+    -- surprise-PiP whatever other VLC window the user has open after we quit
+    os.remove((os.getenv("TEMP") or os.getenv("TMP") or ".") .. "\\vlc-pip-request.txt")
 end)
 if not ok then vlc.msg.err("pip-test: FAILED " .. tostring(err)) end
 vlc.misc.quit()

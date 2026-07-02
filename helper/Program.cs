@@ -4,6 +4,20 @@ public static class Program
 {
     public static int Main(string[] args)
     {
+        try
+        {
+            return Run(args);
+        }
+        catch (Exception ex)
+        {
+            // GUI-subsystem exe: an unhandled exception is otherwise invisible
+            try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "vlc-pip-crash.txt"), ex.ToString()); } catch { }
+            return 3;
+        }
+    }
+
+    static int Run(string[] args)
+    {
         Native.EnableDpiAwareness();
         var mode = args.Length > 0 ? args[0].ToLowerInvariant() : "toggle";
         var o = ParseOptions(args.Skip(1));
@@ -26,8 +40,8 @@ public static class Program
     // one-shot (no daemon ticks): converge the minimal-look region here, sleeps are harmless
     static int OneShot(bool ok, PipOptions o)
     {
-        if (ok && Native.InPip())
-            for (var i = 0; i < 6; i++) { Thread.Sleep(150); Native.MaintainRegion(o); } // debounce needs ~4 ticks: measure, resize, measure, region
+        if (ok && o.Min && Native.InPip()) // min=0 makes MaintainRegion a no-op: skip the pure sleep
+            for (var i = 0; i < 6; i++) { Thread.Sleep(150); Native.MaintainRegion(); } // debounce needs ~4 ticks: measure, resize, measure, region
         return ok ? 0 : 1;
     }
 
