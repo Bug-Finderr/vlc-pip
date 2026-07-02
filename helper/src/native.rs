@@ -1,9 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn, MonitorFromWindow,
-    SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULLREGION,
+    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn, MonitorFromRect,
+    MonitorFromWindow, SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    NULLREGION,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
@@ -120,7 +122,7 @@ pub fn find_player() -> isize {
 // Windows recycles HWND values: after VLC dies, the saved handle can belong to another
 // app. IsWindow alone would pass and we'd reshape a foreign window; require the owner
 // PID recorded at Enter. Old state files (Pid=0) read as stale by design.
-fn owns_state(s: &PipState) -> bool {
+pub(crate) fn owns_state(s: &PipState) -> bool {
     unsafe {
         if IsWindow(hw(s.hwnd as isize)) == 0 {
             return false;
@@ -131,15 +133,12 @@ fn owns_state(s: &PipState) -> bool {
     }
 }
 
+// Read-only: a stale state here may be a pending reopen-heal record whose lifecycle
+// belongs to maintain_region - a mere status query must not destroy it.
 pub fn in_pip() -> bool {
-    let path = state::state_path();
-    match state::load(&path) {
+    match state::load(&state::state_path()) {
         None => false,
-        Some(s) if !owns_state(&s) => {
-            state::try_delete(&path); // stale: VLC gone or hwnd recycled
-            false
-        }
-        Some(_) => true,
+        Some(s) => owns_state(&s),
     }
 }
 
@@ -202,10 +201,21 @@ pub fn drag_move(h: isize, r: &geometry::Rect) {
     }
 }
 
-pub fn drag_resize(h: isize, r: &geometry::Rect) {
+pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) {
     unsafe {
-        if has_region(h) {
-            SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // mini chrome shows; release re-clips
+        match clip {
+            Some(c) => {
+                // keep the minimal look live through the resize (region is window-relative)
+                let rgn = CreateRectRgn(c.left, c.top, c.right, c.bottom);
+                if SetWindowRgn(hw(h), rgn, 1) == 0 {
+                    DeleteObject(rgn); // system owns rgn only on success
+                }
+            }
+            None => {
+                if has_region(h) {
+                    SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // no clip context: show it all
+                }
+            }
         }
         SetWindowPos(
             hw(h), std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top,
@@ -357,6 +367,20 @@ fn has_region(h: isize) -> bool {
     }
 }
 
+fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let mut b: RECT = std::mem::zeroed();
+        let r = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
+            Some((b.left, b.top, b.right, b.bottom))
+        } else {
+            None
+        };
+        DeleteObject(probe);
+        r
+    }
+}
+
 // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area -------------
 // VLC 3.x hosts the video in a native child whose class starts with "VLC video main".
 
@@ -426,9 +450,10 @@ pub fn maintain_region(t: &mut RegionTracker) {
     };
     if !owns_state(&s) {
         t.have_prev = false;
-        state::try_delete(&path); // stale: VLC gone or hwnd recycled
+        heal_reopened(&s, &path);
         return;
     }
+    HEAL_TRIES.store(0, Relaxed); // a live owned PiP ends any interrupted heal cleanly
     if !s.min {
         return;
     }
@@ -463,7 +488,9 @@ pub fn maintain_region(t: &mut RegionTracker) {
                 t.have_prev = false; // our own resize invalidates the measurement
             }
             RegionPlan::Clip { left, top, right, bottom } => {
-                if !has_region(h) {
+                // verify the box, not just presence: a live-clipped resize drag leaves an
+                // approximate region that convergence must confirm or correct
+                if region_box(h) != Some((left, top, right, bottom)) {
                     let rgn = CreateRectRgn(left, top, right, bottom);
                     if SetWindowRgn(hw(h), rgn, 1) == 0 {
                         DeleteObject(rgn); // system owns rgn only on success
@@ -471,6 +498,57 @@ pub fn maintain_region(t: &mut RegionTracker) {
                 }
             }
         }
+    }
+}
+
+// Bounded so an unhealable window (e.g. elevated VLC: UIPI silently swallows the
+// SetWindowPos) is never fought forever: ~6s of ticks, then the record is dropped.
+static HEAL_TRIES: AtomicU32 = AtomicU32::new(0);
+
+/// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
+/// so its next launch opens full-size at the PiP origin, overflowing the screen. The
+/// stale state file is kept as a pending-restore record; when a new player window
+/// appears, apply the saved pre-PiP rect and delete the record only once the rect is
+/// observed to stick - VLC's own startup positioning must not win the race.
+fn heal_reopened(s: &PipState, path: &Path) {
+    if s.w <= 0 || s.h <= 0 || s.pid == 0 {
+        state::try_delete(path); // legacy (Pid=0) or garbage record: nothing safely healable
+        return;
+    }
+    let pids = vlc_pids();
+    if pids.contains(&s.pid) {
+        state::try_delete(path); // the recorded VLC still runs (hwnd recycled): not a close-in-PiP
+        return;
+    }
+    if pids.is_empty() {
+        return; // VLC not back yet: keep waiting (one process snapshot per tick)
+    }
+    let h2 = find_player();
+    if h2 == 0 {
+        return;
+    }
+    unsafe {
+        if IsIconic(hw(h2)) != 0 {
+            return; // heal the normal placement once restored - the iconic rect is garbage
+        }
+        let target = RECT { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
+        if MonitorFromRect(&target, MONITOR_DEFAULTTONULL).is_null() {
+            state::try_delete(path); // monitor layout changed: VLC's own placement is saner
+            return;
+        }
+        let mut wr: RECT = std::mem::zeroed();
+        GetWindowRect(hw(h2), &mut wr);
+        if same_rect(&wr, &target) {
+            HEAL_TRIES.store(0, Relaxed);
+            state::try_delete(path); // heal landed and stuck: done
+            return;
+        }
+        if HEAL_TRIES.fetch_add(1, Relaxed) >= 40 {
+            HEAL_TRIES.store(0, Relaxed);
+            state::try_delete(path); // not converging: stop fighting the window
+            return;
+        }
+        SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 

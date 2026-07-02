@@ -43,7 +43,8 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 - **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
 - **The heartbeat file** (`vlc-pip-daemon.alive`, epoch + arming flags, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
-- **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms with the cursor origin and zone: interior = free move, outer 16px band of the visible rect = aspect-locked resize. Movement past the system drag threshold activates; the hook stores the latest position and posts one coalesced `WM_APP` message carrying a generation counter (a rapid release-and-repress can't mix stale deltas with re-armed state). The pump computes and applies the rect asynchronously, skips region convergence while a drag is live, and on release finalizes from its own computed rect (the async `SetWindowPos` may not have landed in VLC yet), persisting size + nearest corner to `config.txt`. See [SPEC.md](SPEC.md) §12 for the full contract.
+- **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms with the cursor origin and zone: interior = free move, outer 16px band of the visible rect = aspect-locked resize. Movement past the system drag threshold activates; the hook stores the latest position and posts one coalesced `WM_APP` message carrying a generation counter (a rapid release-and-repress can't mix stale deltas with re-armed state). The pump computes and applies the rect asynchronously, re-clips the minimal look live through a resize (start chrome offsets at the new size; convergence verifies the exact box after release), skips region convergence while a drag is live, and on release finalizes from its own computed rect (the async `SetWindowPos` may not have landed in VLC yet), persisting size + nearest corner to `config.txt`. See [SPEC.md](SPEC.md) §12 for the full contract.
+- **Close-in-PiP heal (v2.1).** VLC that closes while in PiP saves the PiP geometry as its own, so its next launch would open full-size at the PiP origin. The daemon keeps the stale state as a pending-restore record and, when a new player window appears, applies the saved pre-PiP rect - deleting the state only once the rect sticks.
 
 ## Layout
 
@@ -61,7 +62,7 @@ Source: `helper/src/` - `main.rs` (CLI + panic-to-crash-file), `daemon.rs` (pump
 
 ```powershell
 cargo test --manifest-path helper\Cargo.toml          # 41 unit tests (pure logic)
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # 31 end-to-end checks against live VLC
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # 34 end-to-end checks against live VLC
 ```
 
 The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the v1-earned gotchas that must not regress.

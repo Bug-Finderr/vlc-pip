@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, IsWindow, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
+    GetSystemMetrics, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG,
     MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
     WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
@@ -56,8 +56,11 @@ static DRAG_START_L: AtomicI32 = AtomicI32::new(0);
 static DRAG_START_T: AtomicI32 = AtomicI32::new(0);
 static DRAG_START_R: AtomicI32 = AtomicI32::new(0);
 static DRAG_START_B: AtomicI32 = AtomicI32::new(0);
+static DRAG_VIS_L: AtomicI32 = AtomicI32::new(0);
+static DRAG_VIS_T: AtomicI32 = AtomicI32::new(0);
 static DRAG_VIS_W: AtomicI32 = AtomicI32::new(0);
 static DRAG_VIS_H: AtomicI32 = AtomicI32::new(0);
+static DRAG_HAD_RGN: AtomicBool = AtomicBool::new(false);
 static LATEST_X: AtomicI32 = AtomicI32::new(0);
 static LATEST_Y: AtomicI32 = AtomicI32::new(0);
 static MOVE_PENDING: AtomicBool = AtomicBool::new(false);
@@ -71,9 +74,12 @@ pub fn owns_alive_file() -> bool {
 }
 
 fn refresh_state() {
+    // full owner-PID guard (not just IsWindow): pending heal records keep stale states
+    // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
+    // on a foreign window
     let h = state::load(&state::state_path())
+        .filter(native::owns_state)
         .map(|s| s.hwnd as isize)
-        .filter(|&h| unsafe { IsWindow(h as HWND) } != 0)
         .unwrap_or(0);
     CACHED_HWND.store(h, Relaxed);
 }
@@ -167,7 +173,22 @@ pub fn run(argv: &[String]) -> i32 {
                         }
                     };
                     if resizing {
-                        native::drag_resize(h, &target);
+                        // live minimal look: clip to where the video will sit, using the
+                        // per-side chrome measured at drag start; convergence verifies the
+                        // exact box after release
+                        let clip = if DRAG_HAD_RGN.load(Relaxed) {
+                            let (vl, vt) = (DRAG_VIS_L.load(Relaxed), DRAG_VIS_T.load(Relaxed));
+                            let c = geometry::Rect {
+                                left: vl - start.left,
+                                top: vt - start.top,
+                                right: (target.right - target.left) - (start.right - (vl + DRAG_VIS_W.load(Relaxed))),
+                                bottom: (target.bottom - target.top) - (start.bottom - (vt + DRAG_VIS_H.load(Relaxed))),
+                            };
+                            (c.right > c.left && c.bottom > c.top).then_some(c)
+                        } else {
+                            None
+                        };
+                        native::drag_resize(h, &target, clip.as_ref());
                     } else {
                         native::drag_move(h, &target);
                     }
@@ -254,8 +275,11 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     DRAG_GEN.fetch_add(1, Relaxed); // invalidates any queued message from a prior drag
                     if let (Some(vis), Some(wr)) = (native::visible_rect(h), native::window_rect(h)) {
                         DRAG_ZONE.store(geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h)) as u8, Relaxed);
+                        DRAG_VIS_L.store(vis.left, Relaxed);
+                        DRAG_VIS_T.store(vis.top, Relaxed);
                         DRAG_VIS_W.store(vis.right - vis.left, Relaxed);
                         DRAG_VIS_H.store(vis.bottom - vis.top, Relaxed);
+                        DRAG_HAD_RGN.store(vis != wr, Relaxed); // visible == window means no region to preserve
                         DRAG_START_L.store(wr.left, Relaxed);
                         DRAG_START_T.store(wr.top, Relaxed);
                         DRAG_START_R.store(wr.right, Relaxed);

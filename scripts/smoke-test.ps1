@@ -123,6 +123,7 @@ try {
     $rs = Status
     Check "drag-resize (right edge): width shrank" ($rs.w -lt $moved.w)
     Check "drag-resize: still inPip" $rs.inPip
+    Check "drag-resize: minimal look held" $rs.minimal
 
     WheelAt ($rs.x + [int]($rs.w / 2)) ($rs.y + [int]($rs.h / 2))
     $wheeled = Status
@@ -146,6 +147,26 @@ try {
     Req "toggle"; $s = Status
     Check "interleaved hotkey+menu do not desync" (-not $s.inPip)
     Check "interleave restored exact rect" ($s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
+
+    # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
+    # (a kill persists nothing and would pass even without the heal - verified), so the
+    # reopened window would sit full-size at the PiP origin; the daemon heals it back to
+    # the pre-PiP rect and deletes the state once the rect sticks. The state-file check
+    # runs via Test-Path BEFORE Status so nothing races the heal's own delete.
+    $pre = Status
+    Req "enter"; Start-Sleep 1
+    $vlcProc.CloseMainWindow() | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
+    Start-Sleep 1
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    Start-Sleep 8   # startup + heal ticks (apply, verify sticks, delete state)
+    Check "reopen heal: state cleared by the heal" (-not (Test-Path "$env:TEMP\vlc-pip.json"))
+    $healed = Status
+    Check "reopen heal: pre-pip position" ([math]::Abs($healed.x - $pre.x) -le 8 -and [math]::Abs($healed.y - $pre.y) -le 8)
+    # clean-close this instance too so VLC persists the HEALED geometry (the finally
+    # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
+    $vlcProc.CloseMainWindow() | Out-Null
+    $vlcProc.WaitForExit(8000) | Out-Null
 }
 finally {
     # restore the window if the test aborted mid-PiP (no-op otherwise, works without the daemon)
