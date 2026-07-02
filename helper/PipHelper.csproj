@@ -7,8 +7,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <!-- safe only with source-generated JSON (PipJsonContext): reflection JSON breaks under trimming -->
-    <PublishTrimmed>true</PublishTrimmed>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- NativeAOT (needs MSVC link.exe + vswhere on PATH to build; see install.ps1). Trimming
+         is implied, so JSON must stay source-generated (PipJsonContext). -->
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <EventSourceSupport>false</EventSourceSupport>
+    <MetricsSupport>false</MetricsSupport>
+    <DebuggerSupport>false</DebuggerSupport>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <!-- StackTraceSupport stays ON: vlc-pip-crash.txt is the only diagnostics channel -->
   </PropertyGroup>
 </Project>

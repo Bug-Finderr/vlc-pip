@@ -154,7 +154,7 @@ Runtime files in `%TEMP%`: `vlc-pip.json` (state), `vlc-pip-request.txt` (menu�
 ---
 
 ## 9. Build / install / uninstall
-- **Build:** `dotnet publish helper -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true` (the .NET 10 SDK is user-scoped at `%LOCALAPPDATA%\Microsoft\dotnet` on this machine - set `DOTNET_ROOT` + PATH).
+- **Build:** `dotnet publish helper -c Release -r win-x64` (NativeAOT via csproj; needs MSVC link.exe with the VS Installer dir on PATH for vswhere. The .NET 10 SDK is user-scoped at `%LOCALAPPDATA%\Microsoft\dotnet` on this machine - set `DOTNET_ROOT` + PATH).
 - **Install:** copy `pip.lua` → extensions folder; copy `pip-helper.exe` → `%APPDATA%\vlc\pip\`; create the `shell:startup` shortcut to `pip-helper.exe daemon`; start the daemon; restart VLC.
 - **Uninstall:** `pip-helper.exe stop`; delete the 3 install paths and the `%TEMP%\vlc-pip*` files.
 

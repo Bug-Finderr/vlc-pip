@@ -3,8 +3,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $dotnet = "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe"
 if (-not (Test-Path $dotnet)) { $dotnet = "dotnet" }
+# NativeAOT: the ILCompiler locates MSVC link.exe via a bare vswhere.exe call, so the VS
+# Installer dir must be on PATH (build machine only; the produced exe has no dependencies)
+$vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+if (Test-Path "$vsInstaller\vswhere.exe") { $env:PATH = "$vsInstaller;$env:PATH" }
 
-& $dotnet publish "$root\helper" -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o "$root\publish"
+& $dotnet publish "$root\helper" -c Release -r win-x64 -o "$root\publish"
 if ($LASTEXITCODE -ne 0) { throw "publish failed" }
 
 $pipDir = "$env:APPDATA\vlc\pip"

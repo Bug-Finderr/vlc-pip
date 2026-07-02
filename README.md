@@ -22,7 +22,7 @@ State: %TEMP%\vlc-pip.json exists <=> in PiP (single source of truth for menu + 
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-Builds a self-contained `pip-helper.exe` (needs the .NET 10 SDK to build; the installed exe has no runtime dependency), then installs:
+Builds a NativeAOT `pip-helper.exe` (~2.3MB, no runtime dependency; building needs the .NET 10 SDK plus the MSVC C++ toolchain from Visual Studio or Build Tools), then installs:
 
 | Path | What |
 |---|---|
@@ -59,3 +59,4 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
 - If VLC is closed while in PiP, the stale state is detected and cleared on the next toggle (the saved owner PID also guards against Windows recycling the window handle to another app).
 - If the Windows profile path contains characters not representable in the system ANSI codepage, the Lua trigger (View menu) cannot resolve %TEMP%/%APPDATA% and reports an error in VLC's log; the Ctrl+Alt+P hotkey is handled entirely inside the daemon and is unaffected.
 - Unhandled helper crashes leave a trace at `%TEMP%\vlc-pip-crash.txt`.
+- The release exe is not code-signed: on first run of a downloaded copy, SmartScreen shows "Windows protected your PC" - click "More info" then "Run anyway" (or build from source with `scripts\install.ps1`).
