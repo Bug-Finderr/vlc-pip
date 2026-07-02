@@ -2,20 +2,21 @@ use std::path::PathBuf;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetWindowRgn, MonitorFromWindow, SetWindowRgn,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn, MonitorFromWindow,
+    SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULLREGION,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
+    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
     WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
@@ -144,13 +145,98 @@ pub fn in_pip() -> bool {
 
 // ---- enter / exit / toggle ----------------------------------------------------------
 
-fn work_area(h: isize) -> RECT {
+pub fn work_area(h: isize) -> RECT {
     unsafe {
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
         mi.rcWork
     }
+}
+
+// ---- drag gesture primitives (hook arms, pump applies) --------------------------------
+
+pub fn window_rect(h: isize) -> Option<geometry::Rect> {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        if GetWindowRect(hw(h), &mut r) == 0 {
+            return None;
+        }
+        Some(geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
+    }
+}
+
+// The minimal-look region clips painting AND hit-testing, so the gesture surface is the
+// region box (offset to screen coords by the window origin), not the window rect.
+pub fn visible_rect(h: isize) -> Option<geometry::Rect> {
+    let wr = window_rect(h)?;
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let mut b: RECT = std::mem::zeroed();
+        let vis = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
+            geometry::Rect {
+                left: wr.left + b.left,
+                top: wr.top + b.top,
+                right: wr.left + b.right,
+                bottom: wr.top + b.bottom,
+            }
+        } else {
+            wr
+        };
+        DeleteObject(probe);
+        Some(vis)
+    }
+}
+
+pub fn drag_band(h: isize) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hw(h)) };
+    if dpi == 0 { 16 } else { 16 * dpi as i32 / 96 }
+}
+
+pub fn drag_move(h: isize, r: &geometry::Rect) {
+    unsafe {
+        SetWindowPos(
+            hw(h), std::ptr::null_mut(), r.left, r.top, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
+pub fn drag_resize(h: isize, r: &geometry::Rect) {
+    unsafe {
+        if has_region(h) {
+            SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // mini chrome shows; release re-clips
+        }
+        SetWindowPos(
+            hw(h), std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
+/// Adopt the drag result: Corner = nearest as of `fin`; a resize also adopts the new video
+/// size (`fin` minus chrome measured at drag start). State first, then config. Finalizes
+/// from the CALLER's computed rect - the final async SetWindowPos may not have landed in
+/// VLC yet, so a fresh GetWindowRect would read stale.
+pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h: i32) -> bool {
+    let path = state::state_path();
+    let Some(mut s) = state::load(&path) else { return false };
+    if !owns_state(&s) {
+        return false; // VLC died mid-drag: next tick's maintain_region cleans up
+    }
+    let wa = work_area(s.hwnd as isize);
+    let work = geometry::Rect { left: wa.left, top: wa.top, right: wa.right, bottom: wa.bottom };
+    s.corner = geometry::nearest_corner(fin, &work).to_string();
+    if resized {
+        let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
+        if tw > 0 && th > 0 {
+            s.target_w = tw;
+            s.target_h = th;
+        }
+    }
+    let ok = state::save(&s, &path).is_ok();
+    crate::options::save_config(s.target_w, s.target_h, &s.corner);
+    ok
 }
 
 pub fn enter(h: isize, o: &PipOptions) -> bool {
