@@ -22,7 +22,7 @@ State: %TEMP%\vlc-pip.json exists <=> in PiP (single source of truth for menu + 
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
 
-Builds a NativeAOT `pip-helper.exe` (~2.3MB, no runtime dependency; building needs the .NET 10 SDK plus the MSVC C++ toolchain from Visual Studio or Build Tools), then installs:
+Builds `pip-helper.exe` with Rust (~160KB, zero runtime dependency; building needs the Rust MSVC toolchain from https://rustup.rs plus Visual Studio Build Tools), then installs:
 
 | Path | What |
 |---|---|
@@ -43,6 +43,7 @@ CLI modes: `pip-helper.exe toggle|enter|exit|status|daemon|stop` (`status` also 
 ## Test
 
 ```powershell
+cargo test --manifest-path helper\Cargo.toml
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
 ```
 

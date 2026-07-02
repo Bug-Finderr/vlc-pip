@@ -1,15 +1,9 @@
 # Installs VLC PiP: helper exe, Lua extension, login autostart, and starts the daemon.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$dotnet = "$env:LOCALAPPDATA\Microsoft\dotnet\dotnet.exe"
-if (-not (Test-Path $dotnet)) { $dotnet = "dotnet" }
-# NativeAOT: the ILCompiler locates MSVC link.exe via a bare vswhere.exe call, so the VS
-# Installer dir must be on PATH (build machine only; the produced exe has no dependencies)
-$vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
-if (Test-Path "$vsInstaller\vswhere.exe") { $env:PATH = "$vsInstaller;$env:PATH" }
-
-& $dotnet publish "$root\helper" -c Release -r win-x64 -o "$root\publish"
-if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "cargo not found - install Rust (MSVC toolchain) from https://rustup.rs" }
+cargo build --release --manifest-path "$root\helper\Cargo.toml"
+if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 $pipDir = "$env:APPDATA\vlc\pip"
 $extDir = "$env:APPDATA\vlc\lua\extensions"
@@ -28,7 +22,7 @@ if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
 # a stale request (e.g. an unconsumed "stop") would make the fresh daemon act on it within 150ms
 Remove-Item "$env:TEMP\vlc-pip-request.txt" -Force -ErrorAction SilentlyContinue
 
-Copy-Item "$root\publish\pip-helper.exe" "$pipDir\pip-helper.exe" -Force
+Copy-Item "$root\helper\target\release\pip-helper.exe" "$pipDir\pip-helper.exe" -Force
 Copy-Item "$root\extension\pip.lua" "$extDir\pip.lua" -Force   # ONLY the .lua in extensions
 
 # login autostart shortcut (Explorer-launched = GUI, no console)
