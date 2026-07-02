@@ -35,3 +35,6 @@ Issues are welcome. PRs are not accepted and will be auto-closed.
 
 - [MIT LICENSE](LICENSE).
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - how it works.
+- [SPEC.md](docs/SPEC.md) - the full behavioral contract, plus the gotchas that each cost a real bug.
+- [docs/plans/](docs/plans/) - implementation trails for the v1 C# build and the v2 Rust rewrite.
+- v1 (C#/.NET NativeAOT, 2.26MB vs v2's 165KB) is preserved at [v1.0.0](https://github.com/Bug-Finderr/vlc-pip/releases/tag/v1.0.0).
