@@ -4,7 +4,7 @@
 function descriptor()
     return {
         title = "PiP Mode",
-        version = "1.0.0",
+        version = "2.0.0",
         author = "Sudharsan",
         shortdesc = "PiP Mode",
         description = "Toggle VLC into a borderless always-on-top corner window",
