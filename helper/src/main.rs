@@ -51,7 +51,7 @@ fn run() -> i32 {
             let _ = writeln!(std::io::stdout(), "{s}");
             0
         }
-        "daemon" => daemon::run(&o),
+        "daemon" => daemon::run(tail), // per-gesture re-read: the daemon must see its own config writes
         "stop" => {
             if std::fs::write(request::request_path(), "stop").is_ok() { 0 } else { 1 }
         }

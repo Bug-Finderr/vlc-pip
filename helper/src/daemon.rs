@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -17,8 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYDOWN, WM_TIMER,
 };
 
-use crate::options::PipOptions;
-use crate::{geometry, native, request, state};
+use crate::{geometry, native, options, request, state};
 
 // Read replica of the state file for the LL hooks: disk I/O inside a hook callback risks
 // the LowLevelHooksTimeout, after which Windows SILENTLY removes the hook and the
@@ -63,6 +62,10 @@ static LATEST_X: AtomicI32 = AtomicI32::new(0);
 static LATEST_Y: AtomicI32 = AtomicI32::new(0);
 static MOVE_PENDING: AtomicBool = AtomicBool::new(false);
 
+fn geo(r: &RECT) -> geometry::Rect {
+    geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
 pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
@@ -75,7 +78,7 @@ fn refresh_state() {
     CACHED_HWND.store(h, Relaxed);
 }
 
-pub fn run(o: &PipOptions) -> i32 {
+pub fn run(argv: &[String]) -> i32 {
     unsafe {
         // single instance; second instance exits 0 before touching any file
         let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
@@ -124,15 +127,59 @@ pub fn run(o: &PipOptions) -> i32 {
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                native::toggle(o);
+                native::toggle(&options::effective(argv));
                 refresh_state();
             } else if msg.message == WM_TIMER {
                 if last_beat.elapsed() > Duration::from_millis(3000) {
                     beat(&mut last_beat);
                 }
-                poll_request(o);
+                poll_request(argv);
                 refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
-                native::maintain_region(&mut tracker);
+                if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
+                    tracker = native::RegionTracker::new(); // gestures own the window while dragging
+                } else {
+                    native::maintain_region(&mut tracker);
+                }
+            } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
+                MOVE_PENDING.store(false, Relaxed);
+                let h = DRAG_HWND.load(Relaxed);
+                // generation guard: a rapid release-and-repress re-arms the statics; a message
+                // from the previous drag must not apply its stale delta to the fresh state
+                if h != 0 && h == CACHED_HWND.load(Relaxed) && msg.lParam == DRAG_GEN.load(Relaxed) as isize {
+                    let start = geometry::Rect {
+                        left: DRAG_START_L.load(Relaxed),
+                        top: DRAG_START_T.load(Relaxed),
+                        right: DRAG_START_R.load(Relaxed),
+                        bottom: DRAG_START_B.load(Relaxed),
+                    };
+                    let dx = LATEST_X.load(Relaxed) - DRAG_ORIGIN_X.load(Relaxed);
+                    let dy = LATEST_Y.load(Relaxed) - DRAG_ORIGIN_Y.load(Relaxed);
+                    let resizing = msg.wParam == DRAG_RESIZING as usize;
+                    let target = if resizing {
+                        let zone = geometry::DragZone::from_u8(DRAG_ZONE.load(Relaxed));
+                        geometry::plan_resize(&start, zone, dx, dy, &geo(&native::work_area(h)))
+                    } else {
+                        geometry::Rect {
+                            left: start.left + dx,
+                            top: start.top + dy,
+                            right: start.right + dx,
+                            bottom: start.bottom + dy,
+                        }
+                    };
+                    if resizing {
+                        native::drag_resize(h, &target);
+                    } else {
+                        native::drag_move(h, &target);
+                    }
+                    if msg.message == WM_APP_DRAGEND {
+                        // finalize from OUR computed rect: the async SetWindowPos above has
+                        // not landed in VLC yet, so a fresh GetWindowRect would be stale
+                        let chrome_w = (start.right - start.left) - DRAG_VIS_W.load(Relaxed);
+                        let chrome_h = (start.bottom - start.top) - DRAG_VIS_H.load(Relaxed);
+                        native::finish_drag(&target, resizing, chrome_w, chrome_h);
+                        tracker = native::RegionTracker::new(); // convergence re-clips from a clean debounce
+                    }
+                }
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -153,13 +200,13 @@ pub fn run(o: &PipOptions) -> i32 {
     0
 }
 
-fn poll_request(o: &PipOptions) {
+fn poll_request(argv: &[String]) {
     match request::consume(&request::request_path()).as_deref() {
         Some("toggle") => {
-            native::toggle(o);
+            native::toggle(&options::effective(argv));
         }
         Some("enter") => {
-            native::enter(native::find_player(), o);
+            native::enter(native::find_player(), &options::effective(argv));
         }
         Some("exit") => {
             native::exit_pip();
