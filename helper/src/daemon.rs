@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU8, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -65,10 +65,6 @@ static LATEST_X: AtomicI32 = AtomicI32::new(0);
 static LATEST_Y: AtomicI32 = AtomicI32::new(0);
 static MOVE_PENDING: AtomicBool = AtomicBool::new(false);
 
-fn geo(r: &RECT) -> geometry::Rect {
-    geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
-}
-
 pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
@@ -79,8 +75,7 @@ fn refresh_state() {
     // on a foreign window
     let h = state::load(&state::state_path())
         .filter(native::owns_state)
-        .map(|s| s.hwnd as isize)
-        .unwrap_or(0);
+        .map_or(0, |s| s.hwnd as isize);
     CACHED_HWND.store(h, Relaxed);
 }
 
@@ -111,7 +106,7 @@ pub fn run(argv: &[String]) -> i32 {
         // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
         // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
         // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
-        let alive = std::env::temp_dir().join("vlc-pip-daemon.alive");
+        let alive = state::temp_path("vlc-pip-daemon.alive");
         let beat = |last: &mut Instant| {
             *last = Instant::now();
             let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -129,20 +124,20 @@ pub fn run(argv: &[String]) -> i32 {
         beat(&mut last_beat);
         refresh_state(); // a daemon restarted while already in PiP must be guarded from the first message
 
-        let mut tracker = native::RegionTracker::new();
+        let mut tracker = native::RegionTracker::default();
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
                 native::toggle(&options::effective(argv));
                 refresh_state();
             } else if msg.message == WM_TIMER {
-                if last_beat.elapsed() > Duration::from_millis(3000) {
+                if last_beat.elapsed() > Duration::from_secs(3) {
                     beat(&mut last_beat);
                 }
                 poll_request(argv);
                 refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
                 if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
-                    tracker = native::RegionTracker::new(); // gestures own the window while dragging
+                    tracker = native::RegionTracker::default(); // gestures own the window while dragging
                 } else {
                     native::maintain_region(&mut tracker);
                 }
@@ -163,7 +158,7 @@ pub fn run(argv: &[String]) -> i32 {
                     let resizing = msg.wParam == DRAG_RESIZING as usize;
                     let target = if resizing {
                         let zone = geometry::DragZone::from_u8(DRAG_ZONE.load(Relaxed));
-                        geometry::plan_resize(&start, zone, dx, dy, &geo(&native::work_area(h)))
+                        geometry::plan_resize(&start, zone, dx, dy, &native::work_area(h))
                     } else {
                         geometry::Rect {
                             left: start.left + dx,
@@ -198,7 +193,7 @@ pub fn run(argv: &[String]) -> i32 {
                         let chrome_w = (start.right - start.left) - DRAG_VIS_W.load(Relaxed);
                         let chrome_h = (start.bottom - start.top) - DRAG_VIS_H.load(Relaxed);
                         native::finish_drag(&target, resizing, chrome_w, chrome_h);
-                        tracker = native::RegionTracker::new(); // convergence re-clips from a clean debounce
+                        tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
                     }
                 }
             }
