@@ -86,6 +86,3 @@ pub fn save_config(w: i32, h: i32, corner: &str) {
     p.push(r"\config.txt");
     let _ = std::fs::write(p, format!("w={w} h={h} c={corner}"));
 }
-
-#[cfg(test)]
-mod tests;

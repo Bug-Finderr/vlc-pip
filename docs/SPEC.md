@@ -93,7 +93,7 @@ helper/src/state.rs          PipState + hand-rolled JSON parse/write, load/save/
 helper/src/request.rs        request-file consume
 helper/src/native.rs         Win32: find_player, enter/exit/toggle, maintain_region, status
 helper/src/daemon.rs         pump, hotkey, timer, LL hooks, heartbeat, single-instance mutex
-helper/src/<mod>/tests.rs    unit tests as cfg(test) child modules (private access, no pub changes)
+helper/src/tests.rs          all unit tests, one cfg(test) file (tested internals are pub(crate))
 ```
 
 Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed from the remaining args; `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):

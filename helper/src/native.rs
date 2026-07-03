@@ -579,7 +579,7 @@ fn heal_reopened(s: &PipState, path: &Path) {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum RegionPlan {
+pub(crate) enum RegionPlan {
     Skip,
     Resize { x: i32, y: i32, w: i32, h: i32 },
     Clip { left: i32, top: i32, right: i32, bottom: i32 },
@@ -590,7 +590,7 @@ enum RegionPlan {
 // grow by chrome so the video itself is exactly target WxH, positioned so the CHILD lands
 // at the corner) or clip to the child area. `work` is lazy - it costs two user32 calls
 // and only the resize branch needs it.
-fn plan_region(
+pub(crate) fn plan_region(
     wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: &str, margin: i32,
     work: impl FnOnce() -> geometry::Rect,
 ) -> RegionPlan {
@@ -620,6 +620,3 @@ fn plan_region(
     }
     RegionPlan::Clip { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch }
 }
-
-#[cfg(test)]
-mod tests;

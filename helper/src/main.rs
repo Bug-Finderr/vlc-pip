@@ -6,6 +6,8 @@ mod native;
 mod options;
 mod request;
 mod state;
+#[cfg(test)]
+mod tests;
 
 fn main() {
     // GUI-subsystem exe: a panic is otherwise invisible. Location (file:line) survives
