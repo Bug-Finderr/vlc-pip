@@ -1,6 +1,6 @@
 # Architecture
 
-VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a ~169KB Rust daemon (GUI subsystem, zero runtime dependencies, `windows-sys` only) that reshapes VLC's **own** top-level window via Win32. No mirroring, no second player: it is the genuine hardware-decoding window, so PiP adds zero latency and every VLC shortcut keeps working.
+VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a ~157KB Rust daemon (GUI subsystem, zero runtime dependencies, `windows-sys` only) that reshapes VLC's **own** top-level window via Win32. No mirroring, no second player: it is the genuine hardware-decoding window, so PiP adds zero latency and every VLC shortcut keeps working.
 
 ## Toggle flow
 
@@ -43,8 +43,8 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 - **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
 - **The heartbeat file** (`vlc-pip-daemon.alive`, epoch + arming flags, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
-- **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms with the cursor origin and zone: interior = free move, outer 16px band of the visible rect = aspect-locked resize. Movement past the system drag threshold activates; the hook stores the latest position and posts one coalesced `WM_APP` message carrying a generation counter (a rapid release-and-repress can't mix stale deltas with re-armed state). The pump computes and applies the rect asynchronously, re-clips the minimal look live through a resize (start chrome offsets at the new size; convergence verifies the exact box after release), skips region convergence while a drag is live, and on release finalizes from its own computed rect (the async `SetWindowPos` may not have landed in VLC yet), persisting size + nearest corner to `config.txt`. See [SPEC.md](SPEC.md) §12 for the full contract.
-- **Close-in-PiP heal (v2.1).** VLC that closes while in PiP saves the PiP geometry as its own, so its next launch would open full-size at the PiP origin. The daemon keeps the stale state as a pending-restore record and, when a new player window appears, applies the saved pre-PiP rect - deleting the state only once the rect sticks.
+- **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms a gesture (interior = free move, outer 16px band of the visible rect = aspect-locked resize); the hook only stores the latest cursor position and posts one coalesced `WM_APP` message with a generation counter (a rapid release-and-repress can't mix stale deltas), and the pump computes and applies the rect - finalizing on release from its own computed rect, never `GetWindowRect` after the async `SetWindowPos` - and persists size + nearest corner to `config.txt`. Full contract: [SPEC.md](SPEC.md) §12.
+- **Close-in-PiP heal (v2.1).** VLC closed while in PiP saves the PiP geometry as its own; the daemon keeps the stale state as a pending-restore record and re-applies the pre-PiP rect once a new player window appears, deleting the state only when the rect sticks ([SPEC.md](SPEC.md) §12).
 
 ## Layout
 
@@ -56,12 +56,12 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 | Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
-Source: `helper/src/` - `main.rs` (CLI + panic-to-crash-file), `daemon.rs` (pump + hooks), `native.rs` (Win32 reshape + region), and pure, unit-tested `state.rs` / `options.rs` / `geometry.rs` / `request.rs`. CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
+Source: `helper/src/` - `main.rs` (CLI + panic-to-crash-file), `daemon.rs` (pump + hooks), `native.rs` (Win32 reshape + region), and pure `state.rs` / `options.rs` / `geometry.rs` / `request.rs`; unit tests live beside each module in `src/<mod>/tests.rs`. CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
 
 ## Development
 
 ```powershell
-cargo test --manifest-path helper\Cargo.toml          # 41 unit tests (pure logic)
+cargo test --manifest-path helper\Cargo.toml          # 43 unit tests (pure logic)
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # 34 end-to-end checks against live VLC
 ```
 

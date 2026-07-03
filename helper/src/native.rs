@@ -136,20 +136,18 @@ pub(crate) fn owns_state(s: &PipState) -> bool {
 // Read-only: a stale state here may be a pending reopen-heal record whose lifecycle
 // belongs to maintain_region - a mere status query must not destroy it.
 pub fn in_pip() -> bool {
-    match state::load(&state::state_path()) {
-        None => false,
-        Some(s) => owns_state(&s),
-    }
+    state::load(&state::state_path()).is_some_and(|s| owns_state(&s))
 }
 
 // ---- enter / exit / toggle ----------------------------------------------------------
 
-pub fn work_area(h: isize) -> RECT {
+pub fn work_area(h: isize) -> geometry::Rect {
     unsafe {
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
-        mi.rcWork
+        let w = mi.rcWork;
+        geometry::Rect { left: w.left, top: w.top, right: w.right, bottom: w.bottom }
     }
 }
 
@@ -169,22 +167,12 @@ pub fn window_rect(h: isize) -> Option<geometry::Rect> {
 // region box (offset to screen coords by the window origin), not the window rect.
 pub fn visible_rect(h: isize) -> Option<geometry::Rect> {
     let wr = window_rect(h)?;
-    unsafe {
-        let probe = CreateRectRgn(0, 0, 0, 0);
-        let mut b: RECT = std::mem::zeroed();
-        let vis = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
-            geometry::Rect {
-                left: wr.left + b.left,
-                top: wr.top + b.top,
-                right: wr.left + b.right,
-                bottom: wr.top + b.bottom,
-            }
-        } else {
-            wr
-        };
-        DeleteObject(probe);
-        Some(vis)
-    }
+    Some(region_box(h).map_or(wr, |(l, t, r, b)| geometry::Rect {
+        left: wr.left + l,
+        top: wr.top + t,
+        right: wr.left + r,
+        bottom: wr.top + b,
+    }))
 }
 
 pub fn drag_band(h: isize) -> i32 {
@@ -206,10 +194,7 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
         match clip {
             Some(c) => {
                 // keep the minimal look live through the resize (region is window-relative)
-                let rgn = CreateRectRgn(c.left, c.top, c.right, c.bottom);
-                if SetWindowRgn(hw(h), rgn, 1) == 0 {
-                    DeleteObject(rgn); // system owns rgn only on success
-                }
+                set_region(h, c.left, c.top, c.right, c.bottom);
             }
             None => {
                 if has_region(h) {
@@ -228,14 +213,13 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
 /// size (`fin` minus chrome measured at drag start). State first, then config. Finalizes
 /// from the CALLER's computed rect - the final async SetWindowPos may not have landed in
 /// VLC yet, so a fresh GetWindowRect would read stale.
-pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h: i32) -> bool {
+pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h: i32) {
     let path = state::state_path();
-    let Some(mut s) = state::load(&path) else { return false };
+    let Some(mut s) = state::load(&path) else { return };
     if !owns_state(&s) {
-        return false; // VLC died mid-drag: next tick's maintain_region cleans up
+        return; // VLC died mid-drag: next tick's maintain_region cleans up
     }
-    let wa = work_area(s.hwnd as isize);
-    let work = geometry::Rect { left: wa.left, top: wa.top, right: wa.right, bottom: wa.bottom };
+    let work = work_area(s.hwnd as isize);
     s.corner = geometry::nearest_corner(fin, &work).to_string();
     if resized {
         let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
@@ -244,9 +228,9 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
             s.target_h = th;
         }
     }
-    let ok = state::save(&s, &path).is_ok();
+    // failures swallowed (SPEC 12): the gesture already holds on screen
+    let _ = state::save(&s, &path);
     crate::options::save_config(s.target_w, s.target_h, &s.corner);
-    ok
 }
 
 // Client-relative chrome around the video child (menu above, controller below). These are
@@ -335,10 +319,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
         if ok {
             if let Some((cl, ct, _, _)) = chrome {
-                let rgn = CreateRectRgn(cl, ct, cl + o.w, ct + o.h);
-                if SetWindowRgn(hw(h), rgn, 1) == 0 {
-                    DeleteObject(rgn); // system owns rgn only on success
-                }
+                set_region(h, cl, ct, cl + o.w, ct + o.h);
             }
         } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
@@ -378,7 +359,7 @@ pub fn toggle(o: &PipOptions) -> bool {
 // ---- status -------------------------------------------------------------------------
 
 pub fn status_path() -> PathBuf {
-    std::env::temp_dir().join("vlc-pip-status.json")
+    state::temp_path("vlc-pip-status.json")
 }
 
 pub fn status() -> String {
@@ -428,23 +409,29 @@ fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+// Apply a rectangular region (window-relative); the system owns rgn only on success.
+fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
+    unsafe {
+        let rgn = CreateRectRgn(left, top, right, bottom);
+        if SetWindowRgn(hw(h), rgn, 1) == 0 {
+            DeleteObject(rgn);
+        }
+    }
+}
+
 // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area -------------
 // VLC 3.x hosts the video in a native child whose class starts with "VLC video main".
 
-struct ChildCtx {
-    found: isize,
-}
-
 unsafe extern "system" fn find_child_cb(c: HWND, l: LPARAM) -> BOOL {
     unsafe {
-        let ctx = &mut *(l as *mut ChildCtx);
+        let found = &mut *(l as *mut isize);
         if IsWindowVisible(c) == 0 {
             return 1;
         }
         let mut buf = [0u16; 128];
         let n = GetClassNameW(c, buf.as_mut_ptr(), 128);
         if String::from_utf16_lossy(&buf[..n as usize]).starts_with("VLC video main") {
-            ctx.found = c as isize;
+            *found = c as isize;
             return 0;
         }
         1
@@ -452,11 +439,11 @@ unsafe extern "system" fn find_child_cb(c: HWND, l: LPARAM) -> BOOL {
 }
 
 fn find_video_child(top: isize) -> isize {
-    let mut ctx = ChildCtx { found: 0 };
+    let mut found = 0isize;
     unsafe {
-        EnumChildWindows(hw(top), Some(find_child_cb), &mut ctx as *mut ChildCtx as LPARAM);
+        EnumChildWindows(hw(top), Some(find_child_cb), &mut found as *mut isize as LPARAM);
     }
-    ctx.found
+    found
 }
 
 fn same_rect(a: &RECT, b: &RECT) -> bool {
@@ -470,15 +457,10 @@ pub struct RegionTracker {
     have_prev: bool,
 }
 
-impl RegionTracker {
-    pub fn new() -> Self {
-        unsafe { Self { prev_win: std::mem::zeroed(), prev_child: std::mem::zeroed(), have_prev: false } }
-    }
-}
-
 impl Default for RegionTracker {
+    // manual impl: windows-sys RECT has no Default
     fn default() -> Self {
-        Self::new()
+        unsafe { Self { prev_win: std::mem::zeroed(), prev_child: std::mem::zeroed(), have_prev: false } }
     }
 }
 
@@ -538,10 +520,7 @@ pub fn maintain_region(t: &mut RegionTracker) {
                 // verify the box, not just presence: a live-clipped resize drag leaves an
                 // approximate region that convergence must confirm or correct
                 if region_box(h) != Some((left, top, right, bottom)) {
-                    let rgn = CreateRectRgn(left, top, right, bottom);
-                    if SetWindowRgn(hw(h), rgn, 1) == 0 {
-                        DeleteObject(rgn); // system owns rgn only on success
-                    }
+                    set_region(h, left, top, right, bottom);
                 }
             }
         }
@@ -599,7 +578,7 @@ fn heal_reopened(s: &PipState, path: &Path) {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 enum RegionPlan {
     Skip,
     Resize { x: i32, y: i32, w: i32, h: i32 },
@@ -613,7 +592,7 @@ enum RegionPlan {
 // and only the resize branch needs it.
 fn plan_region(
     wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: &str, margin: i32,
-    work: impl FnOnce() -> RECT,
+    work: impl FnOnce() -> geometry::Rect,
 ) -> RegionPlan {
     let rel_l = cr.left - wr.left;
     let rel_t = cr.top - wr.top;
@@ -643,61 +622,4 @@ fn plan_region(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-        RECT { left: l, top: t, right: r, bottom: b }
-    }
-
-    fn work() -> RECT {
-        rect(0, 0, 1920, 1040) // 480x270 br margin 16 => video corner at (1424, 754)
-    }
-
-    #[test]
-    fn negative_chrome_is_stale_measurement() {
-        // child wider than its own window = mid-relayout garbage
-        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, "br", 16, work);
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn chrome_clamp_boundary_300_ok_301_stale() {
-        // child at target, chrome_h exactly 300 -> clip; 301 -> stale
-        let cr = rect(0, 0, 480, 270);
-        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, "br", 16, work);
-        assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
-        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, "br", 16, work);
-        assert_eq!(stale, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn two_px_tolerance_clips_three_resizes() {
-        // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
-        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, "br", 16, work);
-        assert!(matches!(at_2, RegionPlan::Clip { .. }));
-        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, "br", 16, work);
-        assert!(matches!(at_3, RegionPlan::Resize { .. }));
-    }
-
-    #[test]
-    fn resize_grows_by_chrome_and_lands_child_at_corner() {
-        // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
-        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, "br", 16, work);
-        // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
-        assert_eq!(plan, RegionPlan::Resize { x: 1414, y: 724, w: 500, h: 405 });
-    }
-
-    #[test]
-    fn clip_is_child_rect_relative_to_window() {
-        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, "br", 16, work);
-        assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
-    }
-
-    #[test]
-    fn hostile_negative_target_skips() {
-        // a hand-crafted state file with TargetW=-500 must not produce a resize
-        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, "br", 16, work);
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-}
+mod tests;
