@@ -19,8 +19,9 @@ if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
     Get-Process pip-helper -ErrorAction SilentlyContinue | Stop-Process -Force -Confirm:$false
     Start-Sleep -Milliseconds 200
 }
-# a stale request (e.g. an unconsumed "stop") would make the fresh daemon act on it within 150ms
-Remove-Item "$env:TEMP\vlc-pip-request.txt" -Force -ErrorAction SilentlyContinue
+# a stale request (an unconsumed "stop") would make the fresh daemon act on it within 150ms;
+# a stale heartbeat (survives any force-kill) would make the start verification below vacuous
+Remove-Item "$env:TEMP\vlc-pip-request.txt", "$env:TEMP\vlc-pip-daemon.alive" -Force -ErrorAction SilentlyContinue
 
 Copy-Item "$root\helper\target\release\pip-helper.exe" "$pipDir\pip-helper.exe" -Force
 Copy-Item "$root\extension\pip.lua" "$extDir\pip.lua" -Force   # ONLY the .lua in extensions
