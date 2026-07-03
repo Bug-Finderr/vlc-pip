@@ -34,7 +34,8 @@ fn run() -> i32 {
     native::enable_dpi_awareness();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first().map_or_else(|| "toggle".to_string(), |s| s.to_lowercase());
-    let o = options::parse_options(args.iter().skip(1).map(String::as_str));
+    let tail = args.get(1..).unwrap_or(&[]);
+    let o = options::effective(tail);
     match mode.as_str() {
         "toggle" => one_shot(native::toggle(&o), &o),
         "enter" => one_shot(native::enter(native::find_player(), &o), &o),
@@ -50,7 +51,7 @@ fn run() -> i32 {
             let _ = writeln!(std::io::stdout(), "{s}");
             0
         }
-        "daemon" => daemon::run(&o),
+        "daemon" => daemon::run(tail), // per-gesture re-read: the daemon must see its own config writes
         "stop" => {
             if std::fs::write(request::request_path(), "stop").is_ok() { 0 } else { 1 }
         }

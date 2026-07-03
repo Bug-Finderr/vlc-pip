@@ -1,10 +1,10 @@
 # VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (165KB) with **identical observable behavior**. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (~169KB as of v2.1) with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
-**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` (21 checks), `scripts/uninstall.ps1`, and `extension/pip.lua` are unchanged from v1. Only `pip-helper.exe`'s implementation swaps; every file format and observable behavior below must hold byte-for-byte.
+**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` (34 checks: the 21 v1-era checks unchanged, plus 13 v2.1 gesture/heal checks), `scripts/uninstall.ps1`, and `extension/pip.lua` (descriptor version aside) carry over from v1. Only `pip-helper.exe`'s implementation swaps; every file format and observable behavior below must hold byte-for-byte.
 
 ---
 
@@ -74,7 +74,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ## 5. Components
 
-### 5.1 `pip.lua` (the VLC extension - unchanged from v1)
+### 5.1 `pip.lua` (the VLC extension - behavior unchanged from v1)
 - `descriptor()` returns `capabilities = { "trigger" }`, title "PiP Mode".
 - `trigger()` → ensure daemon alive (heartbeat check, §6.3), write `"toggle"` to the request file; errors go to `vlc.msg.err`.
 - Fallback only: if the daemon is dead, `os.execute('start "" "<exe>" daemon')` (the sole case that may flash; normally never fires because of login auto-start).
@@ -158,10 +158,10 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 1. Guard: null h or already InPip → false.
 2. `IsIconic(h)` → `ShowWindow(h, SW_RESTORE)` (else the off-screen iconic rect gets saved as the restore state).
 3. Read rect, `GWL_STYLE`, `GWL_EXSTYLE`, owner pid; **save state FIRST** (before any mutation).
-4. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
-5. Corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`.
-6. `SetWindowPos(h, HWND_TOPMOST, x, y, o.w, o.h, SWP_FRAMECHANGED|SWP_SHOWWINDOW)`.
-7. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, delete state - never claim in-PiP.
+4. With `min=1` and a video child present, measure the client-relative chrome around the child (menu above, controller below - Qt client-area widgets, so the offsets survive the border strip; sanity: per-axis sums within 0..=300, else fall back to step 6's plain path).
+5. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
+6. Corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`. With measured chrome, one `SetWindowPos(h, HWND_TOPMOST, vx-cl, vy-ct, w+cl+cr, h+ct+cb, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` followed immediately by the region `(cl, ct, cl+w, ct+h)` - the PiP lands fully formed, no visible grow-then-clip pass (the converger only verifies). Without chrome (not playing, `min=0`, garbage measurement): plain `SetWindowPos(..., o.w, o.h, ...)` and the converger takes over.
+7. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, delete state, never claim in-PiP (the region is only applied after a successful SetWindowPos).
 
 ### exit() - all steps in this order
 1. Load state; null → false. `owns_state` fails → delete state, false.
@@ -227,10 +227,10 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~165KB).
+- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~169KB).
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
-- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (21 end-to-end checks against live VLC; requires install first and VLC closed).
+- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (34 end-to-end checks against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
 ---
@@ -245,7 +245,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 11. Acceptance test checklist
 
-Automated: `cargo test` green, then `scripts/smoke-test.ps1` → 21/21 PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore).
+Automated: `cargo test` green, then `scripts/smoke-test.ps1` → 34/34 PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, close-in-PiP reopen heal).
 
 Manual (once per release):
 - [ ] View → "PiP Mode" appears after a VLC restart; repeated menu clicks alternate enter/exit.
@@ -253,3 +253,39 @@ Manual (once per release):
 - [ ] F / double-click work normally when NOT in PiP; F swallowed only while VLC focused in PiP.
 - [ ] Playback stop while in PiP shows the mini UI (region cleared); restart re-clips.
 - [ ] Daemon survives VLC close and re-arms on next VLC launch; login shortcut starts it flash-free.
+- [ ] Drag-resize works from all four corners (the smoke test can only reach the right edge); drags feel smooth; the 256px min / 80% max clamps hold.
+- [ ] Wheel-volume and Ctrl+wheel subtitle scale still reach VLC over the unfocused PiP.
+
+---
+
+## 12. Drag gestures & persistence (v2.1)
+
+New in v2.1; everything above is unchanged. No modifier keys and nothing new is swallowed: a single left click on video is a no-op in stock VLC 3.x, so press-drag-release is free to repurpose.
+
+### Gesture contract
+- **Interior drag = free move.** Press inside the visible PiP, drag past the system drag threshold, release: the window follows live and stays where dropped. Free placement survives the region converger (`plan_region` only repositions during a size correction).
+- **Band drag = aspect-locked resize.** A drag starting in the outer 16px band (DPI-scaled: 16 x dpi/96) of the **visible** rect - the region box, not the window rect - resizes live from that edge or corner, opposite side anchored; pure edges keep the perpendicular center fixed. Corners win where bands overlap. Aspect is the window's at drag start; width clamps to 256px min, capped so neither dimension exceeds 80% of the work area.
+- **Release** derives `Corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `TargetW/H` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. The next enter and any convergence-driven re-park use them.
+- **Wheel: never touched.** Plain wheel = VLC volume - Windows ships "scroll inactive windows" on, so this already works over the unfocused PiP - and Ctrl+wheel = subtitle scale. The hook intercepts no wheel message.
+- Fullscreen guards unchanged: burst-swallowed downs never arm a drag.
+
+### `config.txt` - persisted size + corner
+`%APPDATA%\vlc\pip\config.txt`, one line of ordinary option tokens:
+```
+w=640 h=360 c=br
+```
+Written on every drag release (from the pump, never the hook; write failures swallowed - the gesture still holds via the state file). Read at **every** enter, layered defaults < config < argv, so startup-shortcut args still win and the daemon sees its own writes without a restart. Missing or unreadable config = exact v2.0 behavior. Uninstall removes it with the pip folder.
+
+### Mechanics
+- The mouse hook arms on an **allowed** button-down over the PiP (cursor origin, window + visible rects, zone) and activates past `SM_CX/CYDRAG`; while active it stores the latest cursor position and posts one **coalesced** `WM_APP` drag message. Idle mouse-move cost is one atomic load, and the hook still never touches the disk.
+- The pump computes the target rect itself (move = start + delta; resize = aspect plan) and applies it with an async `SetWindowPos`. Every message carries a generation counter, so a rapid release-and-repress can't mix a stale message with re-armed state.
+- The minimal look stays live through a resize: each tick re-clips to the start chrome offsets applied to the new size; after release, convergence verifies the region **box** (not just presence) against the actual video child and corrects it.
+- Drag-end finalizes **from the computed rect** - the async `SetWindowPos` may not have landed in VLC yet, so a fresh `GetWindowRect` would read stale.
+- `maintain_region` is skipped while a drag is active; after a resize, convergence re-clips with at most a ±2px correction.
+
+### Close-in-PiP heal
+VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit), so its next launch would open full-size at the PiP origin, overflowing the screen. The daemon keeps the stale state file as a pending-restore record: when a new VLC player window appears, it applies the saved pre-PiP rect and deletes the state only after observing the rect stick (VLC's own startup positioning cannot win the race).
+Hardening: `in_pip` is read-only (a status query can't destroy the record; an explicit enter consumes it by overwriting, the one-shot `exit` drops it); the heal skips iconic windows, fires only when the recorded VLC process is truly gone (legacy `Pid=0` records are dropped), refuses rects on monitors that no longer exist, and gives up after ~6s of non-convergence (e.g. elevated VLC, UIPI). Because pending records can now outlive VLC indefinitely, the hook's HWND cache uses the full owner-PID guard - a recycled handle can never re-arm the guards or drags on a foreign window.
+
+### Accepted edges
+No sizing cursors over the band (cursor feedback needs input injection; Firefox's PiP is equally unmarked). Sizes are raw pixels across mixed-DPI monitors. While a pending heal waits for a VLC relaunch, the tick polls `find_player` (one process snapshot per 150ms). With two VLC instances, the surviving instance may receive the dead one's pre-PiP rect once.

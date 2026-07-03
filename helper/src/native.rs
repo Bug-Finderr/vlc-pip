@@ -1,21 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, GetMonitorInfoW, GetWindowRgn, MonitorFromWindow, SetWindowRgn,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn,
+    MonitorFromRect, MonitorFromWindow, SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTONULL, NULLREGION,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetClassNameW, GetWindowLongPtrW, GetWindowRect,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
+    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
     WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
@@ -119,7 +122,7 @@ pub fn find_player() -> isize {
 // Windows recycles HWND values: after VLC dies, the saved handle can belong to another
 // app. IsWindow alone would pass and we'd reshape a foreign window; require the owner
 // PID recorded at Enter. Old state files (Pid=0) read as stale by design.
-fn owns_state(s: &PipState) -> bool {
+pub(crate) fn owns_state(s: &PipState) -> bool {
     unsafe {
         if IsWindow(hw(s.hwnd as isize)) == 0 {
             return false;
@@ -130,26 +133,151 @@ fn owns_state(s: &PipState) -> bool {
     }
 }
 
+// Read-only: a stale state here may be a pending reopen-heal record whose lifecycle
+// belongs to maintain_region - a mere status query must not destroy it.
 pub fn in_pip() -> bool {
-    let path = state::state_path();
-    match state::load(&path) {
+    match state::load(&state::state_path()) {
         None => false,
-        Some(s) if !owns_state(&s) => {
-            state::try_delete(&path); // stale: VLC gone or hwnd recycled
-            false
-        }
-        Some(_) => true,
+        Some(s) => owns_state(&s),
     }
 }
 
 // ---- enter / exit / toggle ----------------------------------------------------------
 
-fn work_area(h: isize) -> RECT {
+pub fn work_area(h: isize) -> RECT {
     unsafe {
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
         mi.rcWork
+    }
+}
+
+// ---- drag gesture primitives (hook arms, pump applies) --------------------------------
+
+pub fn window_rect(h: isize) -> Option<geometry::Rect> {
+    unsafe {
+        let mut r: RECT = std::mem::zeroed();
+        if GetWindowRect(hw(h), &mut r) == 0 {
+            return None;
+        }
+        Some(geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
+    }
+}
+
+// The minimal-look region clips painting AND hit-testing, so the gesture surface is the
+// region box (offset to screen coords by the window origin), not the window rect.
+pub fn visible_rect(h: isize) -> Option<geometry::Rect> {
+    let wr = window_rect(h)?;
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let mut b: RECT = std::mem::zeroed();
+        let vis = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
+            geometry::Rect {
+                left: wr.left + b.left,
+                top: wr.top + b.top,
+                right: wr.left + b.right,
+                bottom: wr.top + b.bottom,
+            }
+        } else {
+            wr
+        };
+        DeleteObject(probe);
+        Some(vis)
+    }
+}
+
+pub fn drag_band(h: isize) -> i32 {
+    let dpi = unsafe { GetDpiForWindow(hw(h)) };
+    if dpi == 0 { 16 } else { 16 * dpi as i32 / 96 }
+}
+
+pub fn drag_move(h: isize, r: &geometry::Rect) {
+    unsafe {
+        SetWindowPos(
+            hw(h), std::ptr::null_mut(), r.left, r.top, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
+pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) {
+    unsafe {
+        match clip {
+            Some(c) => {
+                // keep the minimal look live through the resize (region is window-relative)
+                let rgn = CreateRectRgn(c.left, c.top, c.right, c.bottom);
+                if SetWindowRgn(hw(h), rgn, 1) == 0 {
+                    DeleteObject(rgn); // system owns rgn only on success
+                }
+            }
+            None => {
+                if has_region(h) {
+                    SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // no clip context: show it all
+                }
+            }
+        }
+        SetWindowPos(
+            hw(h), std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
+/// Adopt the drag result: Corner = nearest as of `fin`; a resize also adopts the new video
+/// size (`fin` minus chrome measured at drag start). State first, then config. Finalizes
+/// from the CALLER's computed rect - the final async SetWindowPos may not have landed in
+/// VLC yet, so a fresh GetWindowRect would read stale.
+pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h: i32) -> bool {
+    let path = state::state_path();
+    let Some(mut s) = state::load(&path) else { return false };
+    if !owns_state(&s) {
+        return false; // VLC died mid-drag: next tick's maintain_region cleans up
+    }
+    let wa = work_area(s.hwnd as isize);
+    let work = geometry::Rect { left: wa.left, top: wa.top, right: wa.right, bottom: wa.bottom };
+    s.corner = geometry::nearest_corner(fin, &work).to_string();
+    if resized {
+        let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
+        if tw > 0 && th > 0 {
+            s.target_w = tw;
+            s.target_h = th;
+        }
+    }
+    let ok = state::save(&s, &path).is_ok();
+    crate::options::save_config(s.target_w, s.target_h, &s.corner);
+    ok
+}
+
+// Client-relative chrome around the video child (menu above, controller below). These are
+// Qt widgets in the CLIENT area, so the offsets survive the border strip and predict where
+// the child lands after the PiP resize. None when not playing or mid-relayout garbage.
+fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
+    let child = find_video_child(h);
+    if child == 0 {
+        return None;
+    }
+    unsafe {
+        let mut client: RECT = std::mem::zeroed();
+        let mut origin = POINT { x: 0, y: 0 };
+        let mut cr: RECT = std::mem::zeroed();
+        if GetClientRect(hw(h), &mut client) == 0
+            || ClientToScreen(hw(h), &mut origin) == 0
+            || GetWindowRect(hw(child), &mut cr) == 0
+        {
+            return None;
+        }
+        let l = cr.left - origin.x;
+        let t = cr.top - origin.y;
+        let r = (origin.x + client.right) - cr.right;
+        let b = (origin.y + client.bottom) - cr.bottom;
+        // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
+        // stale measurement, and a rect the converger would forever Skip must never land
+        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=300).contains(&(l + r)) && (0..=300).contains(&(t + b)) {
+            Some((l, t, r, b))
+        } else {
+            None
+        }
     }
 }
 
@@ -190,14 +318,29 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if state::save(&s, &state::state_path()).is_err() {
         return false; // nothing mutated yet: fail cleanly, retry next toggle
     }
+    // measured pre-strip: with it, enter lands in ONE SetWindowPos at the final
+    // chrome-compensated rect with the region applied immediately - no visible
+    // grow-then-clip pass from the converger (it only verifies afterwards)
+    let chrome = if o.min { client_chrome(h) } else { None };
     unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect
         SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
         let wa = work_area(h);
-        let (x, y) = geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, o.w, o.h, o.corner, o.margin);
-        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, o.w, o.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
-        if !ok {
+        let (vx, vy) = geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, o.w, o.h, o.corner, o.margin);
+        let (x, y, tw, th) = match chrome {
+            Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
+            None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
+        };
+        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
+        if ok {
+            if let Some((cl, ct, _, _)) = chrome {
+                let rgn = CreateRectRgn(cl, ct, cl + o.w, ct + o.h);
+                if SetWindowRgn(hw(h), rgn, 1) == 0 {
+                    DeleteObject(rgn); // system owns rgn only on success
+                }
+            }
+        } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
             SetWindowLongPtrW(hw(h), GWL_STYLE, style);
             state::try_delete(&state::state_path());
@@ -266,6 +409,20 @@ fn has_region(h: isize) -> bool {
     unsafe {
         let probe = CreateRectRgn(0, 0, 0, 0);
         let r = GetWindowRgn(hw(h), probe) != 0; // 0 = ERROR (no region)
+        DeleteObject(probe);
+        r
+    }
+}
+
+fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let mut b: RECT = std::mem::zeroed();
+        let r = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
+            Some((b.left, b.top, b.right, b.bottom))
+        } else {
+            None
+        };
         DeleteObject(probe);
         r
     }
@@ -340,9 +497,10 @@ pub fn maintain_region(t: &mut RegionTracker) {
     };
     if !owns_state(&s) {
         t.have_prev = false;
-        state::try_delete(&path); // stale: VLC gone or hwnd recycled
+        heal_reopened(&s, &path);
         return;
     }
+    HEAL_TRIES.store(0, Relaxed); // a live owned PiP ends any interrupted heal cleanly
     if !s.min {
         return;
     }
@@ -377,7 +535,9 @@ pub fn maintain_region(t: &mut RegionTracker) {
                 t.have_prev = false; // our own resize invalidates the measurement
             }
             RegionPlan::Clip { left, top, right, bottom } => {
-                if !has_region(h) {
+                // verify the box, not just presence: a live-clipped resize drag leaves an
+                // approximate region that convergence must confirm or correct
+                if region_box(h) != Some((left, top, right, bottom)) {
                     let rgn = CreateRectRgn(left, top, right, bottom);
                     if SetWindowRgn(hw(h), rgn, 1) == 0 {
                         DeleteObject(rgn); // system owns rgn only on success
@@ -385,6 +545,57 @@ pub fn maintain_region(t: &mut RegionTracker) {
                 }
             }
         }
+    }
+}
+
+// Bounded so an unhealable window (e.g. elevated VLC: UIPI silently swallows the
+// SetWindowPos) is never fought forever: ~6s of ticks, then the record is dropped.
+static HEAL_TRIES: AtomicU32 = AtomicU32::new(0);
+
+/// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
+/// so its next launch opens full-size at the PiP origin, overflowing the screen. The
+/// stale state file is kept as a pending-restore record; when a new player window
+/// appears, apply the saved pre-PiP rect and delete the record only once the rect is
+/// observed to stick - VLC's own startup positioning must not win the race.
+fn heal_reopened(s: &PipState, path: &Path) {
+    if s.w <= 0 || s.h <= 0 || s.pid == 0 {
+        state::try_delete(path); // legacy (Pid=0) or garbage record: nothing safely healable
+        return;
+    }
+    let pids = vlc_pids();
+    if pids.contains(&s.pid) {
+        state::try_delete(path); // the recorded VLC still runs (hwnd recycled): not a close-in-PiP
+        return;
+    }
+    if pids.is_empty() {
+        return; // VLC not back yet: keep waiting (one process snapshot per tick)
+    }
+    let h2 = find_player();
+    if h2 == 0 {
+        return;
+    }
+    unsafe {
+        if IsIconic(hw(h2)) != 0 {
+            return; // heal the normal placement once restored - the iconic rect is garbage
+        }
+        let target = RECT { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
+        if MonitorFromRect(&target, MONITOR_DEFAULTTONULL).is_null() {
+            state::try_delete(path); // monitor layout changed: VLC's own placement is saner
+            return;
+        }
+        let mut wr: RECT = std::mem::zeroed();
+        GetWindowRect(hw(h2), &mut wr);
+        if same_rect(&wr, &target) {
+            HEAL_TRIES.store(0, Relaxed);
+            state::try_delete(path); // heal landed and stuck: done
+            return;
+        }
+        if HEAL_TRIES.fetch_add(1, Relaxed) >= 40 {
+            HEAL_TRIES.store(0, Relaxed);
+            state::try_delete(path); // not converging: stop fighting the window
+            return;
+        }
+        SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
