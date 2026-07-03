@@ -1,6 +1,6 @@
 # VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (~169KB as of v2.1) with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (~157KB as of v2.1) with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
@@ -93,9 +93,10 @@ helper/src/state.rs          PipState + hand-rolled JSON parse/write, load/save/
 helper/src/request.rs        request-file consume
 helper/src/native.rs         Win32: find_player, enter/exit/toggle, maintain_region, status
 helper/src/daemon.rs         pump, hotkey, timer, LL hooks, heartbeat, single-instance mutex
+helper/src/<mod>/tests.rs    unit tests as cfg(test) child modules (private access, no pub changes)
 ```
 
-Modes (argv[1], lowercased; default `toggle` when absent). Options parsed from the remaining args:
+Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed from the remaining args; `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
 - `toggle` | `enter` - one-shot Win32 action, then if it **entered** PiP with `min=1`: 6 × { sleep 150 ms; maintain_region } to converge the minimal look. Exit 0 on success, 1 on failure.
 - `exit` - restore; no region loop. Exit 0/1.
 - `status` - print status JSON to stdout (best effort) AND write it to `%TEMP%\vlc-pip-status.json` (the reliable channel). Always exit 0.
@@ -227,7 +228,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~169KB).
+- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~157KB).
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
 - **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (34 end-to-end checks against live VLC; requires install first and VLC closed).
@@ -274,7 +275,7 @@ New in v2.1; everything above is unchanged. No modifier keys and nothing new is 
 ```
 w=640 h=360 c=br
 ```
-Written on every drag release (from the pump, never the hook; write failures swallowed - the gesture still holds via the state file). Read at **every** enter, layered defaults < config < argv, so startup-shortcut args still win and the daemon sees its own writes without a restart. Missing or unreadable config = exact v2.0 behavior. Uninstall removes it with the pip folder.
+Written on every drag release (from the pump, never the hook; the `pip` folder is created if missing; write failures swallowed - the gesture still holds via the state file). Read at **every** enter, layered defaults < config < argv, so startup-shortcut args still win and the daemon sees its own writes without a restart. Missing or unreadable config = exact v2.0 behavior. Uninstall removes it with the pip folder.
 
 ### Mechanics
 - The mouse hook arms on an **allowed** button-down over the PiP (cursor origin, window + visible rects, zone) and activates past `SM_CX/CYDRAG`; while active it stores the latest cursor position and posts one **coalesced** `WM_APP` drag message. Idle mouse-move cost is one atomic load, and the hook still never touches the disk.
