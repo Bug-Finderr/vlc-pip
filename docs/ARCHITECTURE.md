@@ -56,7 +56,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 | Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
-Source: `helper/src/` - `main.rs` (CLI + panic-to-crash-file), `daemon.rs` (pump + hooks), `native.rs` (Win32 reshape + region), and pure `state.rs` / `options.rs` / `geometry.rs` / `request.rs`; unit tests live beside each module in `src/<mod>/tests.rs`. CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
+Source: `helper/src/` - `main.rs` (CLI + panic-to-crash-file), `daemon.rs` (pump + hooks), `native.rs` (Win32 reshape + region), and pure `state.rs` / `options.rs` / `geometry.rs` / `request.rs`; all unit tests live in `src/tests.rs`. CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
 
 ## Development
 

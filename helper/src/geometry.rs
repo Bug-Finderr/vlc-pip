@@ -134,6 +134,3 @@ pub fn compute_corner(
         _ => (right, bottom), // "br" and fallback
     }
 }
-
-#[cfg(test)]
-mod tests;

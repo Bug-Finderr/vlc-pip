@@ -10,6 +10,3 @@ pub fn consume(path: &Path) -> Option<String> {
     let cmd = cmd.trim();
     if cmd.is_empty() { None } else { Some(cmd.to_string()) }
 }
-
-#[cfg(test)]
-mod tests;
