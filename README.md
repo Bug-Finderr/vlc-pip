@@ -4,6 +4,8 @@ Turns the **real** VLC 3.x window into a borderless, always-on-top, corner-parke
 
 No mirroring, no second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and every VLC feature and shortcut keeps working inside the PiP. A ~157KB dependency-free Rust daemon does the work; a tiny Lua extension adds the menu entry. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
+![vlc-pip demo](docs/demo.webp)
+
 ## Install
 
 Download the [latest release](https://github.com/Bug-Finderr/vlc-pip/releases) zip and follow the steps on the release page, or build from source (needs the Rust MSVC toolchain):
