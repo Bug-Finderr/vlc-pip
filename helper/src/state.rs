@@ -155,38 +155,33 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
     let (mut target_w, mut target_h, mut corner, mut margin, mut min, mut pid) =
         (480, 270, String::from("br"), 16, true, 0u32);
 
-    ws(b, &mut i);
-    if b.get(i) == Some(&b'}') {
-        i += 1;
-    } else {
-        loop {
-            let key = string(b, &mut i)?;
-            eat(b, &mut i, b':')?;
-            match key {
-                "Hwnd" => hwnd = Some(int(b, &mut i)?),
-                "X" => x = Some(i32_field(b, &mut i)?),
-                "Y" => y = Some(i32_field(b, &mut i)?),
-                "W" => w = Some(i32_field(b, &mut i)?),
-                "H" => h = Some(i32_field(b, &mut i)?),
-                "Style" => style = Some(int(b, &mut i)?),
-                "ExStyle" => ex_style = Some(int(b, &mut i)?),
-                "TargetW" => target_w = i32_field(b, &mut i)?,
-                "TargetH" => target_h = i32_field(b, &mut i)?,
-                "Corner" => corner = string(b, &mut i)?.to_string(),
-                "Margin" => margin = i32_field(b, &mut i)?,
-                "Min" => min = boolean(b, &mut i)?,
-                "Pid" => pid = u32::try_from(int(b, &mut i)?).ok()?,
-                _ => skip_value(b, &mut i)?,
+    loop {
+        let key = string(b, &mut i)?;
+        eat(b, &mut i, b':')?;
+        match key {
+            "Hwnd" => hwnd = Some(int(b, &mut i)?),
+            "X" => x = Some(i32_field(b, &mut i)?),
+            "Y" => y = Some(i32_field(b, &mut i)?),
+            "W" => w = Some(i32_field(b, &mut i)?),
+            "H" => h = Some(i32_field(b, &mut i)?),
+            "Style" => style = Some(int(b, &mut i)?),
+            "ExStyle" => ex_style = Some(int(b, &mut i)?),
+            "TargetW" => target_w = i32_field(b, &mut i)?,
+            "TargetH" => target_h = i32_field(b, &mut i)?,
+            "Corner" => corner = string(b, &mut i)?.to_string(),
+            "Margin" => margin = i32_field(b, &mut i)?,
+            "Min" => min = boolean(b, &mut i)?,
+            "Pid" => pid = u32::try_from(int(b, &mut i)?).ok()?,
+            _ => skip_value(b, &mut i)?,
+        }
+        ws(b, &mut i);
+        match b.get(i)? {
+            b',' => i += 1,
+            b'}' => {
+                i += 1;
+                break;
             }
-            ws(b, &mut i);
-            match b.get(i)? {
-                b',' => i += 1,
-                b'}' => {
-                    i += 1;
-                    break;
-                }
-                _ => return None,
-            }
+            _ => return None,
         }
     }
     ws(b, &mut i);

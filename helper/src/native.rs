@@ -162,7 +162,7 @@ pub fn work_area(h: isize) -> geometry::Rect {
 /// Borderless (caption fully gone) and covering the whole monitor - VLC's fullscreen look.
 pub fn is_fullscreen(h: isize) -> bool {
     unsafe {
-        if GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) {
+        if is_windowed(h) {
             return false;
         }
         let mut mi: MONITORINFO = std::mem::zeroed();
@@ -410,20 +410,16 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // gather (plus a restore-from-iconic, which Windows makes losslessly reversible) -
-    // no geometry or styles are mutated in this block
-    let (r, style, ex, pid) = unsafe {
-        if IsIconic(hw(h)) != 0 {
-            ShowWindow(hw(h), SW_RESTORE); // else the off-screen iconic rect gets saved as the restore state
-        }
+    // losslessly reversible; else the off-screen iconic rect gets saved as the restore state
+    restore_if_iconic(h);
+    let (r, style, ex) = unsafe {
         let mut r: RECT = std::mem::zeroed();
         GetWindowRect(hw(h), &mut r);
         let style = GetWindowLongPtrW(hw(h), GWL_STYLE);
         let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hw(h), &mut pid);
-        (r, style, ex, pid)
+        (r, style, ex)
     };
+    let pid = window_owner(h);
     // save state FIRST, so a failed save can never leave a mutated window with no restore data
     let s = PipState {
         hwnd: h as i64,
