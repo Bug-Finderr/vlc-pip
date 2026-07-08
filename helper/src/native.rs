@@ -19,10 +19,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WM_KEYDOWN, WM_KEYUP, WS_CAPTION,
-    WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE,
+    WM_KEYDOWN, WM_KEYUP, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -242,6 +242,37 @@ pub fn modifiers_held() -> bool {
     }
 }
 
+/// Cloak for the handoff: WS_EX_LAYERED + alpha 0, so the transition never renders.
+/// SW_HIDE cannot do this - Qt re-shows the window as part of leave-fullscreen (show,
+/// style, and rect land in one shot, ~25ms after Esc, verified live); transparency
+/// makes whatever Qt shows render as nothing. Fails silently on an elevated VLC
+/// (UIPI): the transition is merely visible then, as before v2.1.1.
+pub fn cloak(h: isize) {
+    unsafe {
+        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
+        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+        SetLayeredWindowAttributes(hw(h), 0, 0, LWA_ALPHA);
+    }
+}
+
+/// Remove the cloak: alpha back first (DWM recomposites), then the style bit. enter()
+/// runs this itself right before its reshape; drop paths run it owner-guarded.
+pub fn uncloak(h: isize) {
+    unsafe {
+        SetLayeredWindowAttributes(hw(h), 0, 255, LWA_ALPHA);
+        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
+        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
+    }
+}
+
+/// Uncloak only while the handle still belongs to the arming process - a dropped
+/// handoff must never touch a recycled handle.
+pub fn uncloak_owned(h: isize, pid: u32) {
+    if pid != 0 && window_owner(h) == pid {
+        uncloak(h);
+    }
+}
+
 /// Post Esc (leave-fullscreen, a no-op otherwise) to every vout window - their event
 /// thread takes keys regardless of focus and visibility - plus the Qt top-level last
 /// (Qt drops posted keys when unfocused, gotcha #7). Callers gate on modifiers_held.
@@ -267,12 +298,16 @@ pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
         let was_iconic = restore_if_iconic(h);
         if is_fullscreen(h) || (was_iconic && !is_windowed(h)) {
             let pid = window_owner(h);
+            cloak(h);
             let mut esc_tries = 0u8;
+            let mut quiet = 0u8;
             let mut windowed = false;
-            for i in 0..20 {
-                if esc_tries < 3 && i % 3 == 0 && !modifiers_held() && is_fullscreen(h) {
-                    request_unfullscreen(h); // same retry/cap policy as tick_pending
+            for _ in 0..20 {
+                quiet = if modifiers_held() { 0 } else { quiet.saturating_add(1) };
+                if esc_tries < 3 && quiet >= 2 && is_fullscreen(h) {
+                    request_unfullscreen(h); // same quiet-gate + retry/cap policy as tick_pending
                     esc_tries += 1;
+                    quiet = 0;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 if window_owner(h) != pid {
@@ -284,12 +319,19 @@ pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
                 }
             }
             if !windowed {
+                uncloak(h); // giving up: put the fullscreen window back on screen
                 return false; // Esc didn't take: never save the fullscreen rect as restore state
             }
             std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
         }
     }
-    enter(h, o)
+    if enter(h, o) {
+        return true;
+    }
+    if h != 0 {
+        uncloak(h); // enter's guards bail before its own uncloak: never leave a cloak behind
+    }
+    false
 }
 
 // ---- drag gesture primitives (hook arms, pump applies) --------------------------------
@@ -428,7 +470,8 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         w: r.right - r.left,
         h: r.bottom - r.top,
         style: style as i64,
-        ex_style: ex as i64,
+        // a cloaked handoff (or a one-shot racing one) must never become the restore state
+        ex_style: (ex & !(WS_EX_LAYERED as isize)) as i64,
         target_w: o.w,
         target_h: o.h,
         corner: o.corner.to_string(),
@@ -443,6 +486,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     // chrome-compensated rect with the region applied immediately - no visible
     // grow-then-clip pass from the converger (it only verifies afterwards)
     let chrome = if o.min { client_chrome(h) } else { None };
+    uncloak(h); // handoff over, the PiP must render; a no-op outside the handoff
     unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect

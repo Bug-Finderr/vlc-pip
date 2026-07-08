@@ -226,6 +226,7 @@ struct PendingEnter {
     hwnd: isize,
     pid: u32,
     esc_tries: u8,
+    quiet_ticks: u8,
     windowed_ticks: u8,
     deadline: Instant,
 }
@@ -239,9 +240,13 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
                 hwnd: h,
                 pid: native::window_owner(h),
                 esc_tries: 0,
+                quiet_ticks: 0,
                 windowed_ticks: 0,
                 deadline: Instant::now() + Duration::from_secs(2),
             });
+            // blank the transition from the very keypress: the intermediate windowed
+            // restore must never render (SPEC §7 cloak)
+            native::cloak(h);
             tick_pending(argv, pending); // post the Esc now, not a tick later
             return;
         }
@@ -252,7 +257,9 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
 fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
     if native::in_pip() {
         // even with a pending armed (a one-shot enter can win the race): toggle means exit
-        *pending = None;
+        if let Some(p) = pending.take() {
+            native::uncloak_owned(p.hwnd, p.pid);
+        }
         native::exit_pip();
     } else if pending.is_none() {
         enter_deferring_fullscreen(argv, pending);
@@ -266,29 +273,53 @@ fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
 fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
     let Some(p) = pending.as_mut() else { return };
     let done = if native::window_owner(p.hwnd) != p.pid || native::in_pip() {
-        true // VLC died / handle recycled, or something else entered PiP first
+        // VLC died / handle recycled, or something else entered PiP first (a one-shot's
+        // PiP on this very window must become visible again)
+        native::uncloak_owned(p.hwnd, p.pid);
+        true
     } else if native::is_windowed(p.hwnd) {
-        p.windowed_ticks += 1;
-        if p.windowed_ticks >= 2 {
-            native::enter(p.hwnd, &options::effective(argv));
-            true
-        } else {
+        if native::modifiers_held() {
+            // keyboard busy: let the spam settle. A PiP materializing mid-spam gets
+            // toggled right back out by the next press (observed live) - nothing may
+            // appear until the user's hands are off the modifiers.
+            p.windowed_ticks = 0;
             false
+        } else {
+            p.windowed_ticks += 1;
+            if p.windowed_ticks >= 2 {
+                // enter() uncloaks right before its reshape; its guards bail before that
+                if !native::enter(p.hwnd, &options::effective(argv)) {
+                    native::uncloak_owned(p.hwnd, p.pid);
+                }
+                true
+            } else {
+                false
+            }
         }
     } else {
         if native::modifiers_held() {
+            p.quiet_ticks = 0;
             if p.esc_tries == 0 {
                 // wait out the chord; the give-up countdown starts at the release
                 p.deadline = Instant::now() + Duration::from_secs(2);
             }
         } else if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
-            // a single post can fizzle (vout arrangement, queue timing); capped so a
-            // modal dialog is not Esc-spammed
-            native::request_unfullscreen(p.hwnd);
-            p.esc_tries += 1;
+            // Esc only after TWO quiet ticks: spam's inter-press gaps are wide enough
+            // for a single tick to slip the Esc out mid-burst. Re-posts capped (a
+            // single post can fizzle; a modal dialog must not be Esc-spammed).
+            p.quiet_ticks += 1;
+            if p.quiet_ticks >= 2 {
+                native::request_unfullscreen(p.hwnd);
+                p.esc_tries += 1;
+                p.quiet_ticks = 0;
+            }
         }
         p.windowed_ticks = 0; // caption flickered: restart the stability count
-        Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up
+        let expired = Instant::now() >= p.deadline; // Esc didn't take (e.g. a modal ate it): give up
+        if expired {
+            native::uncloak_owned(p.hwnd, p.pid); // giving up: put the fullscreen window back on screen
+        }
+        expired
     };
     if done {
         *pending = None;
@@ -304,13 +335,19 @@ fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
             }
         }
         Some("exit") => {
-            *pending = None; // an armed enter is moot once an exit is requested
+            // an armed enter is moot once an exit is requested
+            if let Some(p) = pending.take() {
+                native::uncloak_owned(p.hwnd, p.pid);
+            }
             native::exit_pip();
         }
         Some("stop") => {
             // clear FIRST: PostQuitMessage is not preemptive and this tick still runs
             // tick_pending - a handoff completing on the way out strands a PiP'd VLC
-            *pending = None;
+            // (and an un-uncloaked one would strand an INVISIBLE VLC with no daemon)
+            if let Some(p) = pending.take() {
+                native::uncloak_owned(p.hwnd, p.pid);
+            }
             unsafe { PostQuitMessage(0) }
         }
         _ => {}

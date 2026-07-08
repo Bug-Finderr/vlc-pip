@@ -18,6 +18,15 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern long GetWindowLongPtrW(IntPtr h, int idx);
+// the intermediate windowed state during the fullscreen handoff: visible, captioned,
+// and NOT cloaked (WS_EX_LAYERED) - exactly what SPEC section 7 says must never render
+public static bool Rendered(IntPtr h) {
+    return IsWindowVisible(h)
+        && (GetWindowLongPtrW(h, -16) & 0xC00000) == 0xC00000
+        && (GetWindowLongPtrW(h, -20) & 0x80000) == 0;
+}
 '@
 }
 function ClickAt($x, $y, $times) {
@@ -157,10 +166,20 @@ try {
     $fs = Status
     # caption-only: Qt autoresize can make the windowed size already match the monitor
     Check "fullscreen: engaged" (-not $fs.caption)
-    Req "toggle"; Start-Sleep -Milliseconds 1200                 # Esc + two windowed ticks + enter
+    # enter from fullscreen, sampling the transition at ~15ms: the windowed restore may
+    # never render (visible + caption + uncloaked) before the state file appears
+    Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
+    $rendered = 0
+    $hsw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($hsw.ElapsedMilliseconds -lt 3000 -and -not (Test-Path "$env:TEMP\vlc-pip.json")) {
+        if ([Smoke.Keys]::Rendered([IntPtr]::new([long]$fs.hwnd))) { $rendered++ }
+        Start-Sleep -Milliseconds 15
+    }
+    Start-Sleep -Milliseconds 900                                # let enter finish reshaping
     $fpip = Status
     Check "fullscreen toggle: enters pip" ($fpip.inPip -and -not $fpip.caption)
     Check "fullscreen toggle: pip-sized, not fullscreen" ($fpip.w -lt [int]($fs.w / 2))
+    Check "fullscreen handoff: transition never rendered" ($rendered -eq 0)
     Req "toggle"; $fout = Status
     Check "fullscreen exit: windowed rect restored" ($fout.caption -and $fout.x -eq $before.x -and $fout.y -eq $before.y -and $fout.w -eq $before.w -and $fout.h -eq $before.h)
 
