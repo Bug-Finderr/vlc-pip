@@ -229,7 +229,7 @@ pub fn run(argv: &[String]) -> i32 {
 struct PendingEnter {
     hwnd: isize,
     pid: u32,
-    esc_sent: bool,
+    esc_tries: u8,
     windowed_ticks: u8,
     deadline: Instant,
 }
@@ -245,7 +245,7 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
             *pending = Some(PendingEnter {
                 hwnd: h,
                 pid: native::window_owner(h),
-                esc_sent: false,
+                esc_tries: 0,
                 windowed_ticks: 0,
                 deadline: Instant::now() + Duration::from_secs(2),
             });
@@ -280,10 +280,12 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
             false
         }
     } else {
-        if !p.esc_sent && native::is_fullscreen(p.hwnd) {
-            // may lag the arm: an iconic restore has to land before fullscreen shows
+        if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
+            // retried while fullscreen persists: a single post can fizzle depending on
+            // VLC's vout arrangement; capped so a modal dialog is not Esc-spammed. Can
+            // also lag the arm - an iconic restore has to land before fullscreen shows.
             native::request_unfullscreen(p.hwnd);
-            p.esc_sent = true;
+            p.esc_tries += 1;
         }
         p.windowed_ticks = 0; // caption flickered: restart the stability count
         Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up

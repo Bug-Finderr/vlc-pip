@@ -203,18 +203,52 @@ pub fn restore_if_iconic(h: isize) -> bool {
     }
 }
 
-/// Ask VLC to leave fullscreen: post Esc (its leave-fullscreen key) to the video child,
-/// whose win32 vout window proc feeds the core hotkey engine - works unfocused, ~20ms
-/// observed. Qt-level keys are unreliable via PostMessage (gotcha #7); the vout proc
-/// is not Qt, so Esc/F land.
-pub fn request_unfullscreen(h: isize) {
+// Collects every vout window (class prefix "VLC video main") of one VLC process,
+// visible or NOT: fullscreen VLC hosts the vout either embedded (visible child of the
+// main window) or desktop-parented (an INVISIBLE top-level still at its stale windowed
+// rect) - both arrangements observed live on 3.0.23.
+struct VoutTargets {
+    pid: u32,
+    found: Vec<isize>,
+}
+
+unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
     unsafe {
-        let target = match find_video_child(h) {
-            0 => h,
-            c => c,
-        };
-        PostMessageW(hw(target), WM_KEYDOWN, VK_ESCAPE as usize, 0x0001_0001); // scan 0x01, repeat 1
-        PostMessageW(hw(target), WM_KEYUP, VK_ESCAPE as usize, 0xC001_0001_u32 as isize);
+        let ctx = &mut *(l as *mut VoutTargets);
+        let mut buf = [0u16; 128];
+        let n = GetClassNameW(w, buf.as_mut_ptr(), 128);
+        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("VLC video main") {
+            if ctx.pid != 0 {
+                let mut p = 0u32;
+                GetWindowThreadProcessId(w, &mut p);
+                if p != ctx.pid {
+                    return 1;
+                }
+            }
+            if !ctx.found.contains(&(w as isize)) {
+                ctx.found.push(w as isize);
+            }
+        }
+        1
+    }
+}
+
+/// Ask VLC to leave fullscreen by posting Esc (its leave-fullscreen key, a no-op
+/// otherwise). The reliable receivers are the win32 vout windows: their event thread
+/// processes keys regardless of focus AND visibility. Post to every one of them plus
+/// the Qt top-level as a last resort - Qt drops posted keys when unfocused (gotcha #7),
+/// so it must never be the only target.
+pub fn request_unfullscreen(h: isize) {
+    let mut ctx = VoutTargets { pid: window_owner(h), found: Vec::new() };
+    unsafe {
+        EnumChildWindows(hw(h), Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
+        ctx.pid = ctx.pid.max(1); // never 0: EnumWindows must not match foreign processes
+        EnumWindows(Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
+        ctx.found.push(h);
+        for target in ctx.found {
+            PostMessageW(hw(target), WM_KEYDOWN, VK_ESCAPE as usize, 0x0001_0001); // scan 0x01, repeat 1
+            PostMessageW(hw(target), WM_KEYUP, VK_ESCAPE as usize, 0xC001_0001_u32 as isize);
+        }
     }
 }
 
@@ -227,14 +261,15 @@ pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
         let was_iconic = restore_if_iconic(h);
         if is_fullscreen(h) || (was_iconic && !is_windowed(h)) {
             let pid = window_owner(h);
-            let mut esc_sent = false;
+            let mut esc_tries = 0u8;
             let mut windowed = false;
-            for _ in 0..20 {
-                if !esc_sent && is_fullscreen(h) {
-                    // may lag the restore: an iconic window shows fullscreen only once
-                    // its restore lands
+            for i in 0..20 {
+                if esc_tries < 3 && i % 3 == 0 && is_fullscreen(h) {
+                    // retried every ~300ms while fullscreen persists (single posts can
+                    // fizzle depending on VLC's vout arrangement), capped like the
+                    // daemon path; can also lag an iconic restore
                     request_unfullscreen(h);
-                    esc_sent = true;
+                    esc_tries += 1;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 if window_owner(h) != pid {
