@@ -218,14 +218,10 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-// Fullscreen handoff: a toggle/enter on a fullscreen VLC first asks VLC itself to leave
-// fullscreen (Esc to the vout child) - reshaping from outside would leave VLC's internal
-// fullscreen state (and its fullscreen-controller strip) active and save the fullscreen
-// rect as the restore state. Leaving is async in VLC, and the pump must never block
-// (LL-hook timeout), so the enter is deferred to timer ticks: the caption must be back
-// on TWO consecutive ticks (Qt's style AND rect restores both landed) before enter()
-// snapshots the window. The pending is keyed by hwnd + owner PID (owns_state-style: a
-// recycled handle must never get a foreign window entered).
+// Fullscreen handoff, deferred: leaving fullscreen is async in VLC and the pump must
+// never block (LL-hook timeout), so the enter waits on timer ticks until the caption
+// holds for TWO consecutive ticks (Qt's style AND rect restores both landed). Keyed by
+// hwnd + owner PID. Rationale and contract: native.rs handoff section, SPEC §7.
 struct PendingEnter {
     hwnd: isize,
     pid: u32,
@@ -237,9 +233,6 @@ struct PendingEnter {
 fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
     let h = native::find_player();
     if h != 0 {
-        // restore BEFORE judging: a minimized-from-fullscreen VLC hides its fullscreen
-        // rect behind the iconic placement, and enter()'s own restore would bring the
-        // fullscreen window back only after the plain path was already chosen
         let was_iconic = native::restore_if_iconic(h);
         if native::is_fullscreen(h) || (was_iconic && !native::is_windowed(h)) {
             *pending = Some(PendingEnter {
@@ -259,8 +252,7 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
 fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
     let had_pending = pending.take().is_some();
     if native::in_pip() {
-        // possible even with a pending armed (a one-shot CLI enter can win the race):
-        // the user's toggle means exit - never eat the press as a mere cancel
+        // even with a pending armed (a one-shot enter can win the race): toggle means exit
         native::exit_pip();
     } else if !had_pending {
         enter_deferring_fullscreen(argv, pending);
@@ -282,14 +274,12 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
     } else {
         if native::modifiers_held() {
             if p.esc_tries == 0 {
-                // the user is still holding the hotkey chord, which would poison the
-                // Esc: wait it out, and start the give-up countdown at the release
+                // wait out the chord; the give-up countdown starts at the release
                 p.deadline = Instant::now() + Duration::from_secs(2);
             }
         } else if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
-            // retried while fullscreen persists: a single post can fizzle depending on
-            // VLC's vout arrangement; capped so a modal dialog is not Esc-spammed. Can
-            // also lag the arm - an iconic restore has to land before fullscreen shows.
+            // a single post can fizzle (vout arrangement, queue timing); capped so a
+            // modal dialog is not Esc-spammed
             native::request_unfullscreen(p.hwnd);
             p.esc_tries += 1;
         }
@@ -314,9 +304,8 @@ fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
             native::exit_pip();
         }
         Some("stop") => {
-            // clear FIRST: PostQuitMessage is not preemptive, and this same tick still
-            // runs tick_pending - a handoff must never complete on the way out (uninstall
-            // would strand a PiP'd VLC with no daemon)
+            // clear FIRST: PostQuitMessage is not preemptive and this tick still runs
+            // tick_pending - a handoff completing on the way out strands a PiP'd VLC
             *pending = None;
             unsafe { PostQuitMessage(0) }
         }

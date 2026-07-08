@@ -148,17 +148,14 @@ try {
     Check "interleaved hotkey+menu do not desync" (-not $s.inPip)
     Check "interleave restored exact rect" ($s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
-    # v2.1.1 fullscreen handoff: toggling on a fullscreen VLC must make VLC leave
-    # fullscreen first - else its fullscreen-controller strip stays on screen and the
-    # fullscreen rect becomes the restore state. Click the video (a no-op in VLC) to
-    # focus, then F = VLC's own fullscreen hotkey.
+    # v2.1.1 fullscreen handoff (SPEC section 7). Click the video (a no-op) to focus,
+    # then F = VLC's fullscreen hotkey.
     ClickAt ($s.x + [int]($s.w / 2)) ($s.y + [int]($s.h / 2)) 1
     [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)      # F down
     [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)      # F up
     Start-Sleep -Milliseconds 800
     $fs = Status
-    # caption-only on purpose: screen:// + Qt autoresize can make the WINDOWED width/height
-    # already match the monitor's (taskbar-edge dependent), so size comparisons are flaky
+    # caption-only: Qt autoresize can make the windowed size already match the monitor
     Check "fullscreen: engaged" (-not $fs.caption)
     Req "toggle"; Start-Sleep -Milliseconds 1200                 # Esc + two windowed ticks + enter
     $fpip = Status

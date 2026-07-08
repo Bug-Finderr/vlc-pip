@@ -182,8 +182,7 @@ pub fn is_windowed(h: isize) -> bool {
     unsafe { GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) }
 }
 
-/// Owner PID (0 when the window is gone) - the handoff's owns_state-style guard: a dead
-/// VLC or a recycled handle must never get a foreign window entered.
+/// Owner PID (0 when the window is gone) - the handoff's owns_state-style guard.
 pub fn window_owner(h: isize) -> u32 {
     let mut p = 0u32;
     unsafe {
@@ -192,9 +191,8 @@ pub fn window_owner(h: isize) -> u32 {
     p
 }
 
-/// A minimized-from-fullscreen VLC hides its fullscreen rect behind the iconic placement,
-/// so the handoff must restore BEFORE judging - enter()'s own restore would bring the
-/// fullscreen window back only after the check already chose the plain path.
+/// Restore BEFORE judging fullscreen: a minimized-from-fullscreen window hides its
+/// fullscreen rect behind the iconic placement (enter()'s own restore comes too late).
 pub fn restore_if_iconic(h: isize) -> bool {
     unsafe {
         if IsIconic(hw(h)) != 0 {
@@ -205,10 +203,8 @@ pub fn restore_if_iconic(h: isize) -> bool {
     }
 }
 
-// Collects every vout window (class prefix "VLC video main") of one VLC process,
-// visible or NOT: fullscreen VLC hosts the vout either embedded (visible child of the
-// main window) or desktop-parented (an INVISIBLE top-level still at its stale windowed
-// rect) - both arrangements observed live on 3.0.23.
+// Every vout window (class prefix "VLC video main") of one VLC process, visible or NOT:
+// fullscreen hosts the vout embedded OR as an invisible desktop-parented top-level.
 struct VoutTargets {
     pid: u32,
     found: Vec<isize>,
@@ -235,11 +231,9 @@ unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
     }
 }
 
-/// Any modifier key physically down (async state). VLC translates posted keys against
-/// the PHYSICAL modifier state at processing time (verified live: Esc posted while
-/// Ctrl+Alt are held reads as Ctrl+Alt+Esc - bound to nothing - even with VLC
-/// unfocused), so the still-held chord of the very hotkey that triggered the handoff
-/// poisons the Esc until the fingers lift.
+/// Any modifier key physically down. VLC reads the PHYSICAL modifier state when it
+/// processes a posted key, so a still-held hotkey chord turns the Esc into
+/// Ctrl+Alt+Esc - bound to nothing (SPEC §7).
 pub fn modifiers_held() -> bool {
     unsafe {
         [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
@@ -248,11 +242,9 @@ pub fn modifiers_held() -> bool {
     }
 }
 
-/// Ask VLC to leave fullscreen by posting Esc (its leave-fullscreen key, a no-op
-/// otherwise). The reliable receivers are the win32 vout windows: their event thread
-/// processes keys regardless of focus AND visibility. Post to every one of them plus
-/// the Qt top-level as a last resort - Qt drops posted keys when unfocused (gotcha #7),
-/// so it must never be the only target. Callers gate on modifiers_held.
+/// Post Esc (leave-fullscreen, a no-op otherwise) to every vout window - their event
+/// thread takes keys regardless of focus and visibility - plus the Qt top-level last
+/// (Qt drops posted keys when unfocused, gotcha #7). Callers gate on modifiers_held.
 pub fn request_unfullscreen(h: isize) {
     let mut ctx = VoutTargets { pid: window_owner(h), found: Vec::new() };
     unsafe {
@@ -268,9 +260,8 @@ pub fn request_unfullscreen(h: isize) {
 }
 
 /// One-shot enter: leave fullscreen first, blocking until VLC re-windows. Blocking is
-/// fine HERE only - a one-shot process has no pump and no LL hooks; the daemon defers
-/// across timer ticks instead (a sleep on the pump thread starves the hooks past
-/// LowLevelHooksTimeout).
+/// fine HERE only - no pump and no LL hooks in a one-shot process; the daemon defers
+/// across timer ticks instead.
 pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
     if h != 0 {
         let was_iconic = restore_if_iconic(h);
@@ -280,10 +271,7 @@ pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
             let mut windowed = false;
             for i in 0..20 {
                 if esc_tries < 3 && i % 3 == 0 && !modifiers_held() && is_fullscreen(h) {
-                    // retried every ~300ms while fullscreen persists (single posts can
-                    // fizzle depending on VLC's vout arrangement), capped like the
-                    // daemon path; can also lag an iconic restore or a held chord
-                    request_unfullscreen(h);
+                    request_unfullscreen(h); // same retry/cap policy as tick_pending
                     esc_tries += 1;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -505,8 +493,7 @@ pub fn exit_pip() -> bool {
     }
 }
 
-// One-shot semantics (the enter branch may block through a fullscreen handoff): callers
-// are main.rs modes only; the daemon toggles through its own deferred path.
+// One-shot semantics (the enter branch may block); the daemon uses its own deferred path.
 pub fn toggle(o: &PipOptions) -> bool {
     if in_pip() { exit_pip() } else { enter_blocking(find_player(), o) }
 }
