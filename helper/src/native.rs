@@ -13,17 +13,13 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
-};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-    GetLayeredWindowAttributes, GetPropW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, PostMessageW, RemovePropW, SetLayeredWindowAttributes,
-    SetPropW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
-    HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE,
-    WM_KEYDOWN, WM_KEYUP, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
+    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
+    WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -155,35 +151,26 @@ pub fn work_area(h: isize) -> geometry::Rect {
     }
 }
 
-// ---- fullscreen handoff ---------------------------------------------------------------
-// Reshaping from outside can't clear VLC's INTERNAL fullscreen state: its separate
-// fullscreen-controller strip stays on screen and the fullscreen rect would be saved as
-// the restore state. VLC itself must leave fullscreen before enter() snapshots anything.
+// ---- fullscreen-origin PiP -------------------------------------------------------------
+// Entering PiP from a fullscreen VLC reshapes IMMEDIATELY - the PiP appears at the
+// keypress. VLC's internal fullscreen state stays ON for the whole PiP session:
+// clearing it first (Esc, then wait for Qt's windowed restore) cost the user ~0.5-1s of
+// blank screen, and the reverse order desyncs Qt - it only restores its windowed
+// geometry from an UNTOUCHED fullscreen window (reshape-then-Esc left a captionless
+// window at the PiP rect, verified live). Exit restores the saved fullscreen style +
+// rect verbatim: the user came from fullscreen, they get fullscreen back, and VLC's
+// internal state matches its window again. Two side effects are managed meanwhile:
+// the fullscreen controller strip would pop up over the desktop on hover (hidden every
+// tick), and Esc/F reaching a focused PiP would make Qt leave fullscreen underneath
+// the reshape (swallowed by the keyboard hook).
 
-/// Borderless (caption fully gone) and covering the whole monitor - VLC's fullscreen look.
-pub fn is_fullscreen(h: isize) -> bool {
-    unsafe {
-        if is_windowed(h) {
-            return false;
-        }
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
-            return false; // can't judge: fail toward the plain enter
-        }
-        let m = mi.rcMonitor;
-        let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(hw(h), &mut r);
-        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
-    }
+/// Was this PiP taken from a fullscreen VLC? The saved pre-PiP style tells (caption
+/// fully absent). Drives the Esc swallow, the strip hiding, and the heal skip.
+pub fn fs_origin(style: i64) -> bool {
+    style as isize & WS_CAPTION as isize != WS_CAPTION as isize
 }
 
-/// Caption fully back - Qt's un-fullscreen restore has applied the windowed style.
-pub fn is_windowed(h: isize) -> bool {
-    unsafe { GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) }
-}
-
-/// Owner PID (0 when the window is gone) - the handoff's owns_state-style guard.
+/// Owner PID (0 when the window is gone).
 pub fn window_owner(h: isize) -> u32 {
     let mut p = 0u32;
     unsafe {
@@ -192,8 +179,8 @@ pub fn window_owner(h: isize) -> u32 {
     p
 }
 
-/// Restore BEFORE judging fullscreen: a minimized-from-fullscreen window hides its
-/// fullscreen rect behind the iconic placement (enter()'s own restore comes too late).
+/// Restore before enter() snapshots anything: the off-screen iconic rect must never
+/// become the restore state.
 pub fn restore_if_iconic(h: isize) -> bool {
     unsafe {
         if IsIconic(hw(h)) != 0 {
@@ -204,27 +191,20 @@ pub fn restore_if_iconic(h: isize) -> bool {
     }
 }
 
-// Every vout window (class prefix "VLC video main") of one VLC process, visible or NOT:
-// fullscreen hosts the vout embedded OR as an invisible desktop-parented top-level.
-struct VoutTargets {
+struct FscTargets {
     pid: u32,
     found: Vec<isize>,
 }
 
-unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
+unsafe extern "system" fn collect_fsc_cb(w: HWND, l: LPARAM) -> BOOL {
     unsafe {
-        let ctx = &mut *(l as *mut VoutTargets);
+        let ctx = &mut *(l as *mut FscTargets);
         let mut buf = [0u16; 128];
         let n = GetClassNameW(w, buf.as_mut_ptr(), 128);
-        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("VLC video main") {
-            if ctx.pid != 0 {
-                let mut p = 0u32;
-                GetWindowThreadProcessId(w, &mut p);
-                if p != ctx.pid {
-                    return 1;
-                }
-            }
-            if !ctx.found.contains(&(w as isize)) {
+        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("Qt5QWindowToolSaveBits") {
+            let mut p = 0u32;
+            GetWindowThreadProcessId(w, &mut p);
+            if p == ctx.pid && IsWindowVisible(w) != 0 {
                 ctx.found.push(w as isize);
             }
         }
@@ -232,144 +212,24 @@ unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
     }
 }
 
-/// Any modifier key physically down. VLC reads the PHYSICAL modifier state when it
-/// processes a posted key, so a still-held hotkey chord turns the Esc into
-/// Ctrl+Alt+Esc - bound to nothing (SPEC §7).
-pub fn modifiers_held() -> bool {
+/// Hide VLC's fullscreen controller strip - a separate topmost Qt window (class prefix
+/// "Qt5QWindowToolSaveBits") parked at the screen bottom, shown on hover while VLC
+/// believes it is fullscreen. One hide sticks across hovers (Qt's visibility cache
+/// desyncs from the OS state, verified live), but VLC's own hide timer can resync it,
+/// so this runs every tick while a fullscreen-origin PiP is active - worst case the
+/// strip blinks for one tick. After exit back to fullscreen, VLC's next hover/hide
+/// cycle brings the strip back naturally.
+pub fn hide_fs_controller(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let mut ctx = FscTargets { pid, found: Vec::new() };
     unsafe {
-        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
-            .into_iter()
-            .any(|vk| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0)
-    }
-}
-
-// The pre-cloak opacity state rides on a window property (visible cross-process, so a
-// one-shot and the daemon agree). Value: 0 = not cloaked, 1 = the layered bit is the
-// cloak's own, 2+alpha = the window was already layered at that alpha (VLC's own
-// "Windows opacity" setting uses WS_EX_LAYERED - it must survive a PiP cycle).
-fn cloak_prop() -> Vec<u16> {
-    "VlcPipCloak\0".encode_utf16().collect()
-}
-
-/// Cloak for the handoff: alpha 0, so the transition never renders. SW_HIDE cannot do
-/// this - Qt re-shows the window as part of leave-fullscreen (show, style, and rect
-/// land in one shot, ~25ms after Esc, verified live); transparency makes whatever Qt
-/// shows render as nothing. Fails silently on an elevated VLC (UIPI): the transition
-/// is merely visible then, as before v2.1.1.
-pub fn cloak(h: isize) {
-    unsafe {
-        let prop = cloak_prop();
-        if !GetPropW(hw(h), prop.as_ptr()).is_null() {
-            SetLayeredWindowAttributes(hw(h), 0, 0, LWA_ALPHA); // already cloaked: keep the recorded prior
-            return;
-        }
-        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        let prior: usize = if ex & WS_EX_LAYERED as isize != 0 {
-            let (mut key, mut alpha, mut flags) = (0u32, 0u8, 0u32);
-            let got = GetLayeredWindowAttributes(hw(h), &mut key, &mut alpha, &mut flags) != 0;
-            2 + if got && flags & LWA_ALPHA != 0 { alpha as usize } else { 255 }
-        } else {
-            SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
-            1
-        };
-        SetPropW(hw(h), prop.as_ptr(), prior as *mut core::ffi::c_void);
-        SetLayeredWindowAttributes(hw(h), 0, 0, LWA_ALPHA);
-    }
-}
-
-/// Restore the pre-cloak opacity state; a NO-OP on a window that is not cloaked (safe
-/// to call from every enter). enter() runs this itself right before its reshape; drop
-/// paths run it owner-guarded.
-pub fn uncloak(h: isize) {
-    unsafe {
-        let prop = cloak_prop();
-        let prior = GetPropW(hw(h), prop.as_ptr()) as usize;
-        if prior == 0 {
-            return;
-        }
-        RemovePropW(hw(h), prop.as_ptr());
-        if prior == 1 {
-            SetLayeredWindowAttributes(hw(h), 0, 255, LWA_ALPHA); // recomposite before the strip
-            let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-            SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
-        } else {
-            SetLayeredWindowAttributes(hw(h), 0, (prior - 2) as u8, LWA_ALPHA); // the bit was the user's
+        EnumWindows(Some(collect_fsc_cb), &mut ctx as *mut FscTargets as LPARAM);
+        for f in ctx.found {
+            ShowWindow(hw(f), SW_HIDE);
         }
     }
-}
-
-/// True when the WS_EX_LAYERED bit on this window belongs to a cloak, not the user.
-pub fn cloak_owns_layered_bit(h: isize) -> bool {
-    unsafe { GetPropW(hw(h), cloak_prop().as_ptr()) as usize == 1 }
-}
-
-/// Uncloak only while the handle still belongs to the arming process - a dropped
-/// handoff must never touch a recycled handle.
-pub fn uncloak_owned(h: isize, pid: u32) {
-    if pid != 0 && window_owner(h) == pid {
-        uncloak(h);
-    }
-}
-
-/// Post Esc (leave-fullscreen, a no-op otherwise) to every vout window - their event
-/// thread takes keys regardless of focus and visibility - plus the Qt top-level last
-/// (Qt drops posted keys when unfocused, gotcha #7). Callers gate on modifiers_held.
-pub fn request_unfullscreen(h: isize) {
-    let mut ctx = VoutTargets { pid: window_owner(h), found: Vec::new() };
-    unsafe {
-        EnumChildWindows(hw(h), Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
-        ctx.pid = ctx.pid.max(1); // never 0: EnumWindows must not match foreign processes
-        EnumWindows(Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
-        ctx.found.push(h);
-        for target in ctx.found {
-            PostMessageW(hw(target), WM_KEYDOWN, VK_ESCAPE as usize, 0x0001_0001); // scan 0x01, repeat 1
-            PostMessageW(hw(target), WM_KEYUP, VK_ESCAPE as usize, 0xC001_0001_u32 as isize);
-        }
-    }
-}
-
-/// One-shot enter: leave fullscreen first, blocking until VLC re-windows. Blocking is
-/// fine HERE only - no pump and no LL hooks in a one-shot process; the daemon defers
-/// across timer ticks instead.
-pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
-    if h != 0 {
-        let was_iconic = restore_if_iconic(h);
-        if is_fullscreen(h) || (was_iconic && !is_windowed(h)) {
-            let pid = window_owner(h);
-            cloak(h);
-            let mut esc_tries = 0u8;
-            let mut quiet = 0u8;
-            let mut windowed = false;
-            for _ in 0..20 {
-                quiet = if modifiers_held() { 0 } else { quiet.saturating_add(1) };
-                if esc_tries < 3 && quiet >= 2 && is_fullscreen(h) {
-                    request_unfullscreen(h); // same quiet-gate + retry/cap policy as tick_pending
-                    esc_tries += 1;
-                    quiet = 0;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if window_owner(h) != pid {
-                    return false; // VLC died (or the handle was recycled) mid-handoff
-                }
-                if is_windowed(h) {
-                    windowed = true;
-                    break;
-                }
-            }
-            if !windowed {
-                uncloak(h); // giving up: put the fullscreen window back on screen
-                return false; // Esc didn't take: never save the fullscreen rect as restore state
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
-        }
-    }
-    if enter(h, o) {
-        return true;
-    }
-    if h != 0 {
-        uncloak(h); // enter's guards bail before its own uncloak: never leave a cloak behind
-    }
-    false
 }
 
 // ---- drag gesture primitives (hook arms, pump applies) --------------------------------
@@ -508,9 +368,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         w: r.right - r.left,
         h: r.bottom - r.top,
         style: style as i64,
-        // a cloak's own layered bit (ours or a racing handoff's) must never become the
-        // restore state; a USER's layered bit (VLC's opacity setting) must
-        ex_style: if cloak_owns_layered_bit(h) { (ex & !(WS_EX_LAYERED as isize)) as i64 } else { ex as i64 },
+        ex_style: ex as i64,
         target_w: o.w,
         target_h: o.h,
         corner: o.corner.to_string(),
@@ -525,7 +383,6 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     // chrome-compensated rect with the region applied immediately - no visible
     // grow-then-clip pass from the converger (it only verifies afterwards)
     let chrome = if o.min { client_chrome(h) } else { None };
-    uncloak(h); // handoff over, the PiP must render; a no-op outside the handoff
     unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect
@@ -572,9 +429,8 @@ pub fn exit_pip() -> bool {
     }
 }
 
-// One-shot semantics (the enter branch may block); the daemon uses its own deferred path.
 pub fn toggle(o: &PipOptions) -> bool {
-    if in_pip() { exit_pip() } else { enter_blocking(find_player(), o) }
+    if in_pip() { exit_pip() } else { enter(find_player(), o) }
 }
 
 // ---- status -------------------------------------------------------------------------
@@ -760,6 +616,13 @@ static HEAL_TRIES: AtomicU32 = AtomicU32::new(0);
 fn heal_reopened(s: &PipState, path: &Path) {
     if s.w <= 0 || s.h <= 0 || s.pid == 0 {
         state::try_delete(path); // legacy (Pid=0) or garbage record: nothing safely healable
+        return;
+    }
+    if fs_origin(s.style) {
+        // a fullscreen-origin PiP's record holds the FULLSCREEN rect - never heal a
+        // reopened window to it. Qt believed fullscreen the whole session, so it
+        // persisted its true windowed geometry itself: nothing to heal.
+        state::try_delete(path);
         return;
     }
     let pids = vlc_pids();

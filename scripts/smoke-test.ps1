@@ -19,13 +19,25 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
-[DllImport("user32.dll")] public static extern long GetWindowLongPtrW(IntPtr h, int idx);
-// the intermediate windowed state during the fullscreen handoff: visible, captioned,
-// and NOT cloaked (WS_EX_LAYERED) - exactly what SPEC section 7 says must never render
-public static bool Rendered(IntPtr h) {
-    return IsWindowVisible(h)
-        && (GetWindowLongPtrW(h, -16) & 0xC00000) == 0xC00000
-        && (GetWindowLongPtrW(h, -20) & 0x80000) == 0;
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int max);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+public delegate bool EnumProc(IntPtr h, IntPtr l);
+// VLC's fullscreen controller strip: a separate topmost Qt window the daemon must keep
+// hidden while a fullscreen-origin PiP is active (SPEC section 7)
+public static bool FscVisible(IntPtr vlcTop) {
+    uint pid; GetWindowThreadProcessId(vlcTop, out pid);
+    bool vis = false;
+    EnumWindows((h, l) => {
+        var sb = new System.Text.StringBuilder(128);
+        GetClassNameW(h, sb, 128);
+        if (sb.ToString().StartsWith("Qt5QWindowToolSaveBits")) {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p == pid && IsWindowVisible(h)) { vis = true; return false; }
+        }
+        return true;
+    }, IntPtr.Zero);
+    return vis;
 }
 '@
 }
@@ -157,7 +169,7 @@ try {
     Check "interleaved hotkey+menu do not desync" (-not $s.inPip)
     Check "interleave restored exact rect" ($s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
-    # v2.1.1 fullscreen handoff (SPEC section 7). Click the video (a no-op) to focus,
+    # v2.1.1 fullscreen-origin PiP (SPEC section 7). Click the video (a no-op) to focus,
     # then F = VLC's fullscreen hotkey.
     ClickAt ($s.x + [int]($s.w / 2)) ($s.y + [int]($s.h / 2)) 1
     [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)      # F down
@@ -166,45 +178,50 @@ try {
     $fs = Status
     # caption-only: Qt autoresize can make the windowed size already match the monitor
     Check "fullscreen: engaged" (-not $fs.caption)
-    # enter from fullscreen, sampling the transition at ~15ms: the windowed restore may
-    # never render (visible + caption + uncloaked) before the state file appears
+
+    # the enter is one immediate reshape - no handoff wait: state file within ~2 ticks
     Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
-    $rendered = 0
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($hsw.ElapsedMilliseconds -lt 3000 -and -not (Test-Path "$env:TEMP\vlc-pip.json")) {
-        # re-check the state file AFTER a hit: a sample can land inside enter()'s own
-        # uncloak-to-reshape microseconds, which the state write has already marked
-        if ([Smoke.Keys]::Rendered([IntPtr]::new([long]$fs.hwnd)) -and -not (Test-Path "$env:TEMP\vlc-pip.json")) { $rendered++ }
-        Start-Sleep -Milliseconds 15
-    }
-    Start-Sleep -Milliseconds 900                                # let enter finish reshaping
+    while ($hsw.ElapsedMilliseconds -lt 2000 -and -not (Test-Path "$env:TEMP\vlc-pip.json")) { Start-Sleep -Milliseconds 15 }
+    $enterMs = $hsw.ElapsedMilliseconds
+    Start-Sleep -Milliseconds 700
     $fpip = Status
     Check "fullscreen toggle: enters pip" ($fpip.inPip -and -not $fpip.caption)
     Check "fullscreen toggle: pip-sized, not fullscreen" ($fpip.w -lt [int]($fs.w / 2))
-    Check "fullscreen handoff: transition never rendered" ($rendered -eq 0)
-    Req "toggle"; $fout = Status
-    Check "fullscreen exit: windowed rect restored" ($fout.caption -and $fout.x -eq $before.x -and $fout.y -eq $before.y -and $fout.w -eq $before.w -and $fout.h -eq $before.h)
+    Check "fullscreen toggle: immediate" ($enterMs -lt 500)
 
-    # a repeat toggle during the (invisible) handoff must be a no-op, not a cancel:
-    # cancelling made spam ping-pong between arm and cancel, so an even number of
-    # presses never entered PiP - the reported "have to spam the keybinding" feel
-    for ($try = 0; $try -lt 3; $try++) {
-        ClickAt ($fout.x + [int]($fout.w / 2)) ($fout.y + [int]($fout.h / 2)) 1
-        [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)  # F down
-        [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)  # F up
-        Start-Sleep -Milliseconds 800
-        if (-not (Status).caption) { break }
+    # VLC still believes it is fullscreen underneath: hovering the PiP must not surface
+    # its controller strip (the daemon keeps it hidden each tick)
+    $cx2 = $fpip.x + [int]($fpip.w / 2); $cy2 = $fpip.y + [int]($fpip.h / 2)
+    $sw2 = [Smoke.Keys]::GetSystemMetrics(0); $sh2 = [Smoke.Keys]::GetSystemMetrics(1)
+    for ($i = 0; $i -lt 8; $i++) {
+        $px = $cx2 - 40 + $i * 10; $py = $cy2 - 15 + ($i % 3) * 10
+        [Smoke.Keys]::mouse_event(0x8001, [uint32]($px * 65535 / ($sw2 - 1)), [uint32]($py * 65535 / ($sh2 - 1)), 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
     }
+    Start-Sleep -Milliseconds 500   # a first-hover strip may blink for one tick (SPEC)
+    Check "fullscreen pip: controller strip stays hidden" (-not [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd)))
+
+    # exit returns the user to fullscreen - where they came from, internally consistent
+    Req "toggle"; $fout = Status
+    Check "fullscreen exit: fullscreen restored" ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.w -eq $fs.w -and $fout.h -eq $fs.h)
+
+    # both toggles are instant now: two rapid presses = a full round-trip, no half-states
     Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
     for ($i = 0; $i -lt 20 -and (Test-Path "$env:TEMP\vlc-pip-request.txt"); $i++) { Start-Sleep -Milliseconds 25 }
-    # the first toggle must be CONSUMED before the rewrite, else the two writes collapse
-    # into one request and the check passes vacuously
-    $firstConsumed = -not (Test-Path "$env:TEMP\vlc-pip-request.txt")
-    Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"        # consumed while the pending is still armed (enter needs 2 more ticks)
-    Start-Sleep -Milliseconds 2000
+    Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
+    Start-Sleep -Milliseconds 1200
     $fdbl = Status
-    Check "fullscreen double-toggle: repeat press does not cancel" ($firstConsumed -and $fdbl.inPip -and -not $fdbl.caption)
-    Req "toggle"                                                 # back to windowed for the heal test
+    Check "fullscreen double-toggle: clean round-trip to fullscreen" ((-not $fdbl.inPip) -and (-not $fdbl.caption) -and $fdbl.w -eq $fs.w)
+
+    # leave fullscreen via VLC itself: the window was untouched while fullscreen, so
+    # Qt's own restore must land the exact pre-fullscreen rect
+    ClickAt $cx2 $cy2 1
+    [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)      # F down
+    [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)      # F up
+    Start-Sleep -Milliseconds 900
+    $fw = Status
+    Check "fullscreen left: original windowed rect intact" ($fw.caption -and $fw.x -eq $before.x -and $fw.y -eq $before.y -and $fw.w -eq $before.w -and $fw.h -eq $before.h)
 
     # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
     # (a kill persists nothing and would pass even without the heal - verified), so the
