@@ -2,7 +2,7 @@
 
 Turns the **real** VLC 3.x window into a borderless, always-on-top, corner-parked mini player - toggled from **View → PiP Mode** or **Ctrl+Alt+P** - and restores it to its exact original size, position, and borders on toggle back.
 
-No mirroring, no second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and every VLC feature and shortcut keeps working inside the PiP. A ~157KB dependency-free Rust daemon does the work; a tiny Lua extension adds the menu entry. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
+No mirroring, no second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and every VLC feature and shortcut keeps working inside the PiP. A ~159KB dependency-free Rust daemon does the work; a tiny Lua extension adds the menu entry. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
 ![vlc-pip demo](docs/demo.webp)
 
