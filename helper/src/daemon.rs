@@ -5,8 +5,8 @@ use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    VK_ESCAPE, VK_F, VK_P,
+    GetAsyncKeyState, GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT,
+    MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
@@ -223,10 +223,6 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-// Fullscreen handoff, deferred: leaving fullscreen is async in VLC and the pump must
-// never block (LL-hook timeout), so the enter waits on timer ticks until the caption
-// holds for TWO consecutive ticks (Qt's style AND rect restores both landed). Keyed by
-// hwnd + owner PID. Rationale and contract: native.rs handoff section, SPEC §7.
 fn poll_request(argv: &[String]) {
     match request::consume(&request::request_path()).as_deref() {
         Some("toggle") => {
@@ -254,8 +250,15 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 }
                 // a fullscreen-origin PiP rides on VLC's live internal fullscreen
                 // state: Esc would make Qt leave it UNDERNEATH the reshape, desyncing
-                // Qt's window cache (SPEC section 7)
-                if k.vkCode == VK_ESCAPE as u32 && FS_PIP.load(Relaxed) {
+                // Qt's window cache (SPEC section 7). BARE Esc only - Alt+Esc and
+                // Ctrl+Esc are OS shortcuts, and VLC binds leave-fullscreen to plain
+                // Esc alone
+                if k.vkCode == VK_ESCAPE as u32
+                    && FS_PIP.load(Relaxed)
+                    && [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+                        .into_iter()
+                        .all(|vk| GetAsyncKeyState(vk as i32) as u16 & 0x8000 == 0)
+                {
                     return 1;
                 }
             }

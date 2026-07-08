@@ -223,6 +223,22 @@ try {
     $fw = Status
     Check "fullscreen left: original windowed rect intact" ($fw.caption -and $fw.x -eq $before.x -and $fw.y -eq $before.y -and $fw.w -eq $before.w -and $fw.h -eq $before.h)
 
+    # stopping playback inside a fullscreen-origin PiP: VLC leaves fullscreen by itself
+    # and balloons the window - the daemon must dissolve the session into a plain
+    # windowed VLC (frame back, state dropped), never restore the fullscreen shell
+    ClickAt ($fw.x + [int]($fw.w / 2)) ($fw.y + [int]($fw.h / 2)) 1
+    [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)      # F: fullscreen again
+    [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 800
+    Req "toggle"                                                 # fs-origin PiP
+    $fsp = Status
+    ClickAt ($fsp.x + [int]($fsp.w / 2)) ($fsp.y + [int]($fsp.h / 2)) 1
+    [Smoke.Keys]::keybd_event(0x53, 0, 0, [UIntPtr]::Zero)      # S = VLC stop
+    [Smoke.Keys]::keybd_event(0x53, 0, 2, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 1200
+    $dis = Status
+    Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.json"))
+
     # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
     # (a kill persists nothing and would pass even without the heal - verified), so the
     # reopened window would sit full-size at the PiP origin; the daemon heals it back to

@@ -17,9 +17,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
-    WS_MAXIMIZE, WS_THICKFRAME,
+    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
+    WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -528,17 +528,51 @@ fn same_rect(a: &RECT, b: &RECT) -> bool {
 }
 
 // Cross-tick measurement memory for the stability debounce; v1 kept these in statics.
+// fs_prev/fs_have: the fullscreen-origin dissolve watch's baseline - the window rect
+// last seen WITH a live video child.
 pub struct RegionTracker {
     prev_win: RECT,
     prev_child: RECT,
     have_prev: bool,
+    fs_prev: RECT,
+    fs_have: bool,
 }
 
 impl Default for RegionTracker {
     // manual impl: windows-sys RECT has no Default
     fn default() -> Self {
-        unsafe { Self { prev_win: std::mem::zeroed(), prev_child: std::mem::zeroed(), have_prev: false } }
+        unsafe {
+            Self {
+                prev_win: std::mem::zeroed(),
+                prev_child: std::mem::zeroed(),
+                have_prev: false,
+                fs_prev: std::mem::zeroed(),
+                fs_have: false,
+            }
+        }
     }
+}
+
+/// Qt left fullscreen UNDERNEATH a fullscreen-origin PiP. Media end and stop trigger
+/// Qt's own leave-fullscreen re-layout - the window balloons to Qt's idea of windowed
+/// geometry, no input involved (verified live: within ~one tick of the vout dying).
+/// The PiP session dissolves: give the window its frame back at Qt's chosen rect and
+/// drop the state. Stock VLC lands windowed after fullscreen playback ends too, and the
+/// saved fullscreen rect must never be restored onto an internally windowed VLC.
+fn dissolve_fs_pip(s: &PipState, path: &Path) {
+    let h = s.hwnd as isize;
+    unsafe {
+        SetWindowRgn(hw(h), std::ptr::null_mut(), 1);
+        SetWindowLongPtrW(
+            hw(h),
+            GWL_STYLE,
+            s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize,
+        );
+        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, s.ex_style as isize);
+        let after = if s.ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        SetWindowPos(hw(h), after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+    }
+    state::try_delete(path);
 }
 
 /// Converging per-tick maintenance, called by the daemon timer (and one-shot enter):
@@ -560,12 +594,31 @@ pub fn maintain_region(t: &mut RegionTracker) {
         return;
     }
     HEAL_TRIES.store(0, Relaxed); // a live owned PiP ends any interrupted heal cleanly
+    let h = s.hwnd as isize;
+    let child = find_video_child(h);
+
+    // fullscreen-origin dissolve watch - BEFORE the min gate, it guards every fs session
+    if fs_origin(s.style) {
+        let mut wr: RECT = unsafe { std::mem::zeroed() };
+        unsafe { GetWindowRect(hw(h), &mut wr) };
+        if child != 0 {
+            // baseline: the rect while video is alive (our reshapes and drags included)
+            t.fs_prev = wr;
+            t.fs_have = true;
+        } else if t.fs_have && !same_rect(&wr, &t.fs_prev) {
+            dissolve_fs_pip(&s, &path);
+            t.have_prev = false;
+            t.fs_have = false;
+            return;
+        }
+    } else {
+        t.fs_have = false;
+    }
+
     if !s.min {
         return;
     }
-    let h = s.hwnd as isize;
 
-    let child = find_video_child(h);
     unsafe {
         if child == 0 {
             t.have_prev = false;
