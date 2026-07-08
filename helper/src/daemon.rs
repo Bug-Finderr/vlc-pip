@@ -140,7 +140,10 @@ pub fn run(argv: &[String]) -> i32 {
                 refresh_state(); // the hook cache must reflect a request- or handoff-triggered toggle within this tick
                 if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
                     tracker = native::RegionTracker::default(); // gestures own the window while dragging
-                } else {
+                } else if pending.is_none() {
+                    // paused during a handoff: its heal path would SetWindowPos the
+                    // still-fullscreen window, leaving a state that is neither
+                    // fullscreen nor windowed - the Esc wait then dead-stalls cloaked
                     native::maintain_region(&mut tracker);
                 }
             } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
@@ -229,6 +232,10 @@ struct PendingEnter {
     quiet_ticks: u8,
     windowed_ticks: u8,
     deadline: Instant,
+    // absolute, never refreshed: modifiers_held() reads GLOBAL keyboard state, so a
+    // stuck modifier (RDP/VM artifact) or typing in another app after an alt-tab must
+    // not hold the cloaked (invisible) VLC hostage via the refreshable deadline
+    hard_deadline: Instant,
 }
 
 fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
@@ -243,11 +250,13 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
                 quiet_ticks: 0,
                 windowed_ticks: 0,
                 deadline: Instant::now() + Duration::from_secs(2),
+                hard_deadline: Instant::now() + Duration::from_secs(6),
             });
             // blank the transition from the very keypress: the intermediate windowed
-            // restore must never render (SPEC §7 cloak)
+            // restore must never render (SPEC §7 cloak). No immediate tick here - a
+            // request-file arm would tick twice in one timer pass and slip the Esc
+            // through the quiet gate; the next tick is <=150ms away and cloaked.
             native::cloak(h);
-            tick_pending(argv, pending); // post the Esc now, not a tick later
             return;
         }
     }
@@ -278,10 +287,11 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
         native::uncloak_owned(p.hwnd, p.pid);
         true
     } else if native::is_windowed(p.hwnd) {
-        if native::modifiers_held() {
+        if native::modifiers_held() && Instant::now() < p.hard_deadline {
             // keyboard busy: let the spam settle. A PiP materializing mid-spam gets
             // toggled right back out by the next press (observed live) - nothing may
-            // appear until the user's hands are off the modifiers.
+            // appear until the user's hands are off the modifiers. Past the hard cap,
+            // stop waiting for quiet and finish the enter.
             p.windowed_ticks = 0;
             false
         } else {
@@ -315,7 +325,8 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
             }
         }
         p.windowed_ticks = 0; // caption flickered: restart the stability count
-        let expired = Instant::now() >= p.deadline; // Esc didn't take (e.g. a modal ate it): give up
+        // Esc didn't take (e.g. a modal ate it), or the hard cap hit: give up
+        let expired = Instant::now() >= p.deadline || Instant::now() >= p.hard_deadline;
         if expired {
             native::uncloak_owned(p.hwnd, p.pid); // giving up: put the fullscreen window back on screen
         }

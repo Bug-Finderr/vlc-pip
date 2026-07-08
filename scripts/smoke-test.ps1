@@ -172,7 +172,9 @@ try {
     $rendered = 0
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($hsw.ElapsedMilliseconds -lt 3000 -and -not (Test-Path "$env:TEMP\vlc-pip.json")) {
-        if ([Smoke.Keys]::Rendered([IntPtr]::new([long]$fs.hwnd))) { $rendered++ }
+        # re-check the state file AFTER a hit: a sample can land inside enter()'s own
+        # uncloak-to-reshape microseconds, which the state write has already marked
+        if ([Smoke.Keys]::Rendered([IntPtr]::new([long]$fs.hwnd)) -and -not (Test-Path "$env:TEMP\vlc-pip.json")) { $rendered++ }
         Start-Sleep -Milliseconds 15
     }
     Start-Sleep -Milliseconds 900                                # let enter finish reshaping

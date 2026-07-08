@@ -18,9 +18,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-    GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
+    GetLayeredWindowAttributes, GetPropW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindow, IsWindowVisible, PostMessageW, RemovePropW, SetLayeredWindowAttributes,
+    SetPropW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
+    HWND_NOTOPMOST, HWND_TOPMOST, LWA_ALPHA, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE,
     WM_KEYDOWN, WM_KEYUP, WS_CAPTION, WS_EX_LAYERED, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
@@ -242,27 +243,64 @@ pub fn modifiers_held() -> bool {
     }
 }
 
-/// Cloak for the handoff: WS_EX_LAYERED + alpha 0, so the transition never renders.
-/// SW_HIDE cannot do this - Qt re-shows the window as part of leave-fullscreen (show,
-/// style, and rect land in one shot, ~25ms after Esc, verified live); transparency
-/// makes whatever Qt shows render as nothing. Fails silently on an elevated VLC
-/// (UIPI): the transition is merely visible then, as before v2.1.1.
+// The pre-cloak opacity state rides on a window property (visible cross-process, so a
+// one-shot and the daemon agree). Value: 0 = not cloaked, 1 = the layered bit is the
+// cloak's own, 2+alpha = the window was already layered at that alpha (VLC's own
+// "Windows opacity" setting uses WS_EX_LAYERED - it must survive a PiP cycle).
+fn cloak_prop() -> Vec<u16> {
+    "VlcPipCloak\0".encode_utf16().collect()
+}
+
+/// Cloak for the handoff: alpha 0, so the transition never renders. SW_HIDE cannot do
+/// this - Qt re-shows the window as part of leave-fullscreen (show, style, and rect
+/// land in one shot, ~25ms after Esc, verified live); transparency makes whatever Qt
+/// shows render as nothing. Fails silently on an elevated VLC (UIPI): the transition
+/// is merely visible then, as before v2.1.1.
 pub fn cloak(h: isize) {
     unsafe {
+        let prop = cloak_prop();
+        if !GetPropW(hw(h), prop.as_ptr()).is_null() {
+            SetLayeredWindowAttributes(hw(h), 0, 0, LWA_ALPHA); // already cloaked: keep the recorded prior
+            return;
+        }
         let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+        let prior: usize = if ex & WS_EX_LAYERED as isize != 0 {
+            let (mut key, mut alpha, mut flags) = (0u32, 0u8, 0u32);
+            let got = GetLayeredWindowAttributes(hw(h), &mut key, &mut alpha, &mut flags) != 0;
+            2 + if got && flags & LWA_ALPHA != 0 { alpha as usize } else { 255 }
+        } else {
+            SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex | WS_EX_LAYERED as isize);
+            1
+        };
+        SetPropW(hw(h), prop.as_ptr(), prior as *mut core::ffi::c_void);
         SetLayeredWindowAttributes(hw(h), 0, 0, LWA_ALPHA);
     }
 }
 
-/// Remove the cloak: alpha back first (DWM recomposites), then the style bit. enter()
-/// runs this itself right before its reshape; drop paths run it owner-guarded.
+/// Restore the pre-cloak opacity state; a NO-OP on a window that is not cloaked (safe
+/// to call from every enter). enter() runs this itself right before its reshape; drop
+/// paths run it owner-guarded.
 pub fn uncloak(h: isize) {
     unsafe {
-        SetLayeredWindowAttributes(hw(h), 0, 255, LWA_ALPHA);
-        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
+        let prop = cloak_prop();
+        let prior = GetPropW(hw(h), prop.as_ptr()) as usize;
+        if prior == 0 {
+            return;
+        }
+        RemovePropW(hw(h), prop.as_ptr());
+        if prior == 1 {
+            SetLayeredWindowAttributes(hw(h), 0, 255, LWA_ALPHA); // recomposite before the strip
+            let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
+            SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex & !(WS_EX_LAYERED as isize));
+        } else {
+            SetLayeredWindowAttributes(hw(h), 0, (prior - 2) as u8, LWA_ALPHA); // the bit was the user's
+        }
     }
+}
+
+/// True when the WS_EX_LAYERED bit on this window belongs to a cloak, not the user.
+pub fn cloak_owns_layered_bit(h: isize) -> bool {
+    unsafe { GetPropW(hw(h), cloak_prop().as_ptr()) as usize == 1 }
 }
 
 /// Uncloak only while the handle still belongs to the arming process - a dropped
@@ -470,8 +508,9 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         w: r.right - r.left,
         h: r.bottom - r.top,
         style: style as i64,
-        // a cloaked handoff (or a one-shot racing one) must never become the restore state
-        ex_style: (ex & !(WS_EX_LAYERED as isize)) as i64,
+        // a cloak's own layered bit (ours or a racing handoff's) must never become the
+        // restore state; a USER's layered bit (VLC's opacity setting) must
+        ex_style: if cloak_owns_layered_bit(h) { (ex & !(WS_EX_LAYERED as isize)) as i64 } else { ex as i64 },
         target_w: o.w,
         target_h: o.h,
         corner: o.corner.to_string(),
