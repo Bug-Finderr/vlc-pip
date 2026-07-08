@@ -250,13 +250,17 @@ fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter
 }
 
 fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
-    let had_pending = pending.take().is_some();
     if native::in_pip() {
         // even with a pending armed (a one-shot enter can win the race): toggle means exit
+        *pending = None;
         native::exit_pip();
-    } else if !had_pending {
+    } else if pending.is_none() {
         enter_deferring_fullscreen(argv, pending);
-    } // had_pending: toggle while the enter was armed cancels it (still not in PiP)
+    }
+    // pending armed and not in PiP: the enter is already in flight. The handoff is
+    // invisible for its first ~0.5-1s, so an impatient repeat press MUST be a no-op -
+    // cancelling made spam ping-pong between arm and cancel, and an even number of
+    // presses never entered PiP (the 2s deadline is the way out of a stuck pending).
 }
 
 fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {

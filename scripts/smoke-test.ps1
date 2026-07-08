@@ -164,6 +164,27 @@ try {
     Req "toggle"; $fout = Status
     Check "fullscreen exit: windowed rect restored" ($fout.caption -and $fout.x -eq $before.x -and $fout.y -eq $before.y -and $fout.w -eq $before.w -and $fout.h -eq $before.h)
 
+    # a repeat toggle during the (invisible) handoff must be a no-op, not a cancel:
+    # cancelling made spam ping-pong between arm and cancel, so an even number of
+    # presses never entered PiP - the reported "have to spam the keybinding" feel
+    for ($try = 0; $try -lt 3; $try++) {
+        ClickAt ($fout.x + [int]($fout.w / 2)) ($fout.y + [int]($fout.h / 2)) 1
+        [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)  # F down
+        [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)  # F up
+        Start-Sleep -Milliseconds 800
+        if (-not (Status).caption) { break }
+    }
+    Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
+    for ($i = 0; $i -lt 20 -and (Test-Path "$env:TEMP\vlc-pip-request.txt"); $i++) { Start-Sleep -Milliseconds 25 }
+    # the first toggle must be CONSUMED before the rewrite, else the two writes collapse
+    # into one request and the check passes vacuously
+    $firstConsumed = -not (Test-Path "$env:TEMP\vlc-pip-request.txt")
+    Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"        # consumed while the pending is still armed (enter needs 2 more ticks)
+    Start-Sleep -Milliseconds 2000
+    $fdbl = Status
+    Check "fullscreen double-toggle: repeat press does not cancel" ($firstConsumed -and $fdbl.inPip -and -not $fdbl.caption)
+    Req "toggle"                                                 # back to windowed for the heal test
+
     # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
     # (a kill persists nothing and would pass even without the heal - verified), so the
     # reopened window would sit full-size at the PiP origin; the daemon heals it back to
