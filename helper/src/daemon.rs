@@ -280,7 +280,13 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
             false
         }
     } else {
-        if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
+        if native::modifiers_held() {
+            if p.esc_tries == 0 {
+                // the user is still holding the hotkey chord, which would poison the
+                // Esc: wait it out, and start the give-up countdown at the release
+                p.deadline = Instant::now() + Duration::from_secs(2);
+            }
+        } else if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
             // retried while fullscreen persists: a single post can fizzle depending on
             // VLC's vout arrangement; capped so a modal dialog is not Esc-spammed. Can
             // also lag the arm - an iconic restore has to land before fullscreen shows.

@@ -13,7 +13,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
@@ -233,11 +235,24 @@ unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
     }
 }
 
+/// Any modifier key physically down (async state). VLC translates posted keys against
+/// the PHYSICAL modifier state at processing time (verified live: Esc posted while
+/// Ctrl+Alt are held reads as Ctrl+Alt+Esc - bound to nothing - even with VLC
+/// unfocused), so the still-held chord of the very hotkey that triggered the handoff
+/// poisons the Esc until the fingers lift.
+pub fn modifiers_held() -> bool {
+    unsafe {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+            .into_iter()
+            .any(|vk| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0)
+    }
+}
+
 /// Ask VLC to leave fullscreen by posting Esc (its leave-fullscreen key, a no-op
 /// otherwise). The reliable receivers are the win32 vout windows: their event thread
 /// processes keys regardless of focus AND visibility. Post to every one of them plus
 /// the Qt top-level as a last resort - Qt drops posted keys when unfocused (gotcha #7),
-/// so it must never be the only target.
+/// so it must never be the only target. Callers gate on modifiers_held.
 pub fn request_unfullscreen(h: isize) {
     let mut ctx = VoutTargets { pid: window_owner(h), found: Vec::new() };
     unsafe {
@@ -264,10 +279,10 @@ pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
             let mut esc_tries = 0u8;
             let mut windowed = false;
             for i in 0..20 {
-                if esc_tries < 3 && i % 3 == 0 && is_fullscreen(h) {
+                if esc_tries < 3 && i % 3 == 0 && !modifiers_held() && is_fullscreen(h) {
                     // retried every ~300ms while fullscreen persists (single posts can
                     // fizzle depending on VLC's vout arrangement), capped like the
-                    // daemon path; can also lag an iconic restore
+                    // daemon path; can also lag an iconic restore or a held chord
                     request_unfullscreen(h);
                     esc_tries += 1;
                 }
