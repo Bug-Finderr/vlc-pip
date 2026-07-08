@@ -224,42 +224,53 @@ pub fn run(argv: &[String]) -> i32 {
 // rect as the restore state. Leaving is async in VLC, and the pump must never block
 // (LL-hook timeout), so the enter is deferred to timer ticks: the caption must be back
 // on TWO consecutive ticks (Qt's style AND rect restores both landed) before enter()
-// snapshots the window.
+// snapshots the window. The pending is keyed by hwnd + owner PID (owns_state-style: a
+// recycled handle must never get a foreign window entered).
 struct PendingEnter {
     hwnd: isize,
+    pid: u32,
+    esc_sent: bool,
     windowed_ticks: u8,
     deadline: Instant,
 }
 
 fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
     let h = native::find_player();
-    if h != 0 && native::is_fullscreen(h) {
-        native::request_unfullscreen(h);
-        *pending = Some(PendingEnter {
-            hwnd: h,
-            windowed_ticks: 0,
-            deadline: Instant::now() + Duration::from_secs(2),
-        });
-    } else {
-        native::enter(h, &options::effective(argv));
+    if h != 0 {
+        // restore BEFORE judging: a minimized-from-fullscreen VLC hides its fullscreen
+        // rect behind the iconic placement, and enter()'s own restore would bring the
+        // fullscreen window back only after the plain path was already chosen
+        let was_iconic = native::restore_if_iconic(h);
+        if native::is_fullscreen(h) || (was_iconic && !native::is_windowed(h)) {
+            *pending = Some(PendingEnter {
+                hwnd: h,
+                pid: native::window_owner(h),
+                esc_sent: false,
+                windowed_ticks: 0,
+                deadline: Instant::now() + Duration::from_secs(2),
+            });
+            tick_pending(argv, pending); // post the Esc now, not a tick later
+            return;
+        }
     }
+    native::enter(h, &options::effective(argv));
 }
 
 fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
-    if pending.take().is_some() {
-        return; // toggle while the enter is armed cancels it (the state was still "not in PiP")
-    }
+    let had_pending = pending.take().is_some();
     if native::in_pip() {
+        // possible even with a pending armed (a one-shot CLI enter can win the race):
+        // the user's toggle means exit - never eat the press as a mere cancel
         native::exit_pip();
-    } else {
+    } else if !had_pending {
         enter_deferring_fullscreen(argv, pending);
-    }
+    } // had_pending: toggle while the enter was armed cancels it (still not in PiP)
 }
 
 fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
     let Some(p) = pending.as_mut() else { return };
-    let done = if !native::window_alive(p.hwnd) {
-        true // VLC died while leaving fullscreen
+    let done = if native::window_owner(p.hwnd) != p.pid || native::in_pip() {
+        true // VLC died / handle recycled, or something else entered PiP first
     } else if native::is_windowed(p.hwnd) {
         p.windowed_ticks += 1;
         if p.windowed_ticks >= 2 {
@@ -269,6 +280,11 @@ fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
             false
         }
     } else {
+        if !p.esc_sent && native::is_fullscreen(p.hwnd) {
+            // may lag the arm: an iconic restore has to land before fullscreen shows
+            native::request_unfullscreen(p.hwnd);
+            p.esc_sent = true;
+        }
         p.windowed_ticks = 0; // caption flickered: restart the stability count
         Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up
     };
@@ -289,7 +305,13 @@ fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
             *pending = None; // an armed enter is moot once an exit is requested
             native::exit_pip();
         }
-        Some("stop") => unsafe { PostQuitMessage(0) },
+        Some("stop") => {
+            // clear FIRST: PostQuitMessage is not preemptive, and this same tick still
+            // runs tick_pending - a handoff must never complete on the way out (uninstall
+            // would strand a PiP'd VLC with no daemon)
+            *pending = None;
+            unsafe { PostQuitMessage(0) }
+        }
         _ => {}
     }
 }

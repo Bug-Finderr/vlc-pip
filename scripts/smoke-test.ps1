@@ -157,7 +157,9 @@ try {
     [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)      # F up
     Start-Sleep -Milliseconds 800
     $fs = Status
-    Check "fullscreen: engaged" ((-not $fs.caption) -and $fs.w -gt $before.w)
+    # caption-only on purpose: screen:// + Qt autoresize can make the WINDOWED width/height
+    # already match the monitor's (taskbar-edge dependent), so size comparisons are flaky
+    Check "fullscreen: engaged" (-not $fs.caption)
     Req "toggle"; Start-Sleep -Milliseconds 1200                 # Esc + two windowed ticks + enter
     $fpip = Status
     Check "fullscreen toggle: enters pip" ($fpip.inPip -and -not $fpip.caption)

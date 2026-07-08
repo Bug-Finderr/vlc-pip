@@ -180,8 +180,27 @@ pub fn is_windowed(h: isize) -> bool {
     unsafe { GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) }
 }
 
-pub fn window_alive(h: isize) -> bool {
-    unsafe { IsWindow(hw(h)) != 0 }
+/// Owner PID (0 when the window is gone) - the handoff's owns_state-style guard: a dead
+/// VLC or a recycled handle must never get a foreign window entered.
+pub fn window_owner(h: isize) -> u32 {
+    let mut p = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hw(h), &mut p);
+    }
+    p
+}
+
+/// A minimized-from-fullscreen VLC hides its fullscreen rect behind the iconic placement,
+/// so the handoff must restore BEFORE judging - enter()'s own restore would bring the
+/// fullscreen window back only after the check already chose the plain path.
+pub fn restore_if_iconic(h: isize) -> bool {
+    unsafe {
+        if IsIconic(hw(h)) != 0 {
+            ShowWindow(hw(h), SW_RESTORE);
+            return true;
+        }
+        false
+    }
 }
 
 /// Ask VLC to leave fullscreen: post Esc (its leave-fullscreen key) to the video child,
@@ -204,20 +223,33 @@ pub fn request_unfullscreen(h: isize) {
 /// across timer ticks instead (a sleep on the pump thread starves the hooks past
 /// LowLevelHooksTimeout).
 pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
-    if h != 0 && is_fullscreen(h) {
-        request_unfullscreen(h);
-        let mut windowed = false;
-        for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if is_windowed(h) {
-                windowed = true;
-                break;
+    if h != 0 {
+        let was_iconic = restore_if_iconic(h);
+        if is_fullscreen(h) || (was_iconic && !is_windowed(h)) {
+            let pid = window_owner(h);
+            let mut esc_sent = false;
+            let mut windowed = false;
+            for _ in 0..20 {
+                if !esc_sent && is_fullscreen(h) {
+                    // may lag the restore: an iconic window shows fullscreen only once
+                    // its restore lands
+                    request_unfullscreen(h);
+                    esc_sent = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if window_owner(h) != pid {
+                    return false; // VLC died (or the handle was recycled) mid-handoff
+                }
+                if is_windowed(h) {
+                    windowed = true;
+                    break;
+                }
             }
+            if !windowed {
+                return false; // Esc didn't take: never save the fullscreen rect as restore state
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
         }
-        if !windowed {
-            return false; // Esc didn't take: never save the fullscreen rect as restore state
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
     }
     enter(h, o)
 }
