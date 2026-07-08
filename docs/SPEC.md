@@ -83,19 +83,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ### 5.2 `pip-helper.exe` (Rust binary crate at `helper/`)
 
-Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; JSON is hand-rolled (§7 gotcha R2). Suggested layout:
-
-```
-helper/Cargo.toml            [package] name = "pip-helper", edition = "2024"
-helper/src/main.rs           entry, panic hook, mode dispatch, one-shot region loop
-helper/src/options.rs        PipOptions + argv parsing (w= h= c= m= min=)
-helper/src/geometry.rs       compute_corner (pure)
-helper/src/state.rs          PipState + hand-rolled JSON parse/write, load/save/delete
-helper/src/request.rs        request-file consume
-helper/src/native.rs         Win32: find_player, enter/exit/toggle, maintain_region, status
-helper/src/daemon.rs         pump, hotkey, timer, LL hooks, heartbeat, single-instance mutex
-helper/src/tests.rs          all unit tests, one cfg(test) file (tested internals are pub(crate))
-```
+Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; JSON is hand-rolled (§8 gotcha R2). Module layout and per-file responsibilities: [ARCHITECTURE.md](ARCHITECTURE.md) §Layout.
 
 Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed from the remaining args; `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
 - `toggle` | `enter` - one-shot Win32 action, then if it **entered** PiP with `min=1`: 6 × { sleep 150 ms; maintain_region } to converge the minimal look. Exit 0 on success, 1 on failure.
@@ -239,7 +227,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 - **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~157KB).
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
-- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (34 end-to-end checks against live VLC; requires install first and VLC closed).
+- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (38 end-to-end checks against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
 ---
