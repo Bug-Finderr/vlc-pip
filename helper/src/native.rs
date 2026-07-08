@@ -13,13 +13,16 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
     HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
-    WS_MAXIMIZE, WS_THICKFRAME,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WM_KEYDOWN, WM_KEYUP, WS_CAPTION,
+    WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -151,6 +154,144 @@ pub fn work_area(h: isize) -> geometry::Rect {
     }
 }
 
+// ---- fullscreen handoff ---------------------------------------------------------------
+// Reshaping from outside can't clear VLC's INTERNAL fullscreen state: its separate
+// fullscreen-controller strip stays on screen and the fullscreen rect would be saved as
+// the restore state. VLC itself must leave fullscreen before enter() snapshots anything.
+
+/// Borderless (caption fully gone) and covering the whole monitor - VLC's fullscreen look.
+pub fn is_fullscreen(h: isize) -> bool {
+    unsafe {
+        if is_windowed(h) {
+            return false;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+            return false; // can't judge: fail toward the plain enter
+        }
+        let m = mi.rcMonitor;
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hw(h), &mut r);
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// Caption fully back - Qt's un-fullscreen restore has applied the windowed style.
+pub fn is_windowed(h: isize) -> bool {
+    unsafe { GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) }
+}
+
+/// Owner PID (0 when the window is gone) - the handoff's owns_state-style guard.
+pub fn window_owner(h: isize) -> u32 {
+    let mut p = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hw(h), &mut p);
+    }
+    p
+}
+
+/// Restore BEFORE judging fullscreen: a minimized-from-fullscreen window hides its
+/// fullscreen rect behind the iconic placement (enter()'s own restore comes too late).
+pub fn restore_if_iconic(h: isize) -> bool {
+    unsafe {
+        if IsIconic(hw(h)) != 0 {
+            ShowWindow(hw(h), SW_RESTORE);
+            return true;
+        }
+        false
+    }
+}
+
+// Every vout window (class prefix "VLC video main") of one VLC process, visible or NOT:
+// fullscreen hosts the vout embedded OR as an invisible desktop-parented top-level.
+struct VoutTargets {
+    pid: u32,
+    found: Vec<isize>,
+}
+
+unsafe extern "system" fn collect_vout_cb(w: HWND, l: LPARAM) -> BOOL {
+    unsafe {
+        let ctx = &mut *(l as *mut VoutTargets);
+        let mut buf = [0u16; 128];
+        let n = GetClassNameW(w, buf.as_mut_ptr(), 128);
+        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("VLC video main") {
+            if ctx.pid != 0 {
+                let mut p = 0u32;
+                GetWindowThreadProcessId(w, &mut p);
+                if p != ctx.pid {
+                    return 1;
+                }
+            }
+            if !ctx.found.contains(&(w as isize)) {
+                ctx.found.push(w as isize);
+            }
+        }
+        1
+    }
+}
+
+/// Any modifier key physically down. VLC reads the PHYSICAL modifier state when it
+/// processes a posted key, so a still-held hotkey chord turns the Esc into
+/// Ctrl+Alt+Esc - bound to nothing (SPEC §7).
+pub fn modifiers_held() -> bool {
+    unsafe {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+            .into_iter()
+            .any(|vk| GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0)
+    }
+}
+
+/// Post Esc (leave-fullscreen, a no-op otherwise) to every vout window - their event
+/// thread takes keys regardless of focus and visibility - plus the Qt top-level last
+/// (Qt drops posted keys when unfocused, gotcha #7). Callers gate on modifiers_held.
+pub fn request_unfullscreen(h: isize) {
+    let mut ctx = VoutTargets { pid: window_owner(h), found: Vec::new() };
+    unsafe {
+        EnumChildWindows(hw(h), Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
+        ctx.pid = ctx.pid.max(1); // never 0: EnumWindows must not match foreign processes
+        EnumWindows(Some(collect_vout_cb), &mut ctx as *mut VoutTargets as LPARAM);
+        ctx.found.push(h);
+        for target in ctx.found {
+            PostMessageW(hw(target), WM_KEYDOWN, VK_ESCAPE as usize, 0x0001_0001); // scan 0x01, repeat 1
+            PostMessageW(hw(target), WM_KEYUP, VK_ESCAPE as usize, 0xC001_0001_u32 as isize);
+        }
+    }
+}
+
+/// One-shot enter: leave fullscreen first, blocking until VLC re-windows. Blocking is
+/// fine HERE only - no pump and no LL hooks in a one-shot process; the daemon defers
+/// across timer ticks instead.
+pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
+    if h != 0 {
+        let was_iconic = restore_if_iconic(h);
+        if is_fullscreen(h) || (was_iconic && !is_windowed(h)) {
+            let pid = window_owner(h);
+            let mut esc_tries = 0u8;
+            let mut windowed = false;
+            for i in 0..20 {
+                if esc_tries < 3 && i % 3 == 0 && !modifiers_held() && is_fullscreen(h) {
+                    request_unfullscreen(h); // same retry/cap policy as tick_pending
+                    esc_tries += 1;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if window_owner(h) != pid {
+                    return false; // VLC died (or the handle was recycled) mid-handoff
+                }
+                if is_windowed(h) {
+                    windowed = true;
+                    break;
+                }
+            }
+            if !windowed {
+                return false; // Esc didn't take: never save the fullscreen rect as restore state
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
+        }
+    }
+    enter(h, o)
+}
+
 // ---- drag gesture primitives (hook arms, pump applies) --------------------------------
 
 pub fn window_rect(h: isize) -> Option<geometry::Rect> {
@@ -269,20 +410,16 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // gather (plus a restore-from-iconic, which Windows makes losslessly reversible) -
-    // no geometry or styles are mutated in this block
-    let (r, style, ex, pid) = unsafe {
-        if IsIconic(hw(h)) != 0 {
-            ShowWindow(hw(h), SW_RESTORE); // else the off-screen iconic rect gets saved as the restore state
-        }
+    // losslessly reversible; else the off-screen iconic rect gets saved as the restore state
+    restore_if_iconic(h);
+    let (r, style, ex) = unsafe {
         let mut r: RECT = std::mem::zeroed();
         GetWindowRect(hw(h), &mut r);
         let style = GetWindowLongPtrW(hw(h), GWL_STYLE);
         let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hw(h), &mut pid);
-        (r, style, ex, pid)
+        (r, style, ex)
     };
+    let pid = window_owner(h);
     // save state FIRST, so a failed save can never leave a mutated window with no restore data
     let s = PipState {
         hwnd: h as i64,
@@ -352,8 +489,9 @@ pub fn exit_pip() -> bool {
     }
 }
 
+// One-shot semantics (the enter branch may block); the daemon uses its own deferred path.
 pub fn toggle(o: &PipOptions) -> bool {
-    if in_pip() { exit_pip() } else { enter(find_player(), o) }
+    if in_pip() { exit_pip() } else { enter_blocking(find_player(), o) }
 }
 
 // ---- status -------------------------------------------------------------------------

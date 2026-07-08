@@ -148,6 +148,22 @@ try {
     Check "interleaved hotkey+menu do not desync" (-not $s.inPip)
     Check "interleave restored exact rect" ($s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
+    # v2.1.1 fullscreen handoff (SPEC section 7). Click the video (a no-op) to focus,
+    # then F = VLC's fullscreen hotkey.
+    ClickAt ($s.x + [int]($s.w / 2)) ($s.y + [int]($s.h / 2)) 1
+    [Smoke.Keys]::keybd_event(0x46, 0, 0, [UIntPtr]::Zero)      # F down
+    [Smoke.Keys]::keybd_event(0x46, 0, 2, [UIntPtr]::Zero)      # F up
+    Start-Sleep -Milliseconds 800
+    $fs = Status
+    # caption-only: Qt autoresize can make the windowed size already match the monitor
+    Check "fullscreen: engaged" (-not $fs.caption)
+    Req "toggle"; Start-Sleep -Milliseconds 1200                 # Esc + two windowed ticks + enter
+    $fpip = Status
+    Check "fullscreen toggle: enters pip" ($fpip.inPip -and -not $fpip.caption)
+    Check "fullscreen toggle: pip-sized, not fullscreen" ($fpip.w -lt [int]($fs.w / 2))
+    Req "toggle"; $fout = Status
+    Check "fullscreen exit: windowed rect restored" ($fout.caption -and $fout.x -eq $before.x -and $fout.y -eq $before.y -and $fout.w -eq $before.w -and $fout.h -eq $before.h)
+
     # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
     # (a kill persists nothing and would pass even without the heal - verified), so the
     # reopened window would sit full-size at the PiP origin; the daemon heals it back to

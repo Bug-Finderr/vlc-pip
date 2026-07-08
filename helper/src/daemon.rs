@@ -125,17 +125,19 @@ pub fn run(argv: &[String]) -> i32 {
         refresh_state(); // a daemon restarted while already in PiP must be guarded from the first message
 
         let mut tracker = native::RegionTracker::default();
+        let mut pending: Option<PendingEnter> = None;
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                native::toggle(&options::effective(argv));
+                toggle_deferred(argv, &mut pending);
                 refresh_state();
             } else if msg.message == WM_TIMER {
                 if last_beat.elapsed() > Duration::from_secs(3) {
                     beat(&mut last_beat);
                 }
-                poll_request(argv);
-                refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
+                poll_request(argv, &mut pending);
+                tick_pending(argv, &mut pending);
+                refresh_state(); // the hook cache must reflect a request- or handoff-triggered toggle within this tick
                 if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
                     tracker = native::RegionTracker::default(); // gestures own the window while dragging
                 } else {
@@ -216,18 +218,97 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-fn poll_request(argv: &[String]) {
-    match request::consume(&request::request_path()).as_deref() {
-        Some("toggle") => {
-            native::toggle(&options::effective(argv));
+// Fullscreen handoff, deferred: leaving fullscreen is async in VLC and the pump must
+// never block (LL-hook timeout), so the enter waits on timer ticks until the caption
+// holds for TWO consecutive ticks (Qt's style AND rect restores both landed). Keyed by
+// hwnd + owner PID. Rationale and contract: native.rs handoff section, SPEC §7.
+struct PendingEnter {
+    hwnd: isize,
+    pid: u32,
+    esc_tries: u8,
+    windowed_ticks: u8,
+    deadline: Instant,
+}
+
+fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
+    let h = native::find_player();
+    if h != 0 {
+        let was_iconic = native::restore_if_iconic(h);
+        if native::is_fullscreen(h) || (was_iconic && !native::is_windowed(h)) {
+            *pending = Some(PendingEnter {
+                hwnd: h,
+                pid: native::window_owner(h),
+                esc_tries: 0,
+                windowed_ticks: 0,
+                deadline: Instant::now() + Duration::from_secs(2),
+            });
+            tick_pending(argv, pending); // post the Esc now, not a tick later
+            return;
         }
+    }
+    native::enter(h, &options::effective(argv));
+}
+
+fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
+    let had_pending = pending.take().is_some();
+    if native::in_pip() {
+        // even with a pending armed (a one-shot enter can win the race): toggle means exit
+        native::exit_pip();
+    } else if !had_pending {
+        enter_deferring_fullscreen(argv, pending);
+    } // had_pending: toggle while the enter was armed cancels it (still not in PiP)
+}
+
+fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
+    let Some(p) = pending.as_mut() else { return };
+    let done = if native::window_owner(p.hwnd) != p.pid || native::in_pip() {
+        true // VLC died / handle recycled, or something else entered PiP first
+    } else if native::is_windowed(p.hwnd) {
+        p.windowed_ticks += 1;
+        if p.windowed_ticks >= 2 {
+            native::enter(p.hwnd, &options::effective(argv));
+            true
+        } else {
+            false
+        }
+    } else {
+        if native::modifiers_held() {
+            if p.esc_tries == 0 {
+                // wait out the chord; the give-up countdown starts at the release
+                p.deadline = Instant::now() + Duration::from_secs(2);
+            }
+        } else if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
+            // a single post can fizzle (vout arrangement, queue timing); capped so a
+            // modal dialog is not Esc-spammed
+            native::request_unfullscreen(p.hwnd);
+            p.esc_tries += 1;
+        }
+        p.windowed_ticks = 0; // caption flickered: restart the stability count
+        Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up
+    };
+    if done {
+        *pending = None;
+    }
+}
+
+fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
+    match request::consume(&request::request_path()).as_deref() {
+        Some("toggle") => toggle_deferred(argv, pending),
         Some("enter") => {
-            native::enter(native::find_player(), &options::effective(argv));
+            if pending.is_none() && !native::in_pip() {
+                enter_deferring_fullscreen(argv, pending);
+            }
         }
         Some("exit") => {
+            *pending = None; // an armed enter is moot once an exit is requested
             native::exit_pip();
         }
-        Some("stop") => unsafe { PostQuitMessage(0) },
+        Some("stop") => {
+            // clear FIRST: PostQuitMessage is not preemptive and this tick still runs
+            // tick_pending - a handoff completing on the way out strands a PiP'd VLC
+            *pending = None;
+            unsafe { PostQuitMessage(0) }
+        }
         _ => {}
     }
 }
