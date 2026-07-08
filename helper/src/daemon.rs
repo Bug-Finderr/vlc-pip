@@ -125,17 +125,19 @@ pub fn run(argv: &[String]) -> i32 {
         refresh_state(); // a daemon restarted while already in PiP must be guarded from the first message
 
         let mut tracker = native::RegionTracker::default();
+        let mut pending: Option<PendingEnter> = None;
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                native::toggle(&options::effective(argv));
+                toggle_deferred(argv, &mut pending);
                 refresh_state();
             } else if msg.message == WM_TIMER {
                 if last_beat.elapsed() > Duration::from_secs(3) {
                     beat(&mut last_beat);
                 }
-                poll_request(argv);
-                refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
+                poll_request(argv, &mut pending);
+                tick_pending(argv, &mut pending);
+                refresh_state(); // the hook cache must reflect a request- or handoff-triggered toggle within this tick
                 if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
                     tracker = native::RegionTracker::default(); // gestures own the window while dragging
                 } else {
@@ -216,15 +218,75 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-fn poll_request(argv: &[String]) {
-    match request::consume(&request::request_path()).as_deref() {
-        Some("toggle") => {
-            native::toggle(&options::effective(argv));
+// Fullscreen handoff: a toggle/enter on a fullscreen VLC first asks VLC itself to leave
+// fullscreen (Esc to the vout child) - reshaping from outside would leave VLC's internal
+// fullscreen state (and its fullscreen-controller strip) active and save the fullscreen
+// rect as the restore state. Leaving is async in VLC, and the pump must never block
+// (LL-hook timeout), so the enter is deferred to timer ticks: the caption must be back
+// on TWO consecutive ticks (Qt's style AND rect restores both landed) before enter()
+// snapshots the window.
+struct PendingEnter {
+    hwnd: isize,
+    windowed_ticks: u8,
+    deadline: Instant,
+}
+
+fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
+    let h = native::find_player();
+    if h != 0 && native::is_fullscreen(h) {
+        native::request_unfullscreen(h);
+        *pending = Some(PendingEnter {
+            hwnd: h,
+            windowed_ticks: 0,
+            deadline: Instant::now() + Duration::from_secs(2),
+        });
+    } else {
+        native::enter(h, &options::effective(argv));
+    }
+}
+
+fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
+    if pending.take().is_some() {
+        return; // toggle while the enter is armed cancels it (the state was still "not in PiP")
+    }
+    if native::in_pip() {
+        native::exit_pip();
+    } else {
+        enter_deferring_fullscreen(argv, pending);
+    }
+}
+
+fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
+    let Some(p) = pending.as_mut() else { return };
+    let done = if !native::window_alive(p.hwnd) {
+        true // VLC died while leaving fullscreen
+    } else if native::is_windowed(p.hwnd) {
+        p.windowed_ticks += 1;
+        if p.windowed_ticks >= 2 {
+            native::enter(p.hwnd, &options::effective(argv));
+            true
+        } else {
+            false
         }
+    } else {
+        p.windowed_ticks = 0; // caption flickered: restart the stability count
+        Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up
+    };
+    if done {
+        *pending = None;
+    }
+}
+
+fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
+    match request::consume(&request::request_path()).as_deref() {
+        Some("toggle") => toggle_deferred(argv, pending),
         Some("enter") => {
-            native::enter(native::find_player(), &options::effective(argv));
+            if pending.is_none() && !native::in_pip() {
+                enter_deferring_fullscreen(argv, pending);
+            }
         }
         Some("exit") => {
+            *pending = None; // an armed enter is moot once an exit is requested
             native::exit_pip();
         }
         Some("stop") => unsafe { PostQuitMessage(0) },

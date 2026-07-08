@@ -13,13 +13,14 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PostMessageW,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
     HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION, WS_EX_TOPMOST,
-    WS_MAXIMIZE, WS_THICKFRAME,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WM_KEYDOWN, WM_KEYUP, WS_CAPTION,
+    WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -149,6 +150,76 @@ pub fn work_area(h: isize) -> geometry::Rect {
         let w = mi.rcWork;
         geometry::Rect { left: w.left, top: w.top, right: w.right, bottom: w.bottom }
     }
+}
+
+// ---- fullscreen handoff ---------------------------------------------------------------
+// Reshaping from outside can't clear VLC's INTERNAL fullscreen state: its separate
+// fullscreen-controller strip stays on screen and the fullscreen rect would be saved as
+// the restore state. VLC itself must leave fullscreen before enter() snapshots anything.
+
+/// Borderless (caption fully gone) and covering the whole monitor - VLC's fullscreen look.
+pub fn is_fullscreen(h: isize) -> bool {
+    unsafe {
+        if GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) {
+            return false;
+        }
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+            return false; // can't judge: fail toward the plain enter
+        }
+        let m = mi.rcMonitor;
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(hw(h), &mut r);
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// Caption fully back - Qt's un-fullscreen restore has applied the windowed style.
+pub fn is_windowed(h: isize) -> bool {
+    unsafe { GetWindowLongPtrW(hw(h), GWL_STYLE) & (WS_CAPTION as isize) == (WS_CAPTION as isize) }
+}
+
+pub fn window_alive(h: isize) -> bool {
+    unsafe { IsWindow(hw(h)) != 0 }
+}
+
+/// Ask VLC to leave fullscreen: post Esc (its leave-fullscreen key) to the video child,
+/// whose win32 vout window proc feeds the core hotkey engine - works unfocused, ~20ms
+/// observed. Qt-level keys are unreliable via PostMessage (gotcha #7); the vout proc
+/// is not Qt, so Esc/F land.
+pub fn request_unfullscreen(h: isize) {
+    unsafe {
+        let target = match find_video_child(h) {
+            0 => h,
+            c => c,
+        };
+        PostMessageW(hw(target), WM_KEYDOWN, VK_ESCAPE as usize, 0x0001_0001); // scan 0x01, repeat 1
+        PostMessageW(hw(target), WM_KEYUP, VK_ESCAPE as usize, 0xC001_0001_u32 as isize);
+    }
+}
+
+/// One-shot enter: leave fullscreen first, blocking until VLC re-windows. Blocking is
+/// fine HERE only - a one-shot process has no pump and no LL hooks; the daemon defers
+/// across timer ticks instead (a sleep on the pump thread starves the hooks past
+/// LowLevelHooksTimeout).
+pub fn enter_blocking(h: isize, o: &PipOptions) -> bool {
+    if h != 0 && is_fullscreen(h) {
+        request_unfullscreen(h);
+        let mut windowed = false;
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if is_windowed(h) {
+                windowed = true;
+                break;
+            }
+        }
+        if !windowed {
+            return false; // Esc didn't take: never save the fullscreen rect as restore state
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100)); // rect lands with the style
+    }
+    enter(h, o)
 }
 
 // ---- drag gesture primitives (hook arms, pump applies) --------------------------------
@@ -352,8 +423,10 @@ pub fn exit_pip() -> bool {
     }
 }
 
+// One-shot semantics (the enter branch may block through a fullscreen handoff): callers
+// are main.rs modes only; the daemon toggles through its own deferred path.
 pub fn toggle(o: &PipOptions) -> bool {
-    if in_pip() { exit_pip() } else { enter(find_player(), o) }
+    if in_pip() { exit_pip() } else { enter_blocking(find_player(), o) }
 }
 
 // ---- status -------------------------------------------------------------------------
