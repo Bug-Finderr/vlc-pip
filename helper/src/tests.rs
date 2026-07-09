@@ -196,12 +196,6 @@ mod native {
         assert_eq!(plan, RegionPlan::Clip(rect(0, 54, 480, 324)));
     }
 
-    #[test]
-    fn hostile_negative_target_skips() {
-        // a hand-crafted state file with a -500 target must not produce a resize
-        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, Corner::Br, 16, work);
-        assert_eq!(plan, RegionPlan::Skip);
-    }
 }
 
 mod options {
@@ -331,7 +325,8 @@ mod state {
         let extra = FULL.replace("12345\n", "12345 7\n"); // 14 tokens
         let bad_num = FULL.replace("349110272", "wide");
         let bad_min = FULL.replace(" 1 12345", " yes 12345");
-        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min] {
+        let bad_target = FULL.replace(" 480 270 br ", " -500 270 br "); // targets pinned positive
+        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min, &bad_target] {
             assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
     }

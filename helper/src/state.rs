@@ -64,8 +64,10 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         h: h.parse().ok()?,
         style: style.parse().ok()?,
         ex_style: ex_style.parse().ok()?,
-        target_w: target_w.parse().ok()?,
-        target_h: target_h.parse().ok()?,
+        // pinned positive like options::parse_options: a hand-edited 0/negative target
+        // must read as no-state, not reach the converger
+        target_w: target_w.parse().ok().filter(|&n| n > 0)?,
+        target_h: target_h.parse().ok().filter(|&n| n > 0)?,
         corner: Corner::parse(corner),
         margin: margin.parse().ok()?,
         min: match min {

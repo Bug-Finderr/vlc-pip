@@ -35,13 +35,20 @@ static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 const WM_APP_DRAG: u32 = WM_APP;
 const WM_APP_DRAGEND: u32 = WM_APP + 1;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum DragState {
     #[default]
     Idle,
     Armed,
     Moving,
     Resizing,
+}
+
+impl DragState {
+    /// A gesture that owns the window (past the arm threshold, button still down).
+    fn active(self) -> bool {
+        matches!(self, Self::Moving | Self::Resizing)
+    }
 }
 
 // The drag gesture. The pump reads the mode from wParam and validates the generation
@@ -170,7 +177,7 @@ pub fn run(argv: &[String]) -> i32 {
                 // controller strip unrenderable (SPEC section 7)
                 native::veil_fs_controller(pip.pid);
             }
-            if DRAG.get().state >= DragState::Moving {
+            if DRAG.get().state.active() {
                 tracker.reset_debounce(); // gestures own the window while dragging
             } else {
                 native::maintain_region(&mut tracker, s);
@@ -328,7 +335,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                             DragState::Resizing
                         };
                     }
-                    if d.state >= DragState::Moving {
+                    if d.state.active() {
                         d.latest = (m.pt.x, m.pt.y);
                         if !d.move_pending {
                             d.move_pending = true;
@@ -342,7 +349,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let st = d.state;
                 d.state = DragState::Idle;
                 DRAG.set(d);
-                if st >= DragState::Moving {
+                if st.active() {
                     PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, st as usize, d.generation as isize);
                 }
                 let mut c = CLICK.get();

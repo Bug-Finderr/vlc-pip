@@ -368,9 +368,9 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
         let t = cr.top - origin.y;
         let r = (origin.x + client.right) - cr.right;
         let b = (origin.y + client.bottom) - cr.bottom;
-        // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
-        // stale measurement, and a rect the converger would forever Skip must never land
-        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=MAX_CHROME).contains(&(l + r)) && (0..=MAX_CHROME).contains(&(t + b)) {
+        // no side negative, axis sums in plan_region's envelope: a rect the converger
+        // would forever Skip must never land
+        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && chrome_ok(l + r, t + b) {
             Some((l, t, r, b))
         } else {
             None
@@ -684,6 +684,11 @@ pub(crate) enum RegionPlan {
 // would land a rect the converger fights forever.
 const MAX_CHROME: i32 = 300;
 
+// Per-axis chrome sums: negative or huge = stale rects from VLC's async re-layout.
+fn chrome_ok(w: i32, h: i32) -> bool {
+    (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
+}
+
 // Pure planning math for the minimal-look convergence: resize grows by chrome so the
 // VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
 // child area. `work` is lazy - only the resize branch needs its two user32 calls.
@@ -697,17 +702,15 @@ pub(crate) fn plan_region(
     let ch = cr.bottom - cr.top;
     let chrome_w = (wr.right - wr.left) - cw;
     let chrome_h = (wr.bottom - wr.top) - ch;
-    // negative or huge delta = stale rects from VLC's async re-layout
-    if !(0..=MAX_CHROME).contains(&chrome_w) || !(0..=MAX_CHROME).contains(&chrome_h) {
+    if !chrome_ok(chrome_w, chrome_h) {
         return RegionPlan::Skip;
     }
     if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
         let wa = work();
         let (vx, vy) = geometry::compute_corner(&wa, target_w, target_h, corner, margin);
+        // targets are pinned positive at both parse boundaries (options + state file),
+        // and chrome is non-negative here, so target + chrome cannot underflow
         let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
-        if tw <= 0 || th <= 0 {
-            return RegionPlan::Skip; // hostile/garbage state values: do nothing
-        }
         if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
             // already at the computed rect but the child never re-fit: re-issuing the
             // no-op resize would reset the debounce every tick and loop forever
