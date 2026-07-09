@@ -23,8 +23,8 @@ if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
     Set-Content "$env:TEMP\vlc-pip-request.txt" "stop"
     $deadline = (Get-Date).AddSeconds(5)
     while ((Get-Process pip-helper -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
-    Get-Process pip-helper -ErrorAction SilentlyContinue | Stop-Process -Force -Confirm:$false
-    Start-Sleep -Milliseconds 200
+    $left = Get-Process pip-helper -ErrorAction SilentlyContinue
+    if ($left) { $left | Stop-Process -Force -Confirm:$false; $left | Wait-Process -Timeout 3 -ErrorAction SilentlyContinue }
 }
 # a stale request (an unconsumed "stop") would make the fresh daemon act on it within 150ms;
 # a stale heartbeat (survives any force-kill) would make the start verification below vacuous

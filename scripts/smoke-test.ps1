@@ -21,7 +21,16 @@ function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
     & $cond
 }
 $fail = @()
-function Check($name, $cond) { if ($cond) { Write-Host "PASS $name" } else { Write-Host "FAIL $name"; $script:fail += $name } }
+function Check($name, $cond) {
+    if ($cond) { Write-Host "PASS $name" }
+    else {
+        # the status file still holds the snapshot the check asserted on: dump it so a
+        # FAIL is self-diagnosing without re-running the whole live session
+        Write-Host "FAIL $name"
+        try { Write-Host "  status: $(Get-Content "$env:TEMP\vlc-pip-status.json" -Raw)" } catch {}
+        $script:fail += $name
+    }
+}
 
 if (-not ('Smoke.Keys' -as [type])) {
     Add-Type -Namespace Smoke -Name Keys -MemberDefinition @'

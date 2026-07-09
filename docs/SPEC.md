@@ -83,7 +83,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ### 5.2 `pip-helper.exe` (Rust binary crate at `helper/`)
 
-Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; file formats are hand-rolled (§8 gotcha R2). Module layout and per-file responsibilities: [ARCHITECTURE.md](ARCHITECTURE.md) §Layout.
+Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; file formats are hand-rolled (§8 gotcha R2).
 
 Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed from the remaining args; `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
 - `toggle` | `enter` - one-shot Win32 action, then if it **entered** PiP with `min=1`: 6 × { sleep 150 ms; maintain_region } to converge the minimal look. Exit 0 on success, 1 on failure.
@@ -113,7 +113,7 @@ Written by Enter only: one newline-terminated line of exactly 13 whitespace-sepa
 ```
 Types: `hwnd`/`style`/`ex_style` i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
 - **Any** parse failure (missing trailing newline, wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. The trailing newline is the torn-write sentinel: a truncated write loses it, so a partial line (which could carry a numeric prefix of `pid`) can never parse.
-- **Stale detection (`owns_state`)**: state is live iff `IsWindow(hwnd)` AND `GetWindowThreadProcessId(hwnd) == pid != 0`. Windows recycles HWNDs - IsWindow alone would pass on a foreign window. Stale state is deleted on sight by InPip/Exit/maintain_region (delete failures swallowed: next caller retries).
+- **Stale detection (`owns_state`)**: state is live iff `pid != 0` AND `GetWindowThreadProcessId(hwnd) == pid` (a destroyed or recycled HWND yields 0 or a foreign owner - Windows recycles HWNDs, so handle validity alone would pass on a foreign window). Stale state is deleted by Exit, overwritten by Enter, and otherwise handed to the reopen heal (§12), whose terminal branches delete it; `in_pip`/`status` never touch it. Delete failures are swallowed: the next caller retries.
 
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
 Bare word, trimmed on read: `toggle` | `enter` | `exit` | `stop` (case-sensitive). Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored. On daemon start, a pre-existing request is discarded **only if it is `stop`** (a `pip-helper stop` with no daemon alive leaves one that would kill the fresh daemon on its first tick; a queued user toggle survives).
@@ -131,7 +131,7 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 ```
 {"found":true,"hwnd":N,"x":N,"y":N,"w":N,"h":N,"caption":B,"topmost":B,"inPip":B,"minimal":B}
 ```
-`caption` = `(style & WS_CAPTION) == WS_CAPTION` (BOTH bits of 0x00C00000); `topmost` = `exstyle & WS_EX_TOPMOST != 0`; `minimal` = window has a region (`GetWindowRgn` probe). The smoke test drives everything through this file.
+`caption` = `(style & WS_CAPTION) == WS_CAPTION` (BOTH bits of 0x00C00000); `topmost` = `exstyle & WS_EX_TOPMOST != 0`; `minimal` = window has a nonempty region (`GetWindowRgn` + `GetRgnBox` probe; every region this program sets is nonempty). The smoke test drives everything through this file.
 
 ### 6.5 `vlc-pip-crash.txt` - panic message + location, best-effort write from the panic hook; process exits 3. The only diagnostics channel.
 
@@ -168,13 +168,13 @@ Entering PiP from a fullscreen VLC is the same immediate reshape as any other en
 - **Accepted edges**: an exit racing the dissolve inside one tick can still restore the fullscreen shell; a `min=0` fullscreen-origin PiP exposes VLC's menu bar, whose fullscreen items can desync Qt (the dissolve only covers the vout-death paths); without the daemon (one-shot CLI only) none of the guards or the dissolve run, as for every hook-based guarantee.
 
 ### maintain_region() - minimal look, converging per-tick (daemon timer + one-shot loop)
-Cross-tick state: previous window rect + child rect + have_prev flag (reset on missing/stale state, no child, and after our own resize).
-1. Load state; missing → reset, return. Stale → reset, delete, return. `min=0` → return.
+Cross-tick state: the previous (window, child) rects held as an Option (None = reset; reset on missing/stale state, no child, and after our own resize), plus the fullscreen-origin dissolve baseline and the heal retry counter.
+1. Load state; missing → reset, return. Stale → reset, hand to the reopen heal (§12), return. `min=0` → return.
 2. Find the video child: first visible child (recursive) whose class starts with `"VLC video main"`. None (playback stopped) → reset, clear region if present, return.
 3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash in v1). Always record current rects.
 4. **Chrome sanity clamp**: chrome = window minus child size; if any dimension is negative or > 300 px → stale rects, return.
-5. Child not at target size (tolerance ±2 px): recompute corner for the video, resize window to `target + chrome` positioned so the CHILD lands at the corner (`SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED)` - no SWP_SHOWWINDOW here), invalidate have_prev (our own resize), return. Skip if the rect is already correct or target+chrome is non-positive.
-6. Child at target and no region yet: `CreateRectRgn(child rel rect)` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
+5. Child not at target size (tolerance ±2 px): recompute corner for the video, resize window to `target + chrome` positioned so the CHILD lands at the corner (`SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED)` - no SWP_SHOWWINDOW here), drop the stored rects (our own resize), return. Skip if the rect is already correct or target+chrome is non-positive.
+6. Child at target: verify the region **box** against the child-relative rect (a live-clipped resize drag leaves an approximate region) and set it on mismatch: `CreateRectRgn` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
 
 ### Fullscreen prevention (prevent, don't auto-exit; poll-and-snap-back flickers)
 - **Keys** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd` - for vk == F always, and for vk == Esc when the PiP is fullscreen-origin (see above). Key-ups pass.
