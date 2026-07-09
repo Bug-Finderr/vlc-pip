@@ -1,5 +1,5 @@
 /// Plain rect so this module stays windows-sys-free (native.rs converts at the boundary).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub left: i32,
     pub top: i32,
@@ -8,12 +8,11 @@ pub struct Rect {
 }
 
 /// The four PiP corners; anything unknown pins to Br (v1 semantics, same fallback everywhere).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Corner {
     Tl,
     Tr,
     Bl,
-    #[default]
     Br,
 }
 
@@ -128,7 +127,7 @@ pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) 
 
 // ---- minimal-look convergence planning (applied by native::maintain_region) -----------
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum RegionPlan {
     Skip,
     Resize { x: i32, y: i32, w: i32, h: i32 },

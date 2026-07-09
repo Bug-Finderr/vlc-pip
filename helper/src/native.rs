@@ -151,9 +151,6 @@ pub fn fs_origin(style: isize) -> bool {
 }
 
 fn for_each_fs_controller(pid: u32, f: impl Fn(HWND)) {
-    if pid == 0 {
-        return;
-    }
     enum_windows(|w| {
         // pid first: it is one cheap call, while the class read allocates per window
         if window_owner(w as isize) == pid && class_starts_with(w, "Qt5QWindowToolSaveBits") {
@@ -187,7 +184,7 @@ pub fn veil_fs_controller(pid: u32) {
 /// drop the veil. Inert when nothing was veiled - but only for a LIVE-verified pid:
 /// a stale record's pid may be recycled to a foreign Qt5 app whose tool windows the
 /// class match would hit, so stale paths stay gated on fs_origin.
-pub fn unveil_fs_controller(pid: u32) {
+fn unveil_fs_controller(pid: u32) {
     for_each_fs_controller(pid, |w| unsafe {
         SetWindowRgn(w, std::ptr::null_mut(), 1);
     });
@@ -204,7 +201,7 @@ fn to_win(r: &geometry::Rect) -> RECT {
     RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
-pub fn window_rect(h: isize) -> Option<geometry::Rect> {
+fn window_rect(h: isize) -> Option<geometry::Rect> {
     unsafe {
         let mut r: RECT = std::mem::zeroed();
         if GetWindowRect(hw(h), &mut r) == 0 {

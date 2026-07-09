@@ -36,7 +36,7 @@ pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions 
     o
 }
 
-pub fn config_path() -> Option<PathBuf> {
+fn config_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"vlc\pip\config.txt"))
 }
 

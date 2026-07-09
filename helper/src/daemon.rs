@@ -29,7 +29,7 @@ static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 const WM_APP_DRAG: u32 = WM_APP;
 const WM_APP_DRAGEND: u32 = WM_APP + 1;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 enum DragState {
     #[default]
     Idle,
