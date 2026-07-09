@@ -112,27 +112,3 @@ pub fn consume_request(path: &Path) -> Option<String> {
     let cmd = cmd.trim();
     if cmd.is_empty() { None } else { Some(cmd.to_string()) }
 }
-
-// ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
-
-pub struct StatusInfo {
-    pub hwnd: isize,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub caption: bool,
-    pub topmost: bool,
-    pub in_pip: bool,
-    pub minimal: bool,
-}
-
-pub fn status_json(s: Option<&StatusInfo>) -> String {
-    match s {
-        None => r#"{"found":false}"#.to_string(),
-        Some(s) => format!(
-            r#"{{"found":true,"hwnd":{},"x":{},"y":{},"w":{},"h":{},"caption":{},"topmost":{},"inPip":{},"minimal":{}}}"#,
-            s.hwnd, s.x, s.y, s.w, s.h, s.caption, s.topmost, s.in_pip, s.minimal
-        ),
-    }
-}

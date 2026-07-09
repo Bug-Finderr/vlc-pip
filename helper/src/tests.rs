@@ -321,17 +321,4 @@ mod state {
     fn load_missing_file_returns_none() {
         assert_eq!(load(&tmp("nope")), None);
     }
-
-    #[test]
-    fn status_json_shapes() {
-        assert_eq!(status_json(None), r#"{"found":false}"#);
-        let s = StatusInfo {
-            hwnd: 66112, x: 1424, y: 754, w: 480, h: 270,
-            caption: false, topmost: true, in_pip: true, minimal: true,
-        };
-        assert_eq!(
-            status_json(Some(&s)),
-            r#"{"found":true,"hwnd":66112,"x":1424,"y":754,"w":480,"h":270,"caption":false,"topmost":true,"inPip":true,"minimal":true}"#
-        );
-    }
 }

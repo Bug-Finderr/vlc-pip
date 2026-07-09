@@ -24,7 +24,7 @@ use windows_sys::core::BOOL;
 
 use crate::geometry::{self, RegionPlan};
 use crate::options::PipOptions;
-use crate::state::{self, PipState, StatusInfo};
+use crate::state::{self, PipState};
 
 // Handles live in statics and the state file, so they travel as isize (windows-sys 0.61
 // handles are *mut c_void: not Send/Sync). Cast at the call boundary only.
@@ -484,26 +484,27 @@ pub fn toggle(o: &PipOptions) -> bool {
     if in_pip() { exit_pip() } else { enter(find_player(), o) }
 }
 
-// ---- status -------------------------------------------------------------------------
+// ---- status (write-only JSON; smoke-test.ps1 parses it - shape is frozen, SPEC 6.4) ---
 
 pub fn status() -> String {
     let h = find_player();
     if h == 0 {
-        return state::status_json(None);
+        return r#"{"found":false}"#.to_string();
     }
     let r = window_rect(h).unwrap_or_default();
     let (style, ex) = styles(h);
-    state::status_json(Some(&StatusInfo {
-        hwnd: h,
-        x: r.left,
-        y: r.top,
-        w: r.right - r.left,
-        h: r.bottom - r.top,
-        caption: style & (WS_CAPTION as isize) == (WS_CAPTION as isize), // BOTH bits
-        topmost: ex & (WS_EX_TOPMOST as isize) != 0,
-        in_pip: in_pip(),
-        minimal: has_region(h),
-    }))
+    format!(
+        r#"{{"found":true,"hwnd":{},"x":{},"y":{},"w":{},"h":{},"caption":{},"topmost":{},"inPip":{},"minimal":{}}}"#,
+        h,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        style & (WS_CAPTION as isize) == (WS_CAPTION as isize), // BOTH caption bits
+        ex & (WS_EX_TOPMOST as isize) != 0,
+        in_pip(),
+        has_region(h),
+    )
 }
 
 // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area -------------
