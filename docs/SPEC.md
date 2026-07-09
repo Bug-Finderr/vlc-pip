@@ -1,10 +1,10 @@
 # VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior at 2.26MB; v2 is the Rust rewrite (~159KB as of v2.1.1) with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior; v2 is the Rust rewrite - a fraction of v1's size - with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
-**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` (38 checks: the 21 v1-era checks unchanged, plus 13 v2.1 gesture/heal checks, plus 4 v2.1.1 fullscreen-handoff checks), `scripts/uninstall.ps1`, and `extension/pip.lua` (descriptor version aside) carry over from v1. Only `pip-helper.exe`'s implementation swaps; every file format and observable behavior below must hold byte-for-byte.
+**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1`, `scripts/uninstall.ps1`, and `extension/pip.lua` (descriptor version aside) carry over from v1. Only `pip-helper.exe`'s implementation swaps; every file format and observable behavior below must hold byte-for-byte.
 
 ---
 
@@ -16,7 +16,7 @@ Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 - **Zero added video latency / quality loss** (it's the real decoding window, not a mirror).
 - **No terminal/console flashes** on toggle.
 - While in PiP, **don't let the video go fullscreen** (F key and double/triple/spam-click).
-- Toggling PiP **on a fullscreen VLC** first makes VLC itself leave fullscreen (v2.1.1): external reshaping can't clear VLC's internal fullscreen state, so its fullscreen-controller strip would stay on screen and the fullscreen rect would be saved as the restore state.
+- Toggling PiP **on a fullscreen VLC** is as instant as any toggle, and toggling back returns to fullscreen (v2.1.1); VLC's fullscreen-controller strip stays off the screen while the PiP lives.
 - **Minimal look** (default on): hide VLC's menu bar + control bar - exactly the Ctrl+H view - so PiP shows just video.
 
 **Non-goals**
@@ -160,12 +160,13 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 4. `SetWindowPos(h, saved ExStyle & WS_EX_TOPMOST ? HWND_TOPMOST : HWND_NOTOPMOST, saved rect, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` - honors the user's own always-on-top.
 5. Delete state iff `ok || !IsWindow(h)` - a failed restore on a still-live window keeps the state so the next toggle retries.
 
-### Fullscreen handoff (v2.1.1)
-Entering PiP from a fullscreen VLC must first make VLC itself leave fullscreen.
-- **Detect**: `WS_CAPTION` fully absent AND the window rect covers its monitor's whole `rcMonitor` (fail toward the plain enter if `GetMonitorInfoW` fails). An iconic VLC is restored (`SW_RESTORE`) **before** judging: a minimized-from-fullscreen window hides its fullscreen rect behind the iconic placement, and enter()'s own restore would bring the fullscreen window back only after the plain path was already chosen.
-- **Leave**: post `Esc` (`WM_KEYDOWN`+`WM_KEYUP`, scan 0x01) to **every** vout window of the VLC process - class prefix `"VLC video main"`, children AND top-levels, visible or NOT - plus the Qt top-level as a last resort. Fullscreen VLC hosts the vout either embedded (visible full-size child) or desktop-parented (an INVISIBLE top-level still at its stale windowed rect); both observed live on 3.0.23, and the visible-child-only lookup misses the second arrangement. The vout event thread processes posted keys regardless of focus and visibility (~20ms observed); Qt drops posted keys when unfocused (gotcha #7), so the top-level must never be the only target. Esc is leave-fullscreen only - a no-op otherwise - and both paths re-post while fullscreen persists, capped at 3 tries so a modal dialog is not Esc-spammed. Esc goes out only while **no modifier key is physically down** (`GetAsyncKeyState`): VLC translates posted keys against the physical modifier state at processing time, so the still-held Ctrl+Alt of the triggering hotkey turns Esc into Ctrl+Alt+Esc, bound to nothing (verified live, even unfocused). The daemon refreshes the 2s give-up countdown until the chord is released - the user's own fingers control the wait.
-- **Daemon path (deferred)**: the pump must never block (LL-hook timeout, §3). Toggle/enter on a fullscreen (or restored-but-still-captionless) VLC arms a pending enter keyed by hwnd + owner PID; Esc goes out as soon as the window is observably fullscreen (immediately, or a tick later when an iconic restore had to land first, and only once). Each 150ms tick then requires the caption present on TWO consecutive ticks (Qt's style AND rect restores both landed) before calling enter. Dropped without entering when: the owner PID no longer matches (VLC died / handle recycled), something else entered PiP first (a one-shot CLI can win the race), the 2s deadline passes (Esc eaten, e.g. by a modal), an `exit` or `stop` request arrives (`stop` must clear it - `PostQuitMessage` is not preemptive and the same tick still runs the pending check; uninstall would otherwise strand a PiP'd VLC with no daemon), or a second toggle cancels it. A toggle with PiP already entered always exits, even while a pending is armed.
-- **One-shot path (blocking)**: `toggle`/`enter` CLI modes do the same restore-then-judge, then poll for the caption up to 2s (owner-PID guarded) and settle 100ms; timeout or owner change → exit 1 without entering (never save the fullscreen rect as restore state).
+### Fullscreen-origin PiP (v2.1.1)
+Entering PiP from a fullscreen VLC is the same immediate reshape as any other enter - the PiP appears at the keypress. **VLC's internal fullscreen state stays ON for the whole PiP session.** Clearing it first (post Esc, wait for Qt's windowed restore) cost the user ~0.5-1s of dead screen; the reverse order desyncs Qt, which restores its windowed geometry only from an UNTOUCHED fullscreen window - after an external reshape, Esc left a captionless window at the PiP rect with the menus grown back (verified live). A fullscreen-origin PiP is recognized by its saved pre-PiP style: `WS_CAPTION` fully absent (an iconic VLC is restored before the snapshot, as always).
+- **While such a PiP lives**: VLC's fullscreen controller strip - a separate topmost window (class prefix `Qt5QWindowToolSaveBits`) that would otherwise pop up over the desktop on hover - is hidden by enter() itself BEFORE the reshape lands (the user was likely just hovering the fullscreen video, so the strip is on screen at toggle time), then re-hidden by the daemon every tick. One hide sticks across hovers (Qt's visibility cache desyncs from the OS state, verified live), but VLC's own show/hide-timer cycle can resync it, so the strip may blink for at most one tick on a first hover. The keyboard hook swallows **Esc** (in addition to F) while VLC is focused: either key would make Qt leave fullscreen underneath the reshape.
+- **Exit restores the saved fullscreen style + rect verbatim** - the ordinary exit path, no special casing. The user came from fullscreen and gets fullscreen back, and VLC's internal state matches its window again; leaving fullscreen afterwards is VLC's own untouched restore, so the original windowed rect survives the whole trip. The strip returns naturally with VLC's next hover cycle.
+- **Dissolve on media end / stop**: VLC leaves fullscreen internally BY ITSELF when playback ends or is stopped - no input involved - and its re-layout balloons the window to Qt's idea of windowed geometry within ~a tick of the vout dying (verified live). The tick watches for that signature on fullscreen-origin sessions (vout gone AND the rect moved off the last rect seen with live video; runs regardless of `min`): the PiP session then dissolves - frame styles back at Qt's chosen rect, state deleted. Stock VLC lands windowed after fullscreen playback ends too, and the saved fullscreen rect must never be restored onto an internally windowed VLC. A toggle after the dissolve is a fresh windowed-origin enter.
+- **Heal**: a fullscreen-origin record (§12) is deleted, never applied - its rect is the fullscreen rect, and Qt, believing fullscreen throughout, persisted the true windowed geometry itself.
+- **Accepted edges**: an exit racing the dissolve inside one tick can still restore the fullscreen shell; a `min=0` fullscreen-origin PiP exposes VLC's menu bar, whose fullscreen items can desync Qt (the dissolve only covers the vout-death paths); without the daemon (one-shot CLI only) none of the guards or the dissolve run, as for every hook-based guarantee.
 
 ### maintain_region() - minimal look, converging per-tick (daemon timer + one-shot loop)
 Cross-tick state: previous window rect + child rect + have_prev flag (reset on missing/stale state, no child, and after our own resize).
@@ -177,7 +178,7 @@ Cross-tick state: previous window rect + child rect + have_prev flag (reset on m
 6. Child at target and no region yet: `CreateRectRgn(child rel rect)` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
 
 ### Fullscreen prevention (prevent, don't auto-exit; poll-and-snap-back flickers)
-- **F key** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND vk == F AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd`. Key-ups pass.
+- **Keys** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd` - for vk == F always, and for vk == Esc when the PiP is fullscreen-origin (see above). Key-ups pass.
 - **Clicks** (`WH_MOUSE_LL`) - the rate-limit, exact bookkeeping (statics: last ALLOWED down time+point, swallow_next_up flag):
   - On `WM_LBUTTONDOWN` over the PiP (root ancestor of `WindowFromPoint` == cached hwnd): `burst = (evt.time - last_allowed_time <= GetDoubleClickTime()) && |dx| <= SM_CXDOUBLECLK && |dy| <= SM_CYDOUBLECLK`. Burst → set swallow_next_up, swallow. Else record this down as the new ALLOWED reference and pass.
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
@@ -190,7 +191,7 @@ Cross-tick state: previous window rect + child rect + have_prev flag (reset on m
 2. Discard pre-launch `stop` request (only `stop`).
 3. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`; install both LL hooks. Failures recorded in heartbeat flags only.
 4. Beat once; refresh hook cache once (a daemon restarted while already in PiP must be guarded from the first message).
-5. Pump: `WM_HOTKEY` → Toggle (deferring through the fullscreen handoff) + refresh cache. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), tick any pending handoff enter, refresh cache, maintain_region - in that order (the cache must reflect a request- or handoff-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
+5. Pump: `WM_HOTKEY` → Toggle + refresh cache. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), refresh cache, hide the fullscreen controller strip while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
 6. Cleanup on loop exit: unhook both, unregister hotkey, delete the alive file.
 
 ---
@@ -224,10 +225,10 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe` (~159KB).
+- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
-- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (38 end-to-end checks against live VLC; requires install first and VLC closed).
+- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
 ---
@@ -242,7 +243,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 11. Acceptance test checklist
 
-Automated: `cargo test` green, then `scripts/smoke-test.ps1` → 38/38 PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, fullscreen-handoff enter/exit, close-in-PiP reopen heal).
+Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, instant fullscreen-origin enter/exit with the controller strip hidden, close-in-PiP reopen heal).
 
 Manual (once per release):
 - [ ] View → "PiP Mode" appears after a VLC restart; repeated menu clicks alternate enter/exit.

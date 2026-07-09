@@ -40,7 +40,7 @@ fn run() -> i32 {
     let o = options::effective(tail);
     match mode.as_str() {
         "toggle" => one_shot(native::toggle(&o), &o),
-        "enter" => one_shot(native::enter_blocking(native::find_player(), &o), &o),
+        "enter" => one_shot(native::enter(native::find_player(), &o), &o),
         "exit" => {
             if native::exit_pip() { 0 } else { 1 }
         }

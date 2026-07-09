@@ -5,8 +5,8 @@ use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    VK_F, VK_P,
+    GetAsyncKeyState, GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT,
+    MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
@@ -25,6 +25,9 @@ use crate::{geometry, native, options, request, state};
 // callbacks dispatch on that same thread. 0 = not in PiP. Read-only by design: stale-file
 // DELETION stays in native (toggle paths + maintain_region tick).
 static CACHED_HWND: AtomicIsize = AtomicIsize::new(0);
+// the cached PiP is fullscreen-origin (saved style has no caption): the keyboard hook
+// swallows Esc and the tick keeps VLC's fullscreen controller strip hidden
+static FS_PIP: AtomicBool = AtomicBool::new(false);
 static KB_HOOK: AtomicIsize = AtomicIsize::new(0);
 static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
 // click rate-limit bookkeeping: the last ALLOWED button-down (time in u32 hook ms, wraps)
@@ -73,10 +76,9 @@ fn refresh_state() {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
-    let h = state::load(&state::state_path())
-        .filter(native::owns_state)
-        .map_or(0, |s| s.hwnd as isize);
-    CACHED_HWND.store(h, Relaxed);
+    let s = state::load(&state::state_path()).filter(native::owns_state);
+    FS_PIP.store(s.as_ref().is_some_and(|s| native::fs_origin(s.style)), Relaxed);
+    CACHED_HWND.store(s.map_or(0, |s| s.hwnd as isize), Relaxed);
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -125,19 +127,22 @@ pub fn run(argv: &[String]) -> i32 {
         refresh_state(); // a daemon restarted while already in PiP must be guarded from the first message
 
         let mut tracker = native::RegionTracker::default();
-        let mut pending: Option<PendingEnter> = None;
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
-                toggle_deferred(argv, &mut pending);
+                native::toggle(&options::effective(argv));
                 refresh_state();
             } else if msg.message == WM_TIMER {
                 if last_beat.elapsed() > Duration::from_secs(3) {
                     beat(&mut last_beat);
                 }
-                poll_request(argv, &mut pending);
-                tick_pending(argv, &mut pending);
-                refresh_state(); // the hook cache must reflect a request- or handoff-triggered toggle within this tick
+                poll_request(argv);
+                refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
+                if FS_PIP.load(Relaxed) {
+                    // VLC still believes it is fullscreen under this PiP: keep its
+                    // controller strip off the screen (SPEC section 7)
+                    native::hide_fs_controller(native::window_owner(CACHED_HWND.load(Relaxed)));
+                }
                 if DRAG_STATE.load(Relaxed) >= DRAG_MOVING {
                     tracker = native::RegionTracker::default(); // gestures own the window while dragging
                 } else {
@@ -218,97 +223,18 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-// Fullscreen handoff, deferred: leaving fullscreen is async in VLC and the pump must
-// never block (LL-hook timeout), so the enter waits on timer ticks until the caption
-// holds for TWO consecutive ticks (Qt's style AND rect restores both landed). Keyed by
-// hwnd + owner PID. Rationale and contract: native.rs handoff section, SPEC §7.
-struct PendingEnter {
-    hwnd: isize,
-    pid: u32,
-    esc_tries: u8,
-    windowed_ticks: u8,
-    deadline: Instant,
-}
-
-fn enter_deferring_fullscreen(argv: &[String], pending: &mut Option<PendingEnter>) {
-    let h = native::find_player();
-    if h != 0 {
-        let was_iconic = native::restore_if_iconic(h);
-        if native::is_fullscreen(h) || (was_iconic && !native::is_windowed(h)) {
-            *pending = Some(PendingEnter {
-                hwnd: h,
-                pid: native::window_owner(h),
-                esc_tries: 0,
-                windowed_ticks: 0,
-                deadline: Instant::now() + Duration::from_secs(2),
-            });
-            tick_pending(argv, pending); // post the Esc now, not a tick later
-            return;
-        }
-    }
-    native::enter(h, &options::effective(argv));
-}
-
-fn toggle_deferred(argv: &[String], pending: &mut Option<PendingEnter>) {
-    let had_pending = pending.take().is_some();
-    if native::in_pip() {
-        // even with a pending armed (a one-shot enter can win the race): toggle means exit
-        native::exit_pip();
-    } else if !had_pending {
-        enter_deferring_fullscreen(argv, pending);
-    } // had_pending: toggle while the enter was armed cancels it (still not in PiP)
-}
-
-fn tick_pending(argv: &[String], pending: &mut Option<PendingEnter>) {
-    let Some(p) = pending.as_mut() else { return };
-    let done = if native::window_owner(p.hwnd) != p.pid || native::in_pip() {
-        true // VLC died / handle recycled, or something else entered PiP first
-    } else if native::is_windowed(p.hwnd) {
-        p.windowed_ticks += 1;
-        if p.windowed_ticks >= 2 {
-            native::enter(p.hwnd, &options::effective(argv));
-            true
-        } else {
-            false
-        }
-    } else {
-        if native::modifiers_held() {
-            if p.esc_tries == 0 {
-                // wait out the chord; the give-up countdown starts at the release
-                p.deadline = Instant::now() + Duration::from_secs(2);
-            }
-        } else if p.esc_tries < 3 && native::is_fullscreen(p.hwnd) {
-            // a single post can fizzle (vout arrangement, queue timing); capped so a
-            // modal dialog is not Esc-spammed
-            native::request_unfullscreen(p.hwnd);
-            p.esc_tries += 1;
-        }
-        p.windowed_ticks = 0; // caption flickered: restart the stability count
-        Instant::now() >= p.deadline // Esc didn't take (e.g. a modal ate it): give up
-    };
-    if done {
-        *pending = None;
-    }
-}
-
-fn poll_request(argv: &[String], pending: &mut Option<PendingEnter>) {
+fn poll_request(argv: &[String]) {
     match request::consume(&request::request_path()).as_deref() {
-        Some("toggle") => toggle_deferred(argv, pending),
+        Some("toggle") => {
+            native::toggle(&options::effective(argv));
+        }
         Some("enter") => {
-            if pending.is_none() && !native::in_pip() {
-                enter_deferring_fullscreen(argv, pending);
-            }
+            native::enter(native::find_player(), &options::effective(argv));
         }
         Some("exit") => {
-            *pending = None; // an armed enter is moot once an exit is requested
             native::exit_pip();
         }
-        Some("stop") => {
-            // clear FIRST: PostQuitMessage is not preemptive and this tick still runs
-            // tick_pending - a handoff completing on the way out strands a PiP'd VLC
-            *pending = None;
-            unsafe { PostQuitMessage(0) }
-        }
+        Some("stop") => unsafe { PostQuitMessage(0) },
         _ => {}
     }
 }
@@ -318,8 +244,23 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         if code >= 0 && (wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             let h = CACHED_HWND.load(Relaxed);
-            if k.vkCode == VK_F as u32 && h != 0 && GetForegroundWindow() as isize == h {
-                return 1; // swallow F -> no fullscreen while in PiP
+            if h != 0 && GetForegroundWindow() as isize == h {
+                if k.vkCode == VK_F as u32 {
+                    return 1; // swallow F -> no fullscreen while in PiP
+                }
+                // a fullscreen-origin PiP rides on VLC's live internal fullscreen
+                // state: Esc would make Qt leave it UNDERNEATH the reshape, desyncing
+                // Qt's window cache (SPEC section 7). BARE Esc only - Alt+Esc and
+                // Ctrl+Esc are OS shortcuts, and VLC binds leave-fullscreen to plain
+                // Esc alone
+                if k.vkCode == VK_ESCAPE as u32
+                    && FS_PIP.load(Relaxed)
+                    && [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+                        .into_iter()
+                        .all(|vk| GetAsyncKeyState(vk as i32) as u16 & 0x8000 == 0)
+                {
+                    return 1;
+                }
             }
         }
         CallNextHookEx(KB_HOOK.load(Relaxed) as _, code, wparam, lparam)
