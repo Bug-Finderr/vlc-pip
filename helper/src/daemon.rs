@@ -138,36 +138,25 @@ pub fn run(argv: &[String]) -> i32 {
         return 0; // already running, or the name is unobtainable: never double-run
     }
 
-    let (hot, timer) = unsafe {
-        (
-            RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
-            SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
-        )
-    };
+    unsafe {
+        RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32);
+        SetTimer(std::ptr::null_mut(), 0, 150, None); // WM_TIMER -> thread queue
+    }
     let mut hooks: (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
 
-    // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
-    // (pip.lua) check the leading epoch-seconds for freshness. kb/mouse report whether
-    // the session hooks are CURRENTLY installed (SPEC 6.3). Write failures are
-    // swallowed: NEVER let the heartbeat kill the pump.
+    // Heartbeat: pip.lua checks the leading epoch for freshness (a force-killed daemon
+    // can't delete the file); write failures are swallowed - never kill the pump (SPEC 6.3)
     let alive = state::alive_path();
-    let beat = |last: &mut Instant, kb: bool, mouse: bool| {
+    let beat = |last: &mut Instant| {
         *last = Instant::now();
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let _ = std::fs::write(&alive, format!(
-            "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
-            std::process::id(),
-            hot as i32,
-            timer as i32,
-            kb as i32,
-            mouse as i32,
-        ));
+        let _ = std::fs::write(&alive, epoch.to_string());
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
     refresh_hook_cache(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
     sync_hooks(&mut hooks);
-    beat(&mut last_beat, !hooks.0.is_null(), !hooks.1.is_null());
+    beat(&mut last_beat);
 
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -178,7 +167,7 @@ pub fn run(argv: &[String]) -> i32 {
             sync_hooks(&mut hooks); // armed before the user can physically click the fresh PiP
         } else if msg.message == WM_TIMER {
             if last_beat.elapsed() > Duration::from_secs(3) {
-                beat(&mut last_beat, !hooks.0.is_null(), !hooks.1.is_null());
+                beat(&mut last_beat);
             }
             poll_request(argv);
             // one state snapshot per tick, shared by the hook cache and the converger;

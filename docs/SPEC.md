@@ -116,12 +116,8 @@ Types: `hwnd`/`style`/`ex_style` pointer-sized signed integers (isize in memory,
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
 Bare word, trimmed on read: `toggle` | `enter` | `stop` (case-sensitive). Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored.
 
-### 6.3 `vlc-pip-daemon.alive` - heartbeat + arming diagnostics
-Single line, no newline, rewritten on start and then every >3000 ms (checked each 150 ms tick):
-```
-{unix_seconds_utc} pid={pid} hotkey={0|1} timer={0|1} kb={0|1} mouse={0|1}
-```
-`hotkey`/`timer` = did RegisterHotKey/SetTimer succeed at start; `kb`/`mouse` = is each session LL hook CURRENTLY installed (hooks exist only while a PiP session is live - 0 is the normal idle reading). No failure is fatal - it is only reported here. Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
+### 6.3 `vlc-pip-daemon.alive` - heartbeat
+The unix epoch seconds, rewritten on start and then every >3000 ms (checked each 150 ms tick). Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
 **Consumer contract (pip.lua)**: reads the leading number with Lua `read("*n")`; alive iff the parse yields nil (mid-truncate read = daemon IS alive, never respawn) OR `abs(os.time() - ts) < 15`. So the line MUST start with the epoch number.
 
 ### 6.4 `vlc-pip-status.json` - `status` mode output (stdout is unreliable for a GUI exe)
@@ -186,7 +182,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 
 ### Daemon loop
 1. Named mutex `"VlcPipDaemon"` → second instance exits 0 before touching any file.
-2. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`. Failures recorded in heartbeat flags only. LL hooks are NOT installed here - they follow the session (see above).
+2. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`. Neither failure is fatal. LL hooks are NOT installed here - they follow the session (see above).
 3. Refresh hook cache once and sync hooks (a daemon restarted while already in PiP must be guarded from the first message); beat once.
 4. Pump: `WM_HOTKEY` → Toggle + refresh cache + sync hooks. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter` act; `stop` → `PostQuitMessage(0)`), refresh cache, sync hooks, keep the fullscreen controller strip veiled while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
 5. Cleanup on loop exit: unhook if installed, unregister hotkey, delete the alive file.
