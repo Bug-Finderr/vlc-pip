@@ -7,13 +7,13 @@ use crate::geometry::Corner;
 // against HWND recycling. A VALID file on disk == "in PiP".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub style: i64,
-    pub ex_style: i64,
+    pub style: isize,
+    pub ex_style: isize,
     pub target_w: i32,
     pub target_h: i32,
     pub corner: Corner,
@@ -22,13 +22,22 @@ pub struct PipState {
     pub pid: u32,
 }
 
-/// %TEMP%\{name} for every IPC file.
-pub fn temp_path(name: &str) -> PathBuf {
+/// %TEMP%\{name} for every IPC file (all five SPEC section 6 names live in this file;
+/// pip.lua and the scripts hardcode them - frozen).
+fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
 pub fn state_path() -> PathBuf {
     temp_path("vlc-pip.state")
+}
+
+pub fn alive_path() -> PathBuf {
+    temp_path("vlc-pip-daemon.alive")
+}
+
+pub fn crash_path() -> PathBuf {
+    temp_path("vlc-pip-crash.txt")
 }
 
 pub fn load(path: &Path) -> Option<PipState> {
@@ -64,8 +73,10 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         h: h.parse().ok()?,
         style: style.parse().ok()?,
         ex_style: ex_style.parse().ok()?,
-        target_w: target_w.parse().ok()?,
-        target_h: target_h.parse().ok()?,
+        // same pin as options::parse_options: a hand-edited target outside 1..=16384
+        // must read as no-state, not reach the converger
+        target_w: target_w.parse().ok().filter(|&n| crate::geometry::target_ok(n))?,
+        target_h: target_h.parse().ok().filter(|&n| crate::geometry::target_ok(n))?,
         corner: Corner::parse(corner),
         margin: margin.parse().ok()?,
         min: match min {
@@ -105,7 +116,7 @@ pub fn consume_request(path: &Path) -> Option<String> {
 // ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
 
 pub struct StatusInfo {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,

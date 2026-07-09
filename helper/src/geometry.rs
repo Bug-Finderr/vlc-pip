@@ -156,3 +156,61 @@ pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) 
         Corner::Br => (right, bottom),
     }
 }
+
+// ---- minimal-look convergence planning (applied by native::maintain_region) -----------
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RegionPlan {
+    Skip,
+    Resize { x: i32, y: i32, w: i32, h: i32 },
+    Clip(Rect),
+}
+
+// Real chrome (menu + controller + borders) is well under this. enter's measurement and
+// the converger MUST share the bound: a chrome enter accepts but plan_region skips
+// would land a rect the converger fights forever.
+pub(crate) const MAX_CHROME: i32 = 300;
+
+/// Target sizes are pinned to this at every parse boundary (options and state file).
+/// An 8K display is 7680 wide, so past this is corrupt or hostile input - and it keeps
+/// `target + chrome` far from i32 overflow, which release builds would silently wrap.
+pub(crate) fn target_ok(n: i32) -> bool {
+    (1..=16_384).contains(&n)
+}
+
+/// Per-axis chrome sums: negative or huge = stale rects from VLC's async re-layout.
+pub(crate) fn chrome_ok(w: i32, h: i32) -> bool {
+    (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
+}
+
+// Pure planning math for the minimal-look convergence: resize grows by chrome so the
+// VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
+// child area. `work` is lazy - only the resize branch needs its two user32 calls.
+pub(crate) fn plan_region(
+    wr: &Rect, cr: &Rect, target_w: i32, target_h: i32,
+    corner: Corner, margin: i32, work: impl FnOnce() -> Rect,
+) -> RegionPlan {
+    let rel_l = cr.left - wr.left;
+    let rel_t = cr.top - wr.top;
+    let cw = cr.right - cr.left;
+    let ch = cr.bottom - cr.top;
+    let chrome_w = (wr.right - wr.left) - cw;
+    let chrome_h = (wr.bottom - wr.top) - ch;
+    if !chrome_ok(chrome_w, chrome_h) {
+        return RegionPlan::Skip;
+    }
+    if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
+        let wa = work();
+        let (vx, vy) = compute_corner(&wa, target_w, target_h, corner, margin);
+        // targets pass target_ok at both parse boundaries and chrome passed chrome_ok,
+        // so target + chrome can neither underflow nor overflow
+        let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
+        if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
+            // already at the computed rect but the child never re-fit: re-issuing the
+            // no-op resize would reset the debounce every tick and loop forever
+            return RegionPlan::Skip;
+        }
+        return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };
+    }
+    RegionPlan::Clip(Rect { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch })
+}

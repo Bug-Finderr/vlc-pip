@@ -132,76 +132,62 @@ mod geometry {
         let clip = resize_clip(&rc(0, 0, 480, 270), &rc(200, 100, 280, 170), &rc(0, 0, 210, 110));
         assert_eq!(clip, None);
     }
-}
 
-mod native {
-    use crate::geometry::{self, Corner};
-    use crate::native::{fs_origin, plan_region, RegionPlan};
-
-    #[test]
-    fn fs_origin_requires_both_caption_bits_absent() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
-        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
-        assert!(fs_origin(0)); // fullscreen: caption fully absent
-        // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
-        assert!(fs_origin(WS_BORDER as i64));
-    }
-
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> geometry::Rect {
-        geometry::Rect { left: l, top: t, right: r, bottom: b }
-    }
-
-    fn work() -> geometry::Rect {
-        // 480x270 br margin 16 => video corner at (1424, 754)
-        geometry::Rect { left: 0, top: 0, right: 1920, bottom: 1040 }
-    }
+    // ---- plan_region (WORK: 480x270 br margin 16 => video corner at (1424, 754)) ----
 
     #[test]
     fn negative_chrome_is_stale_measurement() {
         // child wider than its own window = mid-relayout garbage
-        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, Corner::Br, 16, work);
+        let plan = plan_region(&rc(0, 0, 480, 270), &rc(0, 0, 481, 270), 480, 270, Corner::Br, 16, || WORK);
         assert_eq!(plan, RegionPlan::Skip);
     }
 
     #[test]
     fn chrome_clamp_boundary_300_ok_301_stale() {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
-        let cr = rect(0, 0, 480, 270);
-        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, work);
-        assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
-        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, work);
+        let cr = rc(0, 0, 480, 270);
+        let ok = plan_region(&rc(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, || WORK);
+        assert_eq!(ok, RegionPlan::Clip(rc(0, 0, 480, 270)));
+        let stale = plan_region(&rc(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, || WORK);
         assert_eq!(stale, RegionPlan::Skip);
     }
 
     #[test]
     fn two_px_tolerance_clips_three_resizes() {
         // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
-        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, Corner::Br, 16, work);
-        assert!(matches!(at_2, RegionPlan::Clip { .. }));
-        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, Corner::Br, 16, work);
+        let at_2 = plan_region(&rc(0, 0, 482, 270), &rc(0, 0, 482, 270), 480, 270, Corner::Br, 16, || WORK);
+        assert!(matches!(at_2, RegionPlan::Clip(_)));
+        let at_3 = plan_region(&rc(0, 0, 483, 270), &rc(0, 0, 483, 270), 480, 270, Corner::Br, 16, || WORK);
         assert!(matches!(at_3, RegionPlan::Resize { .. }));
     }
 
     #[test]
     fn resize_grows_by_chrome_and_lands_child_at_corner() {
         // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
-        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, Corner::Br, 16, work);
+        let plan = plan_region(&rc(100, 100, 520, 460), &rc(110, 130, 510, 355), 480, 270, Corner::Br, 16, || WORK);
         // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
         assert_eq!(plan, RegionPlan::Resize { x: 1414, y: 724, w: 500, h: 405 });
     }
 
     #[test]
     fn clip_is_child_rect_relative_to_window() {
-        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, Corner::Br, 16, work);
-        assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
+        let plan = plan_region(&rc(1424, 700, 1904, 1024), &rc(1424, 754, 1904, 1024), 480, 270, Corner::Br, 16, || WORK);
+        assert_eq!(plan, RegionPlan::Clip(rc(0, 54, 480, 324)));
     }
+}
+
+mod native {
+    use crate::native::fs_origin;
 
     #[test]
-    fn hostile_negative_target_skips() {
-        // a hand-crafted state file with a -500 target must not produce a resize
-        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, Corner::Br, 16, work);
-        assert_eq!(plan, RegionPlan::Skip);
+    fn fs_origin_requires_both_caption_bits_absent() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
+        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as isize)); // ordinary windowed VLC
+        assert!(fs_origin(0)); // fullscreen: caption fully absent
+        // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
+        assert!(fs_origin(WS_BORDER as isize));
     }
+
 }
 
 mod options {
@@ -236,9 +222,12 @@ mod options {
     }
 
     #[test]
-    fn non_positive_w_h_ignored() {
+    fn out_of_range_w_h_ignored() {
         let o = parse_options(["w=0", "h=-500"]);
         assert_eq!((o.w, o.h), (480, 270));
+        let big = parse_options(["w=16385", "h=2147483647"]);
+        assert_eq!((big.w, big.h), (480, 270)); // above the 16384 pin: overflow-proof
+        assert_eq!(parse_options(["w=16384"]).w, 16384); // the boundary itself is valid
     }
 
     #[test]
@@ -331,7 +320,9 @@ mod state {
         let extra = FULL.replace("12345\n", "12345 7\n"); // 14 tokens
         let bad_num = FULL.replace("349110272", "wide");
         let bad_min = FULL.replace(" 1 12345", " yes 12345");
-        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min] {
+        let bad_target = FULL.replace(" 480 270 br ", " -500 270 br "); // targets pinned 1..=16384
+        let big_target = FULL.replace(" 480 270 br ", " 2147483647 270 br "); // would overflow target+chrome
+        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min, &bad_target, &big_target] {
             assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
     }

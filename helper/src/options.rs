@@ -18,28 +18,17 @@ impl Default for PipOptions {
 
 pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions {
     let mut o = PipOptions::default();
-    // w/h pinned positive: 0/negative would park an invisible topmost window
-    let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| n > 0);
+    // w/h pinned to 1..=16384: 0/negative would park an invisible topmost window, and
+    // huge values would overflow the converger's target+chrome math
+    let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| crate::geometry::target_ok(n));
     for a in args {
         let Some(i) = a.find('=') else { continue };
         let (k, v) = (&a[..i], &a[i + 1..]);
         match k {
-            "w" => {
-                if let Some(n) = pos(v) {
-                    o.w = n;
-                }
-            }
-            "h" => {
-                if let Some(n) = pos(v) {
-                    o.h = n;
-                }
-            }
+            "w" => o.w = pos(v).unwrap_or(o.w),
+            "h" => o.h = pos(v).unwrap_or(o.h),
             "c" => o.corner = Corner::parse(v),
-            "m" => {
-                if let Ok(n) = v.trim().parse() {
-                    o.margin = n;
-                }
-            }
+            "m" => o.margin = v.trim().parse().unwrap_or(o.margin),
             "min" => o.min = v != "0" && !v.eq_ignore_ascii_case("false"),
             _ => {}
         }
@@ -48,10 +37,7 @@ pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions 
 }
 
 pub fn config_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|mut a| {
-        a.push(r"\vlc\pip\config.txt");
-        a.into()
-    })
+    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"vlc\pip\config.txt"))
 }
 
 /// defaults < config tokens < argv: parse_options' later-duplicates-win does the layering.
