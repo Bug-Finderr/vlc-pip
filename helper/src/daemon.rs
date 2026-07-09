@@ -168,8 +168,8 @@ pub fn run(argv: &[String]) -> i32 {
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its
-                // controller strip off the screen (SPEC section 7)
-                native::hide_fs_controller(pip.pid);
+                // controller strip unrenderable (SPEC section 7)
+                native::veil_fs_controller(pip.pid);
             }
             if DRAG.get().state >= DragState::Moving {
                 tracker = native::RegionTracker::default(); // gestures own the window while dragging

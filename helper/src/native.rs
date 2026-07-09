@@ -165,22 +165,47 @@ pub fn window_owner(h: isize) -> u32 {
     p
 }
 
-/// Hide VLC's fullscreen controller strip (separate topmost Qt window, shown on hover
-/// while VLC believes it is fullscreen). One hide sticks across hovers, but VLC's own
-/// hide timer can resync Qt's visibility cache, so this runs every tick during a
-/// fullscreen-origin PiP; VLC's next hover cycle brings the strip back after exit.
-pub fn hide_fs_controller(pid: u32) {
+fn for_each_fs_controller(pid: u32, f: impl Fn(HWND)) {
     if pid == 0 {
         return;
     }
     enum_windows(|w| {
-        if class_starts_with(w, "Qt5QWindowToolSaveBits")
-            && window_owner(w as isize) == pid
-            && unsafe { IsWindowVisible(w) } != 0
-        {
-            unsafe { ShowWindow(w, SW_HIDE) };
+        if class_starts_with(w, "Qt5QWindowToolSaveBits") && window_owner(w as isize) == pid {
+            f(w);
         }
         true
+    });
+}
+
+/// Make VLC's fullscreen controller strip (separate topmost Qt window) unrenderable.
+/// VLC re-shows it on any hover or refocus of a vout it believes fullscreen - faster
+/// than any tick could re-hide, so hiding alone flashed the strip for up to one tick.
+/// An EMPTY window region kills rendering no matter how often VLC shows the window and
+/// survives its show/hide cycles (probed live; alpha-0 does NOT survive - Qt re-applies
+/// its configured opacity on show). Hidden strips are veiled too: pre-armed before
+/// their first show. Runs in enter() and every tick (a recreated strip gets caught).
+pub fn veil_fs_controller(pid: u32) {
+    for_each_fs_controller(pid, |w| unsafe {
+        if IsWindowVisible(w) != 0 {
+            ShowWindow(w, SW_HIDE);
+        }
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let veiled = GetWindowRgn(w, probe) == NULLREGION;
+        DeleteObject(probe);
+        if !veiled {
+            let empty = CreateRectRgn(0, 0, 0, 0);
+            if SetWindowRgn(w, empty, 1) == 0 {
+                DeleteObject(empty); // the system owns the region only on success
+            }
+        }
+    });
+}
+
+/// Give the strip back when a fullscreen-origin session ends (exit, dissolve, record
+/// cleanup): drop the veil; the strip stays hidden until VLC's own next hover cycle.
+pub fn unveil_fs_controller(pid: u32) {
+    for_each_fs_controller(pid, |w| unsafe {
+        SetWindowRgn(w, std::ptr::null_mut(), 1);
     });
 }
 
@@ -379,8 +404,8 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     let chrome = if o.min { client_chrome(h) } else { None };
     if fs_origin(style as i64) {
         // the user was likely just hovering the fullscreen video, so the strip is on
-        // screen RIGHT NOW: hide it before the PiP lands, not a tick later
-        hide_fs_controller(pid);
+        // screen RIGHT NOW: veil it before the PiP lands, not a tick later
+        veil_fs_controller(pid);
     }
     unsafe {
         // WS_MAXIMIZE too: a zoomed window keeps IsZoomed, and Aero snap would then
@@ -422,6 +447,9 @@ pub fn exit_pip() -> bool {
     let path = state::state_path();
     let Some(s) = state::load(&path) else { return false };
     if !owns_state(&s) {
+        if fs_origin(s.style) {
+            unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
+        }
         state::try_delete(&path); // stale: VLC gone or hwnd recycled
         return false;
     }
@@ -430,6 +458,9 @@ pub fn exit_pip() -> bool {
     unsafe {
         let ok = SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
         if ok || IsWindow(hw(h)) == 0 {
+            if fs_origin(s.style) {
+                unveil_fs_controller(s.pid); // session over: the restored fullscreen gets its strip back
+            }
             state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
         }
         ok
@@ -486,6 +517,7 @@ fn dissolve_fs_pip(s: &PipState, path: &Path) {
     unsafe {
         SetWindowPos(hw(h), after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
     }
+    unveil_fs_controller(s.pid);
     state::try_delete(path);
 }
 
@@ -574,6 +606,7 @@ fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
         // a fullscreen-origin PiP's record holds the FULLSCREEN rect - never heal a
         // reopened window to it. Qt believed fullscreen the whole session, so it
         // persisted its true windowed geometry itself: nothing to heal.
+        unveil_fs_controller(s.pid); // no-op if the process died with the session
         state::try_delete(path);
         return;
     }

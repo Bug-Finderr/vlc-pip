@@ -57,21 +57,30 @@ public static IntPtr VoutChild(IntPtr top) {
     }, IntPtr.Zero);
     return found;
 }
+[DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
+[DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int a, int b, int c, int d);
+[DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr o);
 // VLC's fullscreen controller strip: a separate topmost Qt window the helper must keep
-// hidden while a fullscreen-origin PiP is active (SPEC section 7)
-public static bool FscVisible(IntPtr vlcTop) {
+// unrenderable while a fullscreen-origin PiP is active (SPEC section 7). VLC re-shows
+// it on hover/refocus, so IsWindowVisible alone flaps; the strip only PAINTS when it
+// is visible AND no empty veil region blocks it - that is what the user can see.
+public static bool FscRendered(IntPtr vlcTop) {
     uint pid; GetWindowThreadProcessId(vlcTop, out pid);
-    bool vis = false;
+    IntPtr fsc = IntPtr.Zero;
     EnumWindows((h, l) => {
         var sb = new System.Text.StringBuilder(128);
         GetClassNameW(h, sb, 128);
         if (sb.ToString().StartsWith("Qt5QWindowToolSaveBits")) {
             uint p; GetWindowThreadProcessId(h, out p);
-            if (p == pid && IsWindowVisible(h)) { vis = true; return false; }
+            if (p == pid) { fsc = h; return false; }
         }
         return true;
     }, IntPtr.Zero);
-    return vis;
+    if (fsc == IntPtr.Zero || !IsWindowVisible(fsc)) return false;
+    IntPtr probe = CreateRectRgn(0, 0, 0, 0);
+    int type = GetWindowRgn(fsc, probe);
+    DeleteObject(probe);
+    return type != 1; // 1 = NULLREGION = veiled, paints nothing
 }
 '@
 }
@@ -230,10 +239,10 @@ try {
     Check "fullscreen: engaged" (-not $fs.caption)
 
     # summon the controller strip (hover the fullscreen video): the realistic toggle
-    # happens with the strip on screen, and enter() must hide it before the reshape
+    # happens with the strip on screen, and enter() must veil it before the reshape
     $mw = [Smoke.Keys]::GetSystemMetrics(0); $mh = [Smoke.Keys]::GetSystemMetrics(1)
     HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
-    $stripUp = [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd))
+    $stripUp = [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd))
 
     # the enter is one immediate reshape - no handoff wait
     Req "toggle"
@@ -241,23 +250,35 @@ try {
     $null = WaitFor { Test-Path "$env:TEMP\vlc-pip.state" } 2000 15
     $enterMs = $hsw.ElapsedMilliseconds
     Check "strip: summoned, then gone before the pip lands" `
-        ($stripUp -and -not [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd)))
+        ($stripUp -and -not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
     $null = WaitFor { (Status).inPip } 2000 150
     $fpip = Status
     Check "fullscreen enter: immediate (<500ms), pip-sized" `
         ($enterMs -lt 500 -and $fpip.inPip -and (-not $fpip.caption) -and $fpip.w -lt [int]($fs.w / 2))
 
-    # VLC still believes it is fullscreen underneath: hovering the PiP must not surface
-    # the strip (enter hid it once; the tick re-hides after VLC's own resync)
+    # VLC still believes it is fullscreen underneath and re-shows the strip on any
+    # hover - the veil region must keep it paintless, with no one-tick blink allowed
+    # (a veil regression leaves the strip on screen for seconds: no grace needed)
     HoverWiggle ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2))
-    Start-Sleep -Milliseconds 400   # a first-hover strip may blink for one tick (SPEC)
-    Check "strip: stays hidden through hover" (-not [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd)))
+    Check "strip: never renders through hover" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
+
+    # the live-reported flash: unfocus the pip, refocus it with a click - VLC re-shows
+    # the strip on that activation faster than any tick could re-hide
+    ClickAt ([int]($mw / 2)) ([int]($mh / 2)) 1
+    ClickAt ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2)) 1
+    Check "strip: never renders on unfocus/refocus" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
 
     # exit returns the user to fullscreen - where they came from, internally consistent
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $fout = Status
     Check "fullscreen exit: fullscreen restored" ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.w -eq $fs.w -and $fout.h -eq $fs.h)
+
+    # exit must also unveil: in plain fullscreen the strip has to RENDER again on hover
+    # (a veil leak would permanently kill VLC's own controller)
+    HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
+    $stripBack = WaitFor { [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)) } 2500 60
+    Check "strip: renders again after exit" $stripBack
 
     # both toggles are instant: two rapid presses = a full round trip, no half-states
     Req "toggle"
