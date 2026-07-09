@@ -21,9 +21,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
-// LL hook callbacks dispatch on the pump thread (SPEC R7): plain Cells hold all hook
-// state, read and written as WHOLE structs, and hooks never touch the disk (SPEC 3).
-// The one atomic serves the panic hook, which can fire on any thread (SPEC 6.3).
+// Hooks dispatch on the pump thread: whole-struct Cells, no disk I/O in hooks (SPEC 3, R7); the one
+// atomic serves the any-thread panic hook.
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 
 const WM_APP_DRAG: u32 = WM_APP;
@@ -45,8 +44,7 @@ impl DragState {
     }
 }
 
-// The drag gesture. The pump reads the mode from wParam and validates the generation
-// from lParam, so a hook-side reset or rapid re-arm can never apply a stale delta.
+// The pump validates the generation from lParam: a hook-side reset or rapid re-arm can never apply a stale delta.
 #[derive(Clone, Copy, Default)]
 struct Drag {
     state: DragState,
@@ -70,10 +68,7 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// The current PiP (hwnd 0 = none). `fs` = fullscreen-origin (saved style has no
-/// caption): the keyboard hook swallows Esc and the tick keeps VLC's strip hidden.
-/// `pid` is the owner verified by owns_state - the tick reuses it rather than
-/// re-deriving it from a handle that may have been recycled since.
+/// The current PiP (hwnd 0 = none); `fs` = fullscreen-origin; `pid` is owns_state-verified, never re-derived from a recyclable handle.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
@@ -92,9 +87,7 @@ pub fn owns_alive_file() -> bool {
 }
 
 fn refresh_hook_cache(s: Option<PipState>) {
-    // full owner-PID guard (not just IsWindow): pending heal records keep stale states
-    // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
-    // on a foreign window
+    // owns_state, not IsWindow: heal records keep stale states alive, and a recycled HWND must never re-arm guards on a foreign window
     PIP.set(s.filter(native::owns_state).map_or(Pip::default(), |s| Pip {
         hwnd: s.hwnd,
         fs: native::fs_origin(s.style),
@@ -102,8 +95,7 @@ fn refresh_hook_cache(s: Option<PipState>) {
     }));
 }
 
-/// LL hooks exist only while a session is live (SPEC 7). Per slot: only null slots
-/// install (failed installs retry, live handles never leak), non-null slots unhook.
+/// Hooks exist only while a session is live (SPEC 7); only null slots install, so failed installs retry and live handles never leak.
 fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
     if PIP.get().hwnd != 0 {
         unsafe {
@@ -122,9 +114,7 @@ fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
             }
         }
         *hooks = (std::ptr::null_mut(), std::ptr::null_mut());
-        // a gesture must not outlive its hooks (the ending button-up is never seen);
-        // the click cell keeps its last-allowed-down so a toggle-retoggle inside
-        // double-click time cannot pair clicks across sessions (SPEC 7)
+        // a gesture must not outlive its hooks; the click cell keeps its last-allowed-down so clicks cannot pair across sessions (SPEC 7)
         DRAG.set(Drag::default());
         CLICK.set(Click { swallow_next_up: false, ..CLICK.get() });
     }
@@ -170,15 +160,13 @@ pub fn run(argv: &[String]) -> i32 {
                 beat(&mut last_beat);
             }
             poll_request(argv);
-            // one state snapshot per tick, shared by the hook cache and the converger;
-            // it must reflect a request-triggered toggle within this same tick
+            // one snapshot per tick, loaded after poll_request so a request-triggered toggle lands this same tick
             let s = state::load(&state::state_path());
             refresh_hook_cache(s);
             sync_hooks(&mut hooks);
             let pip = PIP.get();
             if pip.fs {
-                // VLC still believes it is fullscreen under this PiP: keep its
-                // controller strip unrenderable (SPEC section 7)
+                // VLC still believes it is fullscreen under this PiP: keep its strip unrenderable (SPEC 7)
                 native::veil_fs_controller(pip.pid);
             }
             if DRAG.get().state.active() {
@@ -205,10 +193,8 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-// The coalesced drag apply. Snapshot the gesture BEFORE any Win32 call: SetWindowPos/
-// SetWindowRgn can pump sent messages, and a hook re-arm mid-call must not be clobbered
-// or half-read. The generation guard drops a queued message from a previous drag (a
-// rapid release-and-repress re-arms the gesture; the stale delta must not apply).
+// Snapshot the gesture BEFORE any Win32 call (SetWindowPos/SetWindowRgn can pump sent messages); the
+// generation guard drops queued messages from a previous drag.
 fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let mut d = DRAG.get();
     d.move_pending = false;
@@ -229,16 +215,14 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         }
     };
     if resizing {
-        // live minimal look: clip to where the video will sit, using the per-side chrome
-        // measured at drag start; convergence verifies the exact box after release
+        // clip to where the video will sit (chrome measured at drag start); convergence verifies after release
         let clip = d.had_rgn.then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
     } else {
         native::drag_move(d.hwnd, &target);
     }
     if msg.message == WM_APP_DRAGEND {
-        // finalize from OUR computed rect: the async SetWindowPos above has not landed
-        // in VLC yet, so a fresh GetWindowRect would be stale
+        // finalize from OUR computed rect: the async SetWindowPos has not landed, a fresh GetWindowRect would be stale
         let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
         let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
@@ -268,9 +252,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 if k.vkCode == VK_F as u32 {
                     return 1; // swallow F -> no fullscreen while in PiP
                 }
-                // a fullscreen-origin PiP rides on VLC's live internal fullscreen state:
-                // Esc would make Qt leave it underneath the reshape (SPEC 7). BARE Esc
-                // only - Alt+Esc/Ctrl+Esc are OS shortcuts VLC doesn't bind
+                // Esc would make Qt leave fullscreen underneath the reshape; BARE Esc only - modified Esc is an OS shortcut (SPEC 7)
                 if k.vkCode == VK_ESCAPE as u32
                     && pip.fs
                     && [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
@@ -286,8 +268,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 }
 
-// Rate-limit clicks over the PiP: swallow any button-down within double-click time+rect
-// of the last ALLOWED down, so no two delivered clicks can pair into a dblclick (SPEC 7).
+// Swallow any down within double-click time+rect of the last ALLOWED down: no two delivered clicks can pair into a dblclick (SPEC 7).
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if code >= 0 {
@@ -305,8 +286,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         return 1;
                     }
                     CLICK.set(Click { time: m.time, x: m.pt.x, y: m.pt.y, ..c });
-                    // arm a potential drag; the zone (interior vs 16px band) picks move vs
-                    // resize; gen bump invalidates any queued message from a prior drag
+                    // arm a potential drag; the gen bump invalidates any queued message from a prior drag
                     let mut d = Drag { generation: DRAG.get().generation.wrapping_add(1), ..Drag::default() };
                     if let Some((vis, wr)) = native::gesture_rects(h) {
                         d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));

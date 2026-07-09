@@ -1,5 +1,4 @@
-//! Every unit test, one flat cfg(test) file. Tests are siblings of the modules (not
-//! children), so tested-but-internal items are pub(crate).
+//! Tests are siblings of the modules (not children), so tested-but-internal items are pub(crate).
 
 mod geometry {
     use crate::geometry::*;
@@ -211,7 +210,7 @@ mod options {
         assert!(!parse_options(["min=0"]).min);
         assert!(!parse_options(["min=false"]).min);
         assert!(!parse_options(["min=FALSE"]).min);
-        assert!(parse_options(["min=no"]).min); // v1: anything else is true
+        assert!(parse_options(["min=no"]).min);
         assert!(parse_options(["min="]).min);
     }
 
@@ -302,8 +301,7 @@ mod state {
 
     #[test]
     fn unknown_corner_token_in_full_line_falls_back_to_br() {
-        // corrupt_input pins what is REJECTED; the corner token is the one field that
-        // instead accepts-with-fallback (SPEC 6.1: unknown reads as br)
+        // the corner token is the one field that accepts-with-fallback instead of rejecting (SPEC 6.1)
         let s = parse_state(&FULL.replace(" br ", " zz ")).unwrap();
         assert_eq!(s.corner, Corner::Br);
     }

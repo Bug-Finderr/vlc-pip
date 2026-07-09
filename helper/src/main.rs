@@ -9,8 +9,7 @@ mod state;
 mod tests;
 
 fn main() {
-    // GUI-subsystem exe: a panic is otherwise invisible. Location (file:line) survives
-    // strip; exit 3 matches v1's crash exit code. The hook itself must never panic.
+    // GUI-subsystem exe: a panic is otherwise invisible; the hook itself must never panic.
     std::panic::set_hook(Box::new(|info| {
         let loc = info
             .location()
@@ -19,8 +18,7 @@ fn main() {
         let msg = info.payload_as_str().unwrap_or("panic");
         let _ = std::fs::write(state::crash_path(), format!("panic at {loc}: {msg}"));
         if daemon::owns_alive_file() {
-            // a crashed daemon must not leave a fresh heartbeat: pip.lua would treat it as
-            // alive for up to 15s and drop menu toggles (v1 deleted it in its finally block)
+            // a crashed daemon must not leave a fresh heartbeat: pip.lua would treat it as alive for 15s and drop toggles
             let _ = std::fs::remove_file(state::alive_path());
         }
         std::process::exit(3);
@@ -30,8 +28,7 @@ fn main() {
 
 fn run() -> i32 {
     native::enable_dpi_awareness();
-    // args_os + lossy: std::env::args() panics on non-Unicode argv; every legitimate
-    // token here is ASCII anyway
+    // std::env::args() panics on non-Unicode argv; every legitimate token here is ASCII
     let args: Vec<String> =
         std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let mode = args.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();

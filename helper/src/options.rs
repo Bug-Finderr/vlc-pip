@@ -18,8 +18,7 @@ impl Default for PipOptions {
 
 pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions {
     let mut o = PipOptions::default();
-    // w/h pinned to 1..=16384: 0/negative would park an invisible topmost window, and
-    // huge values would overflow the converger's target+chrome math
+    // pinned to 1..=16384: 0/negative parks an invisible topmost window; huge values overflow target+chrome
     let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| crate::geometry::target_ok(n));
     for a in args {
         let Some(i) = a.find('=') else { continue };
@@ -45,8 +44,7 @@ pub fn merge(cfg: &str, argv: &[String]) -> PipOptions {
     parse_options(cfg.split_whitespace().chain(argv.iter().map(String::as_str)))
 }
 
-/// Options in effect for an enter. Config is re-read per call so the daemon picks up its
-/// own gesture writes (and hand edits) without a restart.
+/// Config is re-read per call so the daemon picks up its own gesture writes without a restart.
 pub fn effective(argv: &[String]) -> PipOptions {
     let cfg = config_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
     merge(&cfg, argv)

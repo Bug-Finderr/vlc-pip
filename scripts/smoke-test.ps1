@@ -1,11 +1,8 @@
-# End-to-end smoke test against live VLC. Run AFTER scripts\install.ps1 (daemon must be running).
-# One check per behavioral contract; waits poll for their condition instead of sleeping a
-# guessed duration - faster, and a late condition fails the check instead of flaking it.
+# End-to-end smoke test against live VLC; run AFTER scripts\install.ps1 (daemon must be running).
 $ErrorActionPreference = "Stop"
 $exe = "$env:APPDATA\vlc\pip\pip-helper.exe"
 
-# WinExe stdout is invisible to PowerShell capture; run the helper and read its
-# status-file channel instead of capturing output.
+# WinExe stdout is invisible to PowerShell capture: read the status-file channel instead.
 function Status {
     Start-Process $exe status -Wait
     Get-Content "$env:TEMP\vlc-pip-status.json" -Raw | ConvertFrom-Json
@@ -24,8 +21,7 @@ $fail = @()
 function Check($name, $cond) {
     if ($cond) { Write-Host "PASS $name" }
     else {
-        # the status file still holds the snapshot the check asserted on: dump it so a
-        # FAIL is self-diagnosing without re-running the whole live session
+        # the status file still holds the asserted snapshot: dump it so a FAIL is self-diagnosing
         Write-Host "FAIL $name"
         try { Write-Host "  status: $(Get-Content "$env:TEMP\vlc-pip-status.json" -Raw)" } catch {}
         $script:fail += $name
@@ -45,8 +41,7 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int max);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 public delegate bool EnumProc(IntPtr h, IntPtr l);
-// VLC's vout event thread processes POSTED keys regardless of focus - keybd_event would
-// need VLC foreground, and injected focus-clicks from a background session are flaky
+// VLC's vout event thread processes POSTED keys regardless of focus; keybd_event would need VLC foreground
 public static IntPtr VoutChild(IntPtr top) {
     IntPtr found = IntPtr.Zero;
     EnumChildWindows(top, (h, l) => {
@@ -60,10 +55,7 @@ public static IntPtr VoutChild(IntPtr top) {
 [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
 [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int a, int b, int c, int d);
 [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr o);
-// VLC's fullscreen controller strip: a separate topmost Qt window the helper must keep
-// unrenderable while a fullscreen-origin PiP is active (SPEC section 7). VLC re-shows
-// it on hover/refocus, so IsWindowVisible alone flaps; the strip only PAINTS when it
-// is visible AND no empty veil region blocks it - that is what the user can see.
+// rendered = visible AND no empty veil region blocking paint; IsWindowVisible alone flaps on hover/refocus (SPEC 7)
 public static bool FscRendered(IntPtr vlcTop) {
     uint pid; GetWindowThreadProcessId(vlcTop, out pid);
     IntPtr fsc = IntPtr.Zero;
@@ -92,8 +84,7 @@ function ClickAt($x, $y, $times) {
         [Smoke.Keys]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)  # LEFTUP
         Start-Sleep -Milliseconds 80                              # well inside double-click time
     }
-    # the NEXT injected button-down must fall outside double-click time of this burst's
-    # last ALLOWED down, or the guard swallows it (and a drag would never arm)
+    # the NEXT injected down must fall outside double-click time of the burst's last ALLOWED down, or the guard swallows it
     Start-Sleep -Milliseconds 600
 }
 # post a key to VLC's vout (focus-independent); scan code matters for VLC's translation
@@ -112,8 +103,7 @@ function SendCtrlAltP {
     [Smoke.Keys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)      # Ctrl up
 }
 function DragFrom($x1, $y1, $x2, $y2) {
-    # movement must go through injected mouse_event MOVEs: SetCursorPos repositions the
-    # cursor without generating input events, so WH_MOUSE_LL (the daemon) never sees it
+    # SetCursorPos generates no input events (WH_MOUSE_LL never sees it): inject mouse_event MOVEs
     $sw = [Smoke.Keys]::GetSystemMetrics(0); $sh = [Smoke.Keys]::GetSystemMetrics(1)
     [Smoke.Keys]::SetCursorPos($x1, $y1) | Out-Null
     Start-Sleep -Milliseconds 150
@@ -145,20 +135,18 @@ if (-not (Test-Path $vlcPath)) { throw "vlc.exe not found" }
 if (Get-Process vlc -ErrorAction SilentlyContinue) {
     throw "Close VLC first: this test resizes, clicks, and kills the VLC instance it targets"
 }
-# v2.1: gestures persist to config.txt - park it so the run starts from defaults
+# gestures persist to config.txt - park it so the run starts from defaults
 $cfg = "$env:APPDATA\vlc\pip\config.txt"
 $cfgBak = "$cfg.smoke-bak"
 $vlcProc = $null
 
 try {
-    # park INSIDE the try: any later throw still restores the user's config in finally
-    # (preflight throws stay above, where the finally's clear can't touch an unparked config)
+    # park INSIDE the try: any later throw still restores the user's config in finally (preflight throws stay above)
     if (Test-Path $cfg) { Move-Item $cfg $cfgBak -Force }
 
     # screen:// = live playing video, so the video child window and minimal-look region exist
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
-    # $before anchors every exact-rect check: wait for Qt's startup autoresize to settle
-    # (two identical consecutive rect samples), not a guessed duration
+    # $before anchors every exact-rect check: wait for Qt's startup autoresize to settle (two identical samples)
     $prevR = $null
     for ($i = 0; $i -lt 20; $i++) {
         $cur = Status
@@ -176,15 +164,13 @@ try {
     Check "enter: pip formed (borderless, topmost, video 480w, region, state)" `
         ((-not $pip.caption) -and $pip.topmost -and $pip.w -eq 480 -and $pip.inPip -and $pip.minimal)
 
-    # fullscreen prevention: a 5-click burst subsumes double and triple click - every
-    # down after the first ALLOWED one must be swallowed, so no OS double-click can
-    # ever synthesize (v1 bugs: dblclick fullscreened; clicks 1+3 paired on triple)
+    # a 5-click burst subsumes double and triple click: every down after the first ALLOWED one must be swallowed
     $cx = $pip.x + [int]($pip.w / 2); $cy = $pip.y + [int]($pip.h / 2)
     ClickAt $cx $cy 5; $afterSpam = Status
     Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
         ($afterSpam.x -eq $pip.x -and $afterSpam.w -eq $pip.w -and $afterSpam.h -eq $pip.h -and $afterSpam.inPip)
 
-    # v2.1 gestures: interior drag = free move; band drag = aspect-locked resize; wheel untouched
+    # interior drag = free move; band drag = aspect-locked resize; wheel untouched
     DragFrom $cx $cy ($cx - 220) ($cy - 160)
     $moved = Status
     Check "drag-move: at delta, size held, still pip" `
@@ -196,8 +182,7 @@ try {
     $bandClick = Status
     Check "band click: no resize, no move" ($bandClick.x -eq $moved.x -and $bandClick.w -eq $moved.w -and $bandClick.inPip)
 
-    # right edge at mid-height: horizontal chrome is 0 so window right == visible right,
-    # while the top/bottom strips are region-clipped chrome (corner drags are manual)
+    # right edge at mid-height: horizontal chrome is 0 so window right == visible right (top/bottom are region-clipped chrome)
     DragFrom ($moved.x + $moved.w - 8) ($moved.y + [int]($moved.h / 2)) ($moved.x + $moved.w - 108) ($moved.y + [int]($moved.h / 2))
     $null = WaitFor { $s = Status; $s.w -lt $moved.w -and $s.minimal } 4000 150   # convergence re-clips
     $rs = Status
@@ -216,7 +201,6 @@ try {
     Check "exit: exact windowed restore (caption, rect, topmost/region/state cleared)" `
         ($after.caption -and (-not $after.topmost) -and (-not $after.inPip) -and (-not $after.minimal) -and $after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
 
-    # persistence: re-enter picks the gestured size from config.txt
     Req "toggle"
     $null = WaitFor { (Status).inPip } 3000 150
     $re = Status
@@ -234,16 +218,14 @@ try {
     Check "interleave hotkey+request: no desync, exact rect" `
         ((-not $s.inPip) -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
-    # v2.1.1 fullscreen-origin PiP (SPEC section 7). F posted to the vout = VLC's
-    # fullscreen hotkey, focus-independent.
+    # F posted to the vout = VLC's fullscreen hotkey, focus-independent (SPEC 7)
     PostKey $s.hwnd 0x46 0x21
     # caption-only: Qt autoresize can make the windowed size already match the monitor
     $null = WaitFor { -not (Status).caption } 2500 150
     $fs = Status
     Check "fullscreen: engaged" (-not $fs.caption)
 
-    # summon the controller strip (hover the fullscreen video): the realistic toggle
-    # happens with the strip on screen, and enter() must veil it before the reshape
+    # summon the strip first: the realistic toggle happens with it on screen, and enter() must veil before the reshape
     $mw = [Smoke.Keys]::GetSystemMetrics(0); $mh = [Smoke.Keys]::GetSystemMetrics(1)
     HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
     $stripUp = [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd))
@@ -260,26 +242,21 @@ try {
     Check "fullscreen enter: immediate (<500ms), pip-sized" `
         ($enterMs -lt 500 -and $fpip.inPip -and (-not $fpip.caption) -and $fpip.w -lt [int]($fs.w / 2))
 
-    # VLC still believes it is fullscreen underneath and re-shows the strip on any
-    # hover - the veil region must keep it paintless, with no one-tick blink allowed
-    # (a veil regression leaves the strip on screen for seconds: no grace needed)
+    # VLC re-shows the strip on any hover: the veil must keep it paintless, no one-tick blink allowed
     HoverWiggle ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2))
     Check "strip: never renders through hover" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
 
-    # the live-reported flash: unfocus the pip, refocus it with a click - VLC re-shows
-    # the strip on that activation faster than any tick could re-hide
+    # unfocus/refocus makes VLC re-show the strip faster than any tick could re-hide
     ClickAt ([int]($mw / 2)) ([int]($mh / 2)) 1
     ClickAt ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2)) 1
     Check "strip: never renders on unfocus/refocus" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
 
-    # exit returns the user to fullscreen - where they came from, internally consistent
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $fout = Status
     Check "fullscreen exit: fullscreen restored" ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.w -eq $fs.w -and $fout.h -eq $fs.h)
 
-    # exit must also unveil: in plain fullscreen the strip has to RENDER again on hover
-    # (a veil leak would permanently kill VLC's own controller)
+    # exit must also unveil: a veil leak would permanently kill VLC's own controller
     HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
     $stripBack = WaitFor { [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)) } 2500 60
     Check "strip: renders again after exit" $stripBack
@@ -292,17 +269,14 @@ try {
     $fdbl = Status
     Check "fullscreen double-toggle: clean round trip" ((-not $fdbl.inPip) -and (-not $fdbl.caption) -and $fdbl.w -eq $fs.w)
 
-    # leave fullscreen via VLC itself: the window was untouched while fullscreen, so
-    # Qt's own restore must land the exact pre-fullscreen rect
+    # the window was untouched while fullscreen, so Qt's own restore must land the exact pre-fullscreen rect
     PostKey $fdbl.hwnd 0x46 0x21
     $null = WaitFor { $w = Status; $w.caption -and $w.w -eq $before.w } 3000 150
     $fw = Status
     Check "fullscreen left: original windowed rect intact" `
         ($fw.caption -and $fw.x -eq $before.x -and $fw.y -eq $before.y -and $fw.w -eq $before.w -and $fw.h -eq $before.h)
 
-    # stopping playback inside a fullscreen-origin PiP: VLC leaves fullscreen by itself
-    # and balloons the window - the daemon must dissolve the session into a plain
-    # windowed VLC (frame back, state dropped), never restore the fullscreen shell
+    # stop inside an fs-origin PiP: VLC leaves fullscreen itself - dissolve to plain windowed, never restore the fullscreen shell
     PostKey $fw.hwnd 0x46 0x21
     $null = WaitFor { -not (Status).caption } 2500 150
     Req "toggle"
@@ -313,11 +287,7 @@ try {
     $dis = Status
     Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.state"))
 
-    # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
-    # (a kill persists nothing and would pass even without the heal - verified), so the
-    # reopened window would sit full-size at the PiP origin; the daemon heals it back to
-    # the pre-PiP rect and deletes the state once the rect sticks. The state-file check
-    # polls Test-Path so nothing races the heal's own delete.
+    # a CLEAN close in PiP makes Qt persist the PiP geometry (a kill persists nothing); poll Test-Path so nothing races the heal's delete
     $pre = Status
     Req "enter"
     $null = WaitFor { (Status).inPip } 3000 150
@@ -330,15 +300,13 @@ try {
     $healed = Status
     Check "reopen heal: state cleared, window at pre-pip position" `
         ($healDone -and [math]::Abs($healed.x - $pre.x) -le 16 -and [math]::Abs($healed.y - $pre.y) -le 16)
-    # clean-close this instance too so VLC persists the HEALED geometry (the finally
-    # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
+    # clean-close so VLC persists the HEALED geometry; a force-kill would strand the PiP rect in vlc-qt-interface.ini
     $vlcProc.CloseMainWindow() | Out-Null
     $vlcProc.WaitForExit(8000) | Out-Null
 }
 finally {
     # restore the window if the test aborted mid-PiP (no-op otherwise, works without the daemon)
     try { Start-Process $exe exit -Wait } catch {}
-    # put the user's config back (or clear the one this run wrote) before tearing VLC down
     if (Test-Path $cfgBak) { Move-Item $cfgBak $cfg -Force }
     elseif (Test-Path $cfg) { Remove-Item $cfg -Force -ErrorAction SilentlyContinue }
     if ($vlcProc -and -not $vlcProc.HasExited) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false -ErrorAction SilentlyContinue }

@@ -1,10 +1,8 @@
 $ErrorActionPreference = "SilentlyContinue"
-# restore VLC FIRST: stopping the daemon and deleting the state file below would strand a
-# PiP'd VLC borderless/topmost with no way back (one-shot "exit" is a no-op when not in PiP)
+# restore VLC FIRST: stopping the daemon and deleting state below would strand a PiP'd VLC borderless/topmost
 $exe = "$env:APPDATA\vlc\pip\pip-helper.exe"
 if ((Test-Path "$env:TEMP\vlc-pip.state") -and (Test-Path $exe)) { Start-Process $exe exit -Wait }
-# ask the daemon to exit and wait until the process is gone, so pip-helper.exe is not
-# still running (and locked) when the pip folder is deleted below
+# wait until the daemon is gone so pip-helper.exe is not locked when the pip folder is deleted
 Set-Content "$env:TEMP\vlc-pip-request.txt" "stop"
 $deadline = (Get-Date).AddSeconds(5)
 while ((Get-Process pip-helper -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }
