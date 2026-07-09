@@ -58,7 +58,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 | Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
-CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
+CLI modes: `exit|status|daemon` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
 
 ## Development
 

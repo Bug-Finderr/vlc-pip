@@ -34,17 +34,9 @@ fn run() -> i32 {
     // token here is ASCII anyway
     let args: Vec<String> =
         std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
-    let mode = args.first().map_or_else(|| "toggle".to_string(), |s| s.to_ascii_lowercase());
+    let mode = args.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
     let tail = args.get(1..).unwrap_or(&[]);
     match mode.as_str() {
-        "toggle" => {
-            let o = options::effective(tail);
-            one_shot(native::toggle(&o), &o)
-        }
-        "enter" => {
-            let o = options::effective(tail);
-            one_shot(native::enter(native::find_player(), &o), &o)
-        }
         "exit" => {
             if native::exit_pip() { 0 } else { 1 }
         }
@@ -57,27 +49,10 @@ fn run() -> i32 {
             let _ = writeln!(std::io::stdout(), "{s}");
             0
         }
-        "daemon" => daemon::run(tail), // per-gesture re-read: the daemon must see its own config writes
-        "stop" => {
-            if std::fs::write(state::request_path(), "stop").is_ok() { 0 } else { 1 }
-        }
+        "daemon" => daemon::run(tail),
         _ => {
             eprintln!("unknown mode: {mode}");
             2
         }
     }
-}
-
-// one-shot (no daemon ticks): converge the minimal-look region here, sleeps are harmless
-fn one_shot(ok: bool, o: &options::PipOptions) -> i32 {
-    if ok && o.min && native::in_pip() {
-        // min=0 makes maintain_region a no-op: skip the pure sleep
-        let mut tracker = native::RegionTracker::default();
-        for _ in 0..6 {
-            // debounce needs ~4 ticks: measure, resize, measure, region
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            native::maintain_region(&mut tracker, state::load(&state::state_path()));
-        }
-    }
-    if ok { 0 } else { 1 }
 }
