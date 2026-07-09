@@ -168,7 +168,7 @@ mod native {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
         let cr = rect(0, 0, 480, 270);
         let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, work);
-        assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
+        assert_eq!(ok, RegionPlan::Clip(rect(0, 0, 480, 270)));
         let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, work);
         assert_eq!(stale, RegionPlan::Skip);
     }
@@ -177,7 +177,7 @@ mod native {
     fn two_px_tolerance_clips_three_resizes() {
         // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
         let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, Corner::Br, 16, work);
-        assert!(matches!(at_2, RegionPlan::Clip { .. }));
+        assert!(matches!(at_2, RegionPlan::Clip(_)));
         let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, Corner::Br, 16, work);
         assert!(matches!(at_3, RegionPlan::Resize { .. }));
     }
@@ -193,7 +193,7 @@ mod native {
     #[test]
     fn clip_is_child_rect_relative_to_window() {
         let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, Corner::Br, 16, work);
-        assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
+        assert_eq!(plan, RegionPlan::Clip(rect(0, 54, 480, 324)));
     }
 
     #[test]

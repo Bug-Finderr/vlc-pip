@@ -138,8 +138,7 @@ pub fn work_area(h: isize) -> geometry::Rect {
         let mut mi: MONITORINFO = std::mem::zeroed();
         mi.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
-        let w = mi.rcWork;
-        geometry::Rect { left: w.left, top: w.top, right: w.right, bottom: w.bottom }
+        from_win(&mi.rcWork)
     }
 }
 
@@ -214,13 +213,22 @@ pub fn unveil_fs_controller(pid: u32) {
 // VLC 3.x hosts the video in a native child whose class starts with "VLC video main";
 // the minimal look clips the top-level window to it via SetWindowRgn.
 
+// windows-sys RECT <-> geometry::Rect, converted only here (geometry stays FFI-free)
+fn from_win(r: &RECT) -> geometry::Rect {
+    geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+fn to_win(r: &geometry::Rect) -> RECT {
+    RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
 pub fn window_rect(h: isize) -> Option<geometry::Rect> {
     unsafe {
         let mut r: RECT = std::mem::zeroed();
         if GetWindowRect(hw(h), &mut r) == 0 {
             return None;
         }
-        Some(geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
+        Some(from_win(&r))
     }
 }
 
@@ -245,12 +253,12 @@ fn has_region(h: isize) -> bool {
     region_box(h).is_some()
 }
 
-fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
+fn region_box(h: isize) -> Option<geometry::Rect> {
     unsafe {
         let probe = CreateRectRgn(0, 0, 0, 0);
         let mut b: RECT = std::mem::zeroed();
         let r = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
-            Some((b.left, b.top, b.right, b.bottom))
+            Some(from_win(&b))
         } else {
             None
         };
@@ -260,9 +268,9 @@ fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
 }
 
 // Apply a rectangular region (window-relative); the system owns rgn only on success.
-fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
+fn set_region(h: isize, r: &geometry::Rect) {
     unsafe {
-        let rgn = CreateRectRgn(left, top, right, bottom);
+        let rgn = CreateRectRgn(r.left, r.top, r.right, r.bottom);
         if SetWindowRgn(hw(h), rgn, 1) == 0 {
             DeleteObject(rgn);
         }
@@ -276,11 +284,11 @@ fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
 // call returns (visible, window) so had_rgn compares a coherent snapshot.
 pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
     let wr = window_rect(h)?;
-    let vis = region_box(h).map_or(wr, |(l, t, r, b)| geometry::Rect {
-        left: wr.left + l,
-        top: wr.top + t,
-        right: wr.left + r,
-        bottom: wr.top + b,
+    let vis = region_box(h).map_or(wr, |b| geometry::Rect {
+        left: wr.left + b.left,
+        top: wr.top + b.top,
+        right: wr.left + b.right,
+        bottom: wr.top + b.bottom,
     });
     Some((vis, wr))
 }
@@ -304,7 +312,7 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
         match clip {
             Some(c) => {
                 // keep the minimal look live through the resize (region is window-relative)
-                set_region(h, c.left, c.top, c.right, c.bottom);
+                set_region(h, c);
             }
             None => {
                 if has_region(h) {
@@ -421,7 +429,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
         if ok {
             if let Some((cl, ct, _, _)) = chrome {
-                set_region(h, cl, ct, cl + o.w, ct + o.h);
+                set_region(h, &geometry::Rect { left: cl, top: ct, right: cl + o.w, bottom: ct + o.h });
             }
         } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
@@ -594,11 +602,11 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
             unsafe { SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED) };
             t.prev = None; // our own resize invalidates the measurement
         }
-        RegionPlan::Clip { left, top, right, bottom } => {
+        RegionPlan::Clip(c) => {
             // verify the box, not just presence: a live-clipped resize drag leaves an
             // approximate region that convergence must confirm or correct
-            if region_box(h) != Some((left, top, right, bottom)) {
-                set_region(h, left, top, right, bottom);
+            if region_box(h) != Some(c) {
+                set_region(h, &c);
             }
         }
     }
@@ -645,8 +653,7 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
             return; // heal the normal placement once restored - the iconic rect is garbage
         }
         let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
-        let tr = RECT { left: target.left, top: target.top, right: target.right, bottom: target.bottom };
-        if MonitorFromRect(&tr, MONITOR_DEFAULTTONULL).is_null() {
+        if MonitorFromRect(&to_win(&target), MONITOR_DEFAULTTONULL).is_null() {
             state::try_delete(path); // monitor layout changed: VLC's own placement is saner
             return;
         }
@@ -669,7 +676,7 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
 pub(crate) enum RegionPlan {
     Skip,
     Resize { x: i32, y: i32, w: i32, h: i32 },
-    Clip { left: i32, top: i32, right: i32, bottom: i32 },
+    Clip(geometry::Rect),
 }
 
 // Real chrome (menu + controller + borders) is well under this. enter's measurement and
@@ -708,5 +715,5 @@ pub(crate) fn plan_region(
         }
         return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };
     }
-    RegionPlan::Clip { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch }
+    RegionPlan::Clip(geometry::Rect { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch })
 }
