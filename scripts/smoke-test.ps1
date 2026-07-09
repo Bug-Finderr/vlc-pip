@@ -229,7 +229,7 @@ try {
     # the enter is one immediate reshape - no handoff wait
     Req "toggle"
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
-    $null = WaitFor { Test-Path "$env:TEMP\vlc-pip.json" } 2000 15
+    $null = WaitFor { Test-Path "$env:TEMP\vlc-pip.state" } 2000 15
     $enterMs = $hsw.ElapsedMilliseconds
     Check "strip: summoned, then gone before the pip lands" `
         ($stripUp -and -not [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd)))
@@ -275,9 +275,9 @@ try {
     $null = WaitFor { (Status).inPip } 2000 150
     $fsp = Status
     PostKey $fsp.hwnd 0x53 0x1F                                  # S = VLC stop
-    $null = WaitFor { $d = Status; $d.caption -and -not (Test-Path "$env:TEMP\vlc-pip.json") } 3000 150
+    $null = WaitFor { $d = Status; $d.caption -and -not (Test-Path "$env:TEMP\vlc-pip.state") } 3000 150
     $dis = Status
-    Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.json"))
+    Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.state"))
 
     # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
     # (a kill persists nothing and would pass even without the heal - verified), so the
@@ -291,7 +291,7 @@ try {
     if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
     Start-Sleep 1
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
-    $healDone = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip.json") } 12000 300   # startup + apply + stick + delete
+    $healDone = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip.state") } 12000 300   # startup + apply + stick + delete
     Start-Sleep -Milliseconds 400
     $healed = Status
     Check "reopen heal: state cleared, window at pre-pip position" `

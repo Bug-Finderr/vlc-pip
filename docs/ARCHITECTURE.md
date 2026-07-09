@@ -15,11 +15,11 @@ sequenceDiagram
     U->>L: click "PiP Mode" (or Ctrl+Alt+P straight to D)
     L->>R: write "toggle" (pure Lua I/O, no console flash)
     D->>R: consume on next 150 ms tick
-    D->>V: Enter: save rect+styles to vlc-pip.json,<br>strip caption/frame, topmost, park in corner
+    D->>V: Enter: save rect+styles to vlc-pip.state,<br>strip caption/frame, topmost, park in corner
     D->>V: Exit: restore saved styles + exact rect,<br>clear topmost, delete state file
 ```
 
-A **valid** `%TEMP%\vlc-pip.json` is the single source of truth for "in PiP" - menu and hotkey both call the same `toggle`, so they can never desync. The state records the owner PID; a recycled window handle (VLC died, another app got the HWND) reads as stale and is deleted on sight.
+A **valid** `%TEMP%\vlc-pip.state` is the single source of truth for "in PiP" - menu and hotkey both call the same `toggle`, so they can never desync. The state records the owner PID; a recycled window handle (VLC died, another app got the HWND) reads as stale and is deleted on sight.
 
 ## Daemon internals
 

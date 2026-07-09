@@ -5,34 +5,38 @@
 mod geometry {
     use crate::geometry::*;
 
-    // work area 0,0..1920x1040 (taskbar excluded), 480x270, margin 16 - pinned from v1
+    // work area 0,0..1920x1040 (taskbar excluded), 480x270, margin 16
     #[test]
     fn compute_corner_places_window_inside_work_area() {
-        for (corner, ex, ey) in [("br", 1424, 754), ("bl", 16, 754), ("tr", 1424, 16), ("tl", 16, 16)] {
-            assert_eq!(compute_corner(0, 0, 1920, 1040, 480, 270, corner, 16), (ex, ey), "corner {corner}");
+        use Corner::*;
+        for (corner, ex, ey) in [(Br, 1424, 754), (Bl, 16, 754), (Tr, 1424, 16), (Tl, 16, 16)] {
+            assert_eq!(compute_corner(&WORK, 480, 270, corner, 16), (ex, ey), "corner {corner:?}");
         }
     }
 
     #[test]
-    fn compute_corner_unknown_corner_falls_back_to_br() {
-        assert_eq!(compute_corner(0, 0, 1920, 1040, 480, 270, "zz", 16), (1424, 754));
+    fn corner_parse_unknown_falls_back_to_br() {
+        assert_eq!(Corner::parse("zz"), Corner::Br);
+        for c in [Corner::Tl, Corner::Tr, Corner::Bl, Corner::Br] {
+            assert_eq!(Corner::parse(c.as_str()), c);
+        }
     }
 
     #[test]
     fn nearest_corner_quadrants() {
         let work = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
         let win = |l: i32, t: i32| Rect { left: l, top: t, right: l + 480, bottom: t + 270 };
-        assert_eq!(nearest_corner(&win(10, 10), &work), "tl");
-        assert_eq!(nearest_corner(&win(1400, 10), &work), "tr");
-        assert_eq!(nearest_corner(&win(10, 700), &work), "bl");
-        assert_eq!(nearest_corner(&win(1400, 700), &work), "br");
+        assert_eq!(nearest_corner(&win(10, 10), &work), Corner::Tl);
+        assert_eq!(nearest_corner(&win(1400, 10), &work), Corner::Tr);
+        assert_eq!(nearest_corner(&win(10, 700), &work), Corner::Bl);
+        assert_eq!(nearest_corner(&win(1400, 700), &work), Corner::Br);
     }
 
     #[test]
     fn nearest_corner_center_tie_is_br() {
         let work = Rect { left: 0, top: 0, right: 1000, bottom: 1000 };
         let win = Rect { left: 400, top: 400, right: 600, bottom: 600 };
-        assert_eq!(nearest_corner(&win, &work), "br");
+        assert_eq!(nearest_corner(&win, &work), Corner::Br);
     }
 
     #[test]
@@ -126,7 +130,7 @@ mod geometry {
 }
 
 mod native {
-    use crate::geometry;
+    use crate::geometry::{self, Corner};
     use crate::native::{plan_region, RegionPlan};
     use windows_sys::Win32::Foundation::RECT;
 
@@ -142,7 +146,7 @@ mod native {
     #[test]
     fn negative_chrome_is_stale_measurement() {
         // child wider than its own window = mid-relayout garbage
-        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, "br", 16, work);
+        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, Corner::Br, 16, work);
         assert_eq!(plan, RegionPlan::Skip);
     }
 
@@ -150,56 +154,57 @@ mod native {
     fn chrome_clamp_boundary_300_ok_301_stale() {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
         let cr = rect(0, 0, 480, 270);
-        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, "br", 16, work);
+        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, work);
         assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
-        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, "br", 16, work);
+        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, work);
         assert_eq!(stale, RegionPlan::Skip);
     }
 
     #[test]
     fn two_px_tolerance_clips_three_resizes() {
         // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
-        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, "br", 16, work);
+        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, Corner::Br, 16, work);
         assert!(matches!(at_2, RegionPlan::Clip { .. }));
-        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, "br", 16, work);
+        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, Corner::Br, 16, work);
         assert!(matches!(at_3, RegionPlan::Resize { .. }));
     }
 
     #[test]
     fn resize_grows_by_chrome_and_lands_child_at_corner() {
         // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
-        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, "br", 16, work);
+        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, Corner::Br, 16, work);
         // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
         assert_eq!(plan, RegionPlan::Resize { x: 1414, y: 724, w: 500, h: 405 });
     }
 
     #[test]
     fn clip_is_child_rect_relative_to_window() {
-        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, "br", 16, work);
+        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, Corner::Br, 16, work);
         assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
     }
 
     #[test]
     fn hostile_negative_target_skips() {
-        // a hand-crafted state file with TargetW=-500 must not produce a resize
-        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, "br", 16, work);
+        // a hand-crafted state file with a -500 target must not produce a resize
+        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, Corner::Br, 16, work);
         assert_eq!(plan, RegionPlan::Skip);
     }
 }
 
 mod options {
+    use crate::geometry::Corner;
     use crate::options::*;
 
     #[test]
     fn defaults() {
         let o = parse_options([]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, "br", 16, true));
+        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, Corner::Br, 16, true));
     }
 
     #[test]
     fn parses_all_keys() {
         let o = parse_options(["w=640", "h=360", "c=tr", "m=24", "min=0"]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (640, 360, "tr", 24, false));
+        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (640, 360, Corner::Tr, 24, false));
     }
 
     #[test]
@@ -225,8 +230,8 @@ mod options {
 
     #[test]
     fn corner_normalized_to_known_values() {
-        assert_eq!(parse_options(["c=zz"]).corner, "br"); // writer never escapes: normalize here (SPEC R2)
-        assert_eq!(parse_options(["c=bl"]).corner, "bl");
+        assert_eq!(parse_options(["c=zz"]).corner, Corner::Br);
+        assert_eq!(parse_options(["c=bl"]).corner, Corner::Bl);
     }
 
     #[test]
@@ -238,13 +243,13 @@ mod options {
     fn merge_config_beats_defaults_argv_beats_config() {
         let argv = vec!["w=800".to_string()];
         let o = merge("w=640 h=360 c=tr", &argv);
-        assert_eq!((o.w, o.h, o.corner), (800, 360, "tr"));
+        assert_eq!((o.w, o.h, o.corner), (800, 360, Corner::Tr));
     }
 
     #[test]
     fn merge_empty_config_is_v2_behavior() {
         let o = merge("", &[]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, "br", 16, true));
+        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, Corner::Br, 16, true));
     }
 
     #[test]
@@ -284,21 +289,13 @@ mod request {
 }
 
 mod state {
+    use crate::geometry::Corner;
     use crate::state::*;
 
-    // byte-for-byte what C# System.Text.Json source-gen emitted (verified against a live run)
-    const FULL: &str = r#"{"Hwnd":66112,"X":100,"Y":200,"W":1000,"H":640,"Style":349110272,"ExStyle":256,"TargetW":480,"TargetH":270,"Corner":"br","Margin":16,"Min":true,"Pid":12345}"#;
-    // v1.0 pre-audit 7-field format, exactly as pinned in the retired C# StateTests
-    const OLD: &str = r#"{"Hwnd":4660,"X":100,"Y":200,"W":1000,"H":640,"Style":349110272,"ExStyle":256}"#;
+    const FULL: &str = "66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345";
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("pip-state-test-{name}-{}.json", std::process::id()))
-    }
-
-    #[test]
-    fn temp_path_matches_std_join_byte_for_byte() {
-        // as_os_str: PathBuf PartialEq normalizes separators and would mask a doubled one
-        assert_eq!(temp_path("x.json").as_os_str(), std::env::temp_dir().join("x.json").as_os_str());
+        std::env::temp_dir().join(format!("pip-state-test-{name}-{}.txt", std::process::id()))
     }
 
     #[test]
@@ -308,35 +305,21 @@ mod state {
         assert_eq!((s.x, s.y, s.w, s.h), (100, 200, 1000, 640));
         assert_eq!((s.style, s.ex_style), (349110272, 256));
         assert_eq!((s.target_w, s.target_h, s.margin), (480, 270, 16));
-        assert_eq!(s.corner, "br");
+        assert_eq!(s.corner, Corner::Br);
         assert!(s.min);
         assert_eq!(s.pid, 12345);
         assert_eq!(write_state(&s), FULL);
     }
 
     #[test]
-    fn old_format_loads_with_defaults() {
-        // missing fields = v1 constructor defaults; Pid=0 then reads as stale (one re-toggle after upgrade)
-        let s = parse_state(OLD).unwrap();
-        assert_eq!(s.hwnd, 4660);
-        assert_eq!(s.w, 1000);
-        assert_eq!((s.target_w, s.target_h, s.margin), (480, 270, 16));
-        assert_eq!(s.corner, "br");
-        assert!(s.min);
-        assert_eq!(s.pid, 0);
-    }
-
-    #[test]
     fn corrupt_input_reads_as_none() {
-        for bad in ["{", "", "not json", &format!("{FULL}x"), r#"{"Hwnd":1}"#] {
+        let truncated = &FULL[..FULL.len() - 6]; // 12 tokens
+        let extra = format!("{FULL} 7"); // 14 tokens
+        let bad_num = FULL.replace("349110272", "wide");
+        let bad_min = FULL.replace(" 1 12345", " yes 12345");
+        for bad in ["", "not a state", truncated, &extra, &bad_num, &bad_min] {
             assert!(parse_state(bad).is_none(), "should reject: {bad}");
         }
-    }
-
-    #[test]
-    fn unknown_scalar_fields_are_skipped() {
-        let with_extra = FULL.replace(r#""Pid":12345}"#, r#""Pid":12345,"Future":"x"}"#);
-        assert_eq!(parse_state(&with_extra).unwrap().pid, 12345);
     }
 
     #[test]

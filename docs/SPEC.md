@@ -66,7 +66,7 @@ flowchart TD
     D -- "WM_TIMER 150 ms: heartbeat ~3 s,<br>consume request, refresh hook cache,<br>converge minimal-look region" --> D
     D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
     D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
-    WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.json in TEMP"]
+    WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.state in TEMP"]
 ```
 
 Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
@@ -83,7 +83,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ### 5.2 `pip-helper.exe` (Rust binary crate at `helper/`)
 
-Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; JSON is hand-rolled (§8 gotcha R2). Module layout and per-file responsibilities: [ARCHITECTURE.md](ARCHITECTURE.md) §Layout.
+Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; file formats are hand-rolled (§8 gotcha R2). Module layout and per-file responsibilities: [ARCHITECTURE.md](ARCHITECTURE.md) §Layout.
 
 Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed from the remaining args; `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
 - `toggle` | `enter` - one-shot Win32 action, then if it **entered** PiP with `min=1`: 6 × { sleep 150 ms; maintain_region } to converge the minimal look. Exit 0 on success, 1 on failure.
@@ -106,15 +106,15 @@ shell:startup\VLC PiP Daemon.lnk  ->  pip-helper.exe daemon  (login auto-start, 
 
 ## 6. Runtime file contracts (all in `%TEMP%`, truncate-write, UTF-8 no BOM)
 
-### 6.1 `vlc-pip.json` - the PiP state; its VALID existence IS "in PiP"
-Written by Enter only, exactly this shape (key order, compact, no spaces; byte-compatible with v1's System.Text.Json output - old files may exist during upgrade):
+### 6.1 `vlc-pip.state` - the PiP state; its VALID existence IS "in PiP"
+Written by Enter only: one whitespace-separated line of exactly 13 tokens (v2.1.2 replaced v1's byte-compatible JSON - the retired C# was the format's only other consumer):
 ```
-{"Hwnd":66112,"X":100,"Y":200,"W":1000,"H":640,"Style":349110272,"ExStyle":256,"TargetW":480,"TargetH":270,"Corner":"br","Margin":16,"Min":true,"Pid":12345}
+hwnd x y w h style ex_style target_w target_h corner margin min pid
+66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
-Types: `Hwnd`/`Style`/`ExStyle` i64; `X Y W H TargetW TargetH Margin` i32; `Corner` one of `br bl tr tl`; `Min` bool; `Pid` u32. `X..ExStyle` are the pre-PiP restore data; `TargetW..Min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `Pid` is the owner process.
-- **Old 7-field files** (v1.0 pre-audit: `Hwnd..ExStyle` only) must load with defaults `TargetW=480, TargetH=270, Corner="br", Margin=16, Min=true, Pid=0`.
-- Unknown keys with scalar values are skipped; **any** parse failure (torn write, corrupt, trailing garbage, JSON escapes, nested values) loads as `None` = "not in PiP" - the parser is deliberately strict, and the benign failure mode is the point.
-- **Stale detection (`owns_state`)**: state is live iff `IsWindow(Hwnd)` AND `GetWindowThreadProcessId(Hwnd) == Pid != 0`. Windows recycles HWNDs - IsWindow alone would pass on a foreign window. `Pid=0` (old files) is always stale by design (one re-toggle after upgrade). Stale state is deleted on sight by InPip/Exit/maintain_region (delete failures swallowed: next caller retries).
+Types: `hwnd`/`style`/`ex_style` i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
+- **Any** parse failure (wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. `pid` is the LAST token so a write truncated mid-token fails the owner check instead of poisoning the restore rect.
+- **Stale detection (`owns_state`)**: state is live iff `IsWindow(hwnd)` AND `GetWindowThreadProcessId(hwnd) == pid != 0`. Windows recycles HWNDs - IsWindow alone would pass on a foreign window. Stale state is deleted on sight by InPip/Exit/maintain_region (delete failures swallowed: next caller retries).
 
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
 Bare word, trimmed on read: `toggle` | `enter` | `exit` | `stop` (case-sensitive). Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored. On daemon start, a pre-existing request is discarded **only if it is `stop`** (a `pip-helper stop` with no daemon alive leaves one that would kill the fresh daemon on its first tick; a queued user toggle survives).
@@ -211,7 +211,7 @@ From v1 development:
 
 New, Rust-specific (verified 2026-07-02):
 - **R1. `lto` must be set explicitly.** With `codegen-units = 1` and the default `lto = false`, Cargo performs NO LTO at all (Cargo book). The size profile needs `lto = true`.
-- **R2. JSON is hand-rolled** (`state.rs`): measured 125,440 B vs 169,472 B (serde_json) / 174,080 B (nanoserde) for the full spike - the crates add ~26-28% to the exe for one flat frozen schema. The writer does NOT escape strings → **`c=` option values must be normalized to `br|bl|tr|tl` at parse time** (unknown → `br`; same effective geometry as v1, which stored the raw string but treated unknown as `br`).
+- **R2. No serde**: measured 125,440 B vs 169,472 B (serde_json) / 174,080 B (nanoserde) for the original spike - the crates add ~26-28% to the exe for two flat frozen formats. The state file is a whitespace line (§6.1); status JSON is one `format!` string (§6.4). Corners parse through the `Corner` enum (unknown → `Br`), so no other value can reach a file.
 - **R3. `CreateMutexW` is feature-gated on `Win32_Security`** (its `SECURITY_ATTRIBUTES` param), on top of `Win32_System_Threading`. Without both, the fn doesn't exist.
 - **R4. windows-sys 0.61 handles (`HWND`, `HHOOK`, ...) are `*mut c_void`** - not `Send`/`Sync`, can't live in statics. Store `isize` (atomics for hook-shared state) and cast at call sites. `hwnd as isize as i64` round-trips through the state file exactly on x64.
 - **R5. Module surprises**: `SetWindowRgn`/`GetWindowRgn`/`MonitorFromWindow`/`GetMonitorInfoW` are in `Win32::Graphics::Gdi`; `GetDoubleClickTime` is in `Win32::UI::Input::KeyboardAndMouse`; `GetWindowLongPtrW`/`SetWindowLongPtrW` exist only on 64-bit targets (fine here).
@@ -227,8 +227,8 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 - **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- **Install:** `scripts/install.ps1` - builds, stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
-- **Test:** `cargo test` in `helper/` (pure logic: state JSON, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
+- **Install:** `scripts/install.ps1` - builds, restores an in-PiP window with the old exe (upgrades must not strand a stripped window), stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
+- **Test:** `cargo test` in `helper/` (pure logic: state file, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
 ---
@@ -283,7 +283,7 @@ Written on every drag release (from the pump, never the hook; the `pip` folder i
 
 ### Close-in-PiP heal
 VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit), so its next launch would open full-size at the PiP origin, overflowing the screen. The daemon keeps the stale state file as a pending-restore record: when a new VLC player window appears, it applies the saved pre-PiP rect and deletes the state only after observing the rect stick (VLC's own startup positioning cannot win the race).
-Hardening: `in_pip` is read-only (a status query can't destroy the record; an explicit enter consumes it by overwriting, the one-shot `exit` drops it); the heal skips iconic windows, fires only when the recorded VLC process is truly gone (legacy `Pid=0` records are dropped), refuses rects on monitors that no longer exist, and gives up after ~6s of non-convergence (e.g. elevated VLC, UIPI). Because pending records can now outlive VLC indefinitely, the hook's HWND cache uses the full owner-PID guard - a recycled handle can never re-arm the guards or drags on a foreign window.
+Hardening: `in_pip` is read-only (a status query can't destroy the record; an explicit enter consumes it by overwriting, the one-shot `exit` drops it); the heal skips iconic windows, fires only when the recorded VLC process is truly gone (`pid=0` records are dropped), refuses rects on monitors that no longer exist, and gives up after ~6s of non-convergence (e.g. elevated VLC, UIPI). Because pending records can now outlive VLC indefinitely, the hook's HWND cache uses the full owner-PID guard - a recycled handle can never re-arm the guards or drags on a foreign window.
 
 ### Accepted edges
 No sizing cursors over the band (cursor feedback needs input injection; Firefox's PiP is equally unmarked). Sizes are raw pixels across mixed-DPI monitors. While a pending heal waits for a VLC relaunch, the tick polls `find_player` (one process snapshot per 150ms). With two VLC instances, the surviving instance may receive the dead one's pre-PiP rect once.

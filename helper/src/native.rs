@@ -301,7 +301,7 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
         return; // VLC died mid-drag: next tick's maintain_region cleans up
     }
     let work = work_area(s.hwnd as isize);
-    s.corner = geometry::nearest_corner(fin, &work).to_string();
+    s.corner = geometry::nearest_corner(fin, &work);
     if resized {
         let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
         if tw > 0 && th > 0 {
@@ -311,7 +311,7 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
     }
     // failures swallowed (SPEC 12): the gesture already holds on screen
     let _ = state::save(&s, &path);
-    crate::options::save_config(s.target_w, s.target_h, &s.corner);
+    crate::options::save_config(s.target_w, s.target_h, s.corner);
 }
 
 // Client-relative chrome around the video child (menu above, controller below). These are
@@ -371,7 +371,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         ex_style: ex as i64,
         target_w: o.w,
         target_h: o.h,
-        corner: o.corner.to_string(),
+        corner: o.corner,
         margin: o.margin,
         min: o.min,
         pid,
@@ -394,7 +394,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         // snap the PiP back to Qt's normal placement rect
         SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
         let wa = work_area(h);
-        let (vx, vy) = geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, o.w, o.h, o.corner, o.margin);
+        let (vx, vy) = geometry::compute_corner(&wa, o.w, o.h, o.corner, o.margin);
         let (x, y, tw, th) = match chrome {
             Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
             None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
@@ -646,7 +646,7 @@ pub fn maintain_region(t: &mut RegionTracker) {
             return; // wait until VLC's re-layout settles
         }
 
-        match plan_region(&wr, &cr, s.target_w, s.target_h, &s.corner, s.margin, || work_area(h)) {
+        match plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
             RegionPlan::Skip => {}
             RegionPlan::Resize { x, y, w, h: th } => {
                 SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED);
@@ -674,7 +674,7 @@ static HEAL_TRIES: AtomicU32 = AtomicU32::new(0);
 /// observed to stick - VLC's own startup positioning must not win the race.
 fn heal_reopened(s: &PipState, path: &Path) {
     if s.w <= 0 || s.h <= 0 || s.pid == 0 {
-        state::try_delete(path); // legacy (Pid=0) or garbage record: nothing safely healable
+        state::try_delete(path); // garbage record (pid is 0 if VLC died mid-enter): not healable
         return;
     }
     if fs_origin(s.style) {
@@ -734,7 +734,7 @@ pub(crate) enum RegionPlan {
 // at the corner) or clip to the child area. `work` is lazy - it costs two user32 calls
 // and only the resize branch needs it.
 pub(crate) fn plan_region(
-    wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: &str, margin: i32,
+    wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: geometry::Corner, margin: i32,
     work: impl FnOnce() -> geometry::Rect,
 ) -> RegionPlan {
     let rel_l = cr.left - wr.left;
@@ -750,8 +750,7 @@ pub(crate) fn plan_region(
     }
     if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
         let wa = work();
-        let (vx, vy) =
-            geometry::compute_corner(wa.left, wa.top, wa.right, wa.bottom, target_w, target_h, corner, margin);
+        let (vx, vy) = geometry::compute_corner(&wa, target_w, target_h, corner, margin);
         let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
         if tw <= 0 || th <= 0 {
             return RegionPlan::Skip; // hostile/garbage state values: do nothing

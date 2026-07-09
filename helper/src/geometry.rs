@@ -7,6 +7,36 @@ pub struct Rect {
     pub bottom: i32,
 }
 
+/// The four PiP corners; anything unknown pins to Br (v1 semantics, same fallback everywhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Corner {
+    Tl,
+    Tr,
+    Bl,
+    #[default]
+    Br,
+}
+
+impl Corner {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "tl" => Self::Tl,
+            "tr" => Self::Tr,
+            "bl" => Self::Bl,
+            _ => Self::Br,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tl => "tl",
+            Self::Tr => "tr",
+            Self::Bl => "bl",
+            Self::Br => "br",
+        }
+    }
+}
+
 /// Where within the visible PiP a drag started; stored in an AtomicU8 by the hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -39,17 +69,17 @@ impl DragZone {
     }
 }
 
-/// Work-area quadrant of the window center. Ties resolve toward "br" (codebase fallback).
-pub fn nearest_corner(win: &Rect, work: &Rect) -> &'static str {
+/// Work-area quadrant of the window center. Ties resolve toward Br.
+pub fn nearest_corner(win: &Rect, work: &Rect) -> Corner {
     let cx = win.left + (win.right - win.left) / 2;
     let cy = win.top + (win.bottom - win.top) / 2;
     let left_half = cx < work.left + (work.right - work.left) / 2;
     let top_half = cy < work.top + (work.bottom - work.top) / 2;
     match (left_half, top_half) {
-        (true, true) => "tl",
-        (false, true) => "tr",
-        (true, false) => "bl",
-        (false, false) => "br",
+        (true, true) => Corner::Tl,
+        (false, true) => Corner::Tr,
+        (true, false) => Corner::Bl,
+        (false, false) => Corner::Br,
     }
 }
 
@@ -118,19 +148,15 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
     Rect { left, top, right, bottom }
 }
 
-#[allow(clippy::too_many_arguments)] // 4 rect edges + size + corner + margin; keeps this module windows-sys-free
-pub fn compute_corner(
-    work_left: i32, work_top: i32, work_right: i32, work_bottom: i32,
-    w: i32, h: i32, corner: &str, margin: i32,
-) -> (i32, i32) {
-    let left = work_left + margin;
-    let top = work_top + margin;
-    let right = work_right - w - margin;
-    let bottom = work_bottom - h - margin;
+pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) -> (i32, i32) {
+    let left = work.left + margin;
+    let top = work.top + margin;
+    let right = work.right - w - margin;
+    let bottom = work.bottom - h - margin;
     match corner {
-        "tl" => (left, top),
-        "tr" => (right, top),
-        "bl" => (left, bottom),
-        _ => (right, bottom), // "br" and fallback
+        Corner::Tl => (left, top),
+        Corner::Tr => (right, top),
+        Corner::Bl => (left, bottom),
+        Corner::Br => (right, bottom),
     }
 }
