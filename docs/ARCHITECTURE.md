@@ -37,7 +37,7 @@ flowchart LR
     K & M -.->|read pump-thread cache,<br>never the disk| CACHE["cached HWND"]
 ```
 
-Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
+Key mechanisms, each earned by a real bug (details in [SPEC.md](SPEC.md) §7-8):
 
 - **Fullscreen prevention is preventive, not reactive.** A poll-and-snap-back guard flickers; instead the mouse hook swallows every button-down within double-click time/rect of the last *allowed* down, so the OS can never synthesize `WM_LBUTTONDBLCLK` (swallowing only the 2nd click let clicks 1+3 pair - triple-click fullscreened).
 - **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread.
@@ -67,4 +67,4 @@ cargo test --manifest-path helper\Cargo.toml          # pure-logic unit tests
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # end-to-end against live VLC
 ```
 
-The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the v1-earned gotchas that must not regress.
+The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the gotchas that must not regress.

@@ -1,10 +1,10 @@
 # VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior; v2 is the Rust rewrite - a fraction of v1's size - with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract plus the Rust implementation constraints.
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
-**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` end-to-end checks plus the unit suite gate every change; observable behavior below is the contract. File formats are internal to this repo since v2.1.2 (§6.1 - the v1 byte-compat era ended when the C# consumer retired) but are still pinned here because the scripts and pip.lua consume them.
+**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` end-to-end checks plus the unit suite gate every change; observable behavior below is the contract. File formats are internal to this repo but are still pinned here because the scripts and pip.lua consume them.
 
 ---
 
@@ -75,7 +75,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 ## 5. Components
 
-### 5.1 `pip.lua` (the VLC extension - behavior unchanged from v1)
+### 5.1 `pip.lua` (the VLC extension)
 - `descriptor()` returns `capabilities = { "trigger" }`, title "PiP Mode".
 - `trigger()` → ensure daemon alive (heartbeat check, §6.3), write `"toggle"` to the request file; errors go to `vlc.msg.err`.
 - Fallback only: if the daemon is dead, `os.execute('start "" "<exe>" daemon')` (the sole case that may flash; normally never fires because of login auto-start).
@@ -93,7 +93,7 @@ Modes (argv[1], ASCII-lowercased). Options parsed from the remaining args (used 
 - Every mode first calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`.
 - A panic anywhere → hook writes `%TEMP%\vlc-pip-crash.txt` (message + file:line) and the process exits 3.
 
-### 5.3 Install layout (unchanged from v1)
+### 5.3 Install layout
 ```
 %APPDATA%\vlc\lua\extensions\pip.lua                         (extension)
 %APPDATA%\vlc\pip\pip-helper.exe                             (helper, OUT of extensions)
@@ -105,7 +105,7 @@ shell:startup\VLC PiP Daemon.lnk  ->  pip-helper.exe daemon  (login auto-start, 
 ## 6. Runtime file contracts (all in `%TEMP%`, truncate-write, UTF-8 no BOM)
 
 ### 6.1 `vlc-pip.state` - the PiP state; its VALID existence IS "in PiP"
-Written by Enter only: one newline-terminated line of exactly 13 whitespace-separated tokens (v2.1.2 replaced v1's byte-compatible JSON - the retired C# was the format's only other consumer). The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
+Written by Enter only: one newline-terminated line of exactly 13 whitespace-separated tokens. The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
 ```
 66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
@@ -165,7 +165,7 @@ Entering PiP from a fullscreen VLC is the same immediate reshape as any other en
 Cross-tick state: the previous (window, child) rects held as an Option (None = reset; reset on missing/stale state, no child, and after our own resize), plus the fullscreen-origin dissolve baseline and the heal retry counter.
 1. Load state; missing → reset, return. Stale → reset, hand to the reopen heal (§12), return. `min=0` → return.
 2. Find the video child: first visible child (recursive) whose class starts with `"VLC video main"`. None (playback stopped) → reset, clear region if present, return.
-3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash in v1). Always record current rects.
+3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash). Always record current rects.
 4. **Chrome sanity clamp**: chrome = window minus child size; if any dimension is negative or > 300 px → stale rects, return.
 5. Child not at target size (tolerance ±2 px): recompute corner for the video, resize window to `target + chrome` positioned so the CHILD lands at the corner (`SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED)` - no SWP_SHOWWINDOW here), drop the stored rects (our own resize), return. Skip if the rect is already correct (targets are pinned to 1..=16384 at both parse boundaries and chrome to 0..=300, so target+chrome can neither underflow nor overflow).
 6. Child at target: verify the region **box** against the child-relative rect (a live-clipped resize drag leaves an approximate region) and set it on mismatch: `CreateRectRgn` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
@@ -175,7 +175,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 - **Clicks** (`WH_MOUSE_LL`) - the rate-limit, exact bookkeeping (last ALLOWED down time+point, swallow_next_up flag):
   - On `WM_LBUTTONDOWN` over the PiP (root ancestor of `WindowFromPoint` == cached hwnd): `burst = (evt.time - last_allowed_time <= GetDoubleClickTime()) && |dx| <= SM_CXDOUBLECLK && |dy| <= SM_CYDOUBLECLK`. Burst → set swallow_next_up, swallow. Else record this down as the new ALLOWED reference and pass.
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
-  - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (v1 bug: swallowing only the 2nd click let the OS pair clicks 1+3 - TRIPLE click fullscreened.)
+  - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (Swallowing only the 2nd click lets the OS pair clicks 1+3 - TRIPLE click fullscreened.)
   - `GetDoubleClickTime`/`GetSystemMetrics` queried live per event; timestamps are u32 ms with wrapping subtraction.
 - Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing the owner-PID guard, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
 - **Hooks exist only while a session is live**: after every cache refresh the pump syncs both LL hooks per slot - null slots install (a failed install retries next refresh), non-null slots unhook on session end (idle daemon = zero presence in the system input path). Removal resets the drag cell and clears the click cell's swallow flag - a gesture must not outlive its hooks - but the click cell's last-allowed-down reference SURVIVES teardown: a toggle-retoggle inside double-click time must not let the OS pair a pre-teardown click with a fresh one. Sessions started by the hotkey or a request are armed within the same pump iteration.
@@ -191,7 +191,6 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 
 ## 8. Gotchas that caused real bugs (do not repeat)
 
-From v1 development:
 1. **Menu/hotkey desync.** VLC's `activate()/deactivate()` checkmark state + separate hotkey state = "many bad states". FIX: `trigger` capability + single state file; both paths call Toggle.
 2. **Top-level `os.getenv` in the extension** made it vanish from the menu (probe error). FIX: lazy env lookups.
 3. **Exe in the extensions folder** broke the extension scan. FIX: helper lives in `%APPDATA%\vlc\pip\`.
@@ -208,17 +207,17 @@ New, Rust-specific (verified 2026-07-02):
 - **R3. `CreateMutexW` is feature-gated on `Win32_Security`** (its `SECURITY_ATTRIBUTES` param), on top of `Win32_System_Threading`. Without both, the fn doesn't exist.
 - **R4. windows-sys 0.61 handles (`HWND`, `HHOOK`, ...) are `*mut c_void`** - not `Send`/`Sync`, can't live in statics. Store `isize` everywhere (state file included) and cast to the raw pointer only at the FFI call boundary (`hw()`).
 - **R5. Module surprises**: `SetWindowRgn`/`GetWindowRgn`/`MonitorFromWindow`/`GetMonitorInfoW` are in `Win32::Graphics::Gdi`; `GetDoubleClickTime` is in `Win32::UI::Input::KeyboardAndMouse`; `GetWindowLongPtrW`/`SetWindowLongPtrW` exist only on 64-bit targets (fine here).
-- **R6. Panic hook runs under `panic = "abort"`** and `Location` (file:line) survives `strip = true` (std docs + verified locally). Write the crash file with `let _ = fs::write(...)` (the hook must never panic) and `process::exit(3)` to match v1's crash exit code.
+- **R6. Panic hook runs under `panic = "abort"`** and `Location` (file:line) survives `strip = true` (std docs + verified locally). Write the crash file with `let _ = fs::write(...)` (the hook must never panic) and `process::exit(3)`.
 - **R7. Hook callbacks are plain `unsafe extern "system" fn`s** and dispatch on the thread that installed them - everything runs on the pump thread, so hook/gesture state lives in thread-local `Cell`s read and written as whole structs (no synchronization, no torn mixes of stale and fresh fields).
 - **R8. `cargo test` is unaffected** by `panic = "abort"` (tests ignore the panic setting) and by `#![windows_subsystem = "windows"]` (output flows through inherited handles).
 
-PowerShell (from v1 dev): `if` is not an expression; single-letter functions collide with aliases; `Remove-Item` on non-literal paths can be blocked - prefer literal paths.
+PowerShell: `if` is not an expression; single-letter functions collide with aliases; `Remove-Item` on non-literal paths can be blocked - prefer literal paths.
 
 ---
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
+- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed). Artifact: `helper/target/release/pip-helper.exe`.
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - **Install:** `scripts/install.ps1` - installs the prebuilt exe from the zip root when no `helper/` source tree is present (a clone always builds - a stray root exe must never shadow the source), else builds; stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes stale request and heartbeat files, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
 - **Test:** `cargo test` in `helper/` (pure logic: state file, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
