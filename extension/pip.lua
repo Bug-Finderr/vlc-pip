@@ -4,7 +4,7 @@
 function descriptor()
     return {
         title = "PiP Mode",
-        version = "2.1.1",
+        version = "2.1.2",
         author = "Sudharsan",
         shortdesc = "PiP Mode",
         description = "Toggle VLC into a borderless always-on-top corner window",
@@ -30,8 +30,7 @@ local function daemon_alive()
     f:close()
     -- The file is a heartbeat (leading epoch-seconds, rewritten every ~3s): a force-killed
     -- daemon leaves it behind, so existence alone is not liveness. ts == nil means we read
-    -- mid-write (WriteAllText truncates first): the daemon IS alive, so never respawn
-    -- (console flash). Stale old-format PID files parse far from os.time() and read as dead.
+    -- mid-write (truncate-then-write): the daemon IS alive, so never respawn (console flash).
     return ts == nil or math.abs(os.time() - ts) < 15
 end
 

@@ -1,6 +1,5 @@
 //! Every unit test, one flat cfg(test) file. Tests are siblings of the modules (not
-//! children), so tested-but-internal items cost exactly four pub(crate)s: plan_region,
-//! RegionPlan, parse_state, write_state.
+//! children), so tested-but-internal items are pub(crate).
 
 mod geometry {
     use crate::geometry::*;

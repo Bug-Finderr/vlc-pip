@@ -30,8 +30,8 @@ fn main() {
 
 fn run() -> i32 {
     native::enable_dpi_awareness();
-    // args_os + lossy: std::env::args() would panic (= crash file) on non-Unicode argv,
-    // and links extra machinery for it; every legitimate token here is ASCII anyway
+    // args_os + lossy: std::env::args() panics on non-Unicode argv; every legitimate
+    // token here is ASCII anyway
     let args: Vec<String> =
         std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
     let mode = args.first().map_or_else(|| "toggle".to_string(), |s| s.to_ascii_lowercase());

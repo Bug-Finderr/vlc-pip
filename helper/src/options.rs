@@ -22,8 +22,7 @@ pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions 
         let Some(i) = a.find('=') else { continue };
         let (k, v) = (&a[..i], &a[i + 1..]);
         match k {
-            // w/h pinned positive like normalize_corner pins corners: 0/negative would park
-            // an invisible topmost window whose region plan is then unverifiable forever
+            // w/h pinned positive: 0/negative would park an invisible topmost window
             "w" => {
                 if let Ok(n) = v.trim().parse() && n > 0 {
                     o.w = n;

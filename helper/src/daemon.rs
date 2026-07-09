@@ -264,11 +264,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 if k.vkCode == VK_F as u32 {
                     return 1; // swallow F -> no fullscreen while in PiP
                 }
-                // a fullscreen-origin PiP rides on VLC's live internal fullscreen
-                // state: Esc would make Qt leave it UNDERNEATH the reshape, desyncing
-                // Qt's window cache (SPEC section 7). BARE Esc only - Alt+Esc and
-                // Ctrl+Esc are OS shortcuts, and VLC binds leave-fullscreen to plain
-                // Esc alone
+                // a fullscreen-origin PiP rides on VLC's live internal fullscreen state:
+                // Esc would make Qt leave it underneath the reshape (SPEC 7). BARE Esc
+                // only - Alt+Esc/Ctrl+Esc are OS shortcuts VLC doesn't bind
                 if k.vkCode == VK_ESCAPE as u32
                     && pip.fs
                     && [VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
@@ -285,8 +283,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
 
 // Rate-limit clicks over the PiP window: swallow every button-down within double-click
 // time+rect of the last ALLOWED button-down, so no two clicks the OS actually receives
-// can ever pair into a synthesized WM_LBUTTONDBLCLK. (v1 bug: swallowing only the 2nd
-// click let a TRIPLE click through - the OS paired clicks 1+3 and VLC fullscreened.)
+// can ever pair into a synthesized WM_LBUTTONDBLCLK (swallowing only the 2nd click lets
+// a triple click through - the OS pairs clicks 1+3 and VLC fullscreens).
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if code >= 0 {
