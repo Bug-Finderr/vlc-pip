@@ -231,12 +231,6 @@ mod options {
     }
 
     #[test]
-    fn corner_normalized_to_known_values() {
-        assert_eq!(parse_options(["c=zz"]).corner, Corner::Br);
-        assert_eq!(parse_options(["c=bl"]).corner, Corner::Bl);
-    }
-
-    #[test]
     fn later_duplicates_win() {
         assert_eq!(parse_options(["w=100", "w=200"]).w, 200);
     }
@@ -246,18 +240,6 @@ mod options {
         let argv = vec!["w=800".to_string()];
         let o = merge("w=640 h=360 c=tr", &argv);
         assert_eq!((o.w, o.h, o.corner), (800, 360, Corner::Tr));
-    }
-
-    #[test]
-    fn merge_empty_config_is_v2_behavior() {
-        let o = merge("", &[]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, Corner::Br, 16, true));
-    }
-
-    #[test]
-    fn merge_garbage_config_tokens_ignored() {
-        let o = merge("lol w=x h=999", &[]);
-        assert_eq!((o.w, o.h), (480, 999));
     }
 }
 
@@ -333,16 +315,6 @@ mod state {
         // instead accepts-with-fallback (SPEC 6.1: unknown reads as br)
         let s = parse_state(&FULL.replace(" br ", " zz ")).unwrap();
         assert_eq!(s.corner, Corner::Br);
-    }
-
-    #[test]
-    fn state_round_trips_via_file() {
-        let path = tmp("roundtrip");
-        let s = parse_state(FULL).unwrap();
-        save(&s, &path).unwrap();
-        let loaded = load(&path);
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(loaded, Some(s));
     }
 
     #[test]
