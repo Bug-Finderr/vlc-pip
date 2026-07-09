@@ -22,7 +22,7 @@ use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
 // LL hook callbacks dispatch on the pump thread (SPEC R7): plain Cells hold all hook
-// state, read and written as WHOLE structs, and hooks never touch the disk (SPEC 6.3).
+// state, read and written as WHOLE structs, and hooks never touch the disk (SPEC 3).
 // The one atomic serves the panic hook, which can fire on any thread (SPEC 6.3).
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 

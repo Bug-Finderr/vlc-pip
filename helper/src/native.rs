@@ -184,7 +184,9 @@ pub fn veil_fs_controller(pid: u32) {
 }
 
 /// Give the strip back when a session ends (exit, dissolve, rollback, record cleanup):
-/// drop the veil. Inert when nothing was veiled, so callers need no fs_origin gate.
+/// drop the veil. Inert when nothing was veiled - but only for a LIVE-verified pid:
+/// a stale record's pid may be recycled to a foreign Qt5 app whose tool windows the
+/// class match would hit, so stale paths stay gated on fs_origin.
 pub fn unveil_fs_controller(pid: u32) {
     for_each_fs_controller(pid, |w| unsafe {
         SetWindowRgn(w, std::ptr::null_mut(), 1);
@@ -373,9 +375,11 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // overwriting a stale record consumes it, like exit and heal do - it may have left a
-    // veiled strip on a still-running VLC (recycled hwnd): unveil it
-    if let Some(old) = state::load(&state::state_path()) {
+    // overwriting a stale record consumes it, like exit and heal do - a fullscreen-origin
+    // one may have left a veiled strip on a still-running VLC (recycled hwnd): unveil it
+    if let Some(old) = state::load(&state::state_path())
+        && fs_origin(old.style)
+    {
         unveil_fs_controller(old.pid);
     }
     // restore FIRST: the off-screen iconic rect must never become the restore state
@@ -451,7 +455,9 @@ pub fn exit_pip() -> bool {
     let path = state::state_path();
     let Some(s) = state::load(&path) else { return false };
     if !owns_state(&s) {
-        unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
+        if fs_origin(s.style) {
+            unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
+        }
         state::try_delete(&path); // stale: VLC gone or hwnd recycled
         return false;
     }
