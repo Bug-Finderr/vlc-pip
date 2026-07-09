@@ -170,7 +170,8 @@ fn for_each_fs_controller(pid: u32, f: impl Fn(HWND)) {
         return;
     }
     enum_windows(|w| {
-        if class_starts_with(w, "Qt5QWindowToolSaveBits") && window_owner(w as isize) == pid {
+        // pid first: it is one cheap call, while the class read allocates per window
+        if window_owner(w as isize) == pid && class_starts_with(w, "Qt5QWindowToolSaveBits") {
             f(w);
         }
         true
@@ -499,12 +500,14 @@ pub fn status() -> String {
 // stability debounce; `fs_prev` is the fullscreen-origin dissolve watch's baseline (the
 // window rect last seen WITH a live video child); `heal_tries` bounds the reopen heal
 // so an unhealable window (e.g. elevated VLC: UIPI silently swallows the SetWindowPos)
-// is never fought forever - ~6s of ticks, then the record is dropped.
+// is never fought forever - ~6s of ticks, then the record is dropped; `heal_wait`
+// throttles the process snapshots while the heal waits for a relaunch.
 #[derive(Default)]
 pub struct RegionTracker {
     prev: Option<(geometry::Rect, geometry::Rect)>,
     fs_prev: Option<geometry::Rect>,
     heal_tries: u32,
+    heal_wait: u32,
 }
 
 impl RegionTracker {
@@ -543,10 +546,11 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
     };
     if !owns_state(&s) {
         t.prev = None;
-        heal_reopened(&mut t.heal_tries, &s, &path);
+        heal_reopened(t, &s, &path);
         return;
     }
     t.heal_tries = 0; // a live owned PiP ends any interrupted heal cleanly
+    t.heal_wait = 0;
     let h = s.hwnd as isize;
     let child = find_video_child(h);
     let wr = window_rect(h).unwrap_or_default(); // one snapshot serves watch and debounce
@@ -604,9 +608,8 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
 /// so its next launch opens full-size at the PiP origin, overflowing the screen. The
 /// stale state file is kept as a pending-restore record; when a new player window
 /// appears, apply the saved pre-PiP rect and delete the record only once the rect is
-/// observed to stick - VLC's own startup positioning must not win the race. `tries` is
-/// the tracker's bounded retry counter.
-fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
+/// observed to stick - VLC's own startup positioning must not win the race.
+fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
     if s.w <= 0 || s.h <= 0 || s.pid == 0 {
         state::try_delete(path); // garbage record (pid is 0 if VLC died mid-enter): not healable
         return;
@@ -619,14 +622,20 @@ fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
         state::try_delete(path);
         return;
     }
+    // VLC may stay closed for days: snapshot ~once a second while waiting, not per tick
+    t.heal_wait += 1;
+    if t.heal_wait % 7 != 1 {
+        return;
+    }
     let pids = vlc_pids();
     if pids.contains(&s.pid) {
         state::try_delete(path); // the recorded VLC still runs (hwnd recycled): not a close-in-PiP
         return;
     }
     if pids.is_empty() {
-        return; // VLC not back yet: keep waiting (one process snapshot per tick)
+        return; // VLC not back yet: keep waiting
     }
+    t.heal_wait = 0; // VLC is back: converge at full cadence (the 40-try cap still bounds it)
     let h2 = find_player();
     if h2 == 0 {
         return;
@@ -642,13 +651,13 @@ fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
             return;
         }
         if window_rect(h2) == Some(target) {
-            *tries = 0;
+            t.heal_tries = 0;
             state::try_delete(path); // heal landed and stuck: done
             return;
         }
-        *tries += 1;
-        if *tries > 40 {
-            *tries = 0;
+        t.heal_tries += 1;
+        if t.heal_tries > 40 {
+            t.heal_tries = 0;
             state::try_delete(path); // not converging: stop fighting the window
             return;
         }
