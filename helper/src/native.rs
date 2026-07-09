@@ -190,8 +190,8 @@ pub fn veil_fs_controller(pid: u32) {
     });
 }
 
-/// Give the strip back when a fullscreen-origin session ends (exit, dissolve, record
-/// cleanup): drop the veil; the strip stays hidden until VLC's own next hover cycle.
+/// Give the strip back when a session ends (exit, dissolve, rollback, record cleanup):
+/// drop the veil. Inert when nothing was veiled, so callers need no fs_origin gate.
 pub fn unveil_fs_controller(pid: u32) {
     for_each_fs_controller(pid, |w| unsafe {
         SetWindowRgn(w, std::ptr::null_mut(), 1);
@@ -380,11 +380,9 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // overwriting a stale record consumes it, like exit and heal do - a fullscreen-origin
-    // one may have left a veiled strip on a still-running VLC (recycled hwnd): unveil it
-    if let Some(old) = state::load(&state::state_path())
-        && fs_origin(old.style)
-    {
+    // overwriting a stale record consumes it, like exit and heal do - it may have left a
+    // veiled strip on a still-running VLC (recycled hwnd): unveil it
+    if let Some(old) = state::load(&state::state_path()) {
         unveil_fs_controller(old.pid);
     }
     // restore FIRST: the off-screen iconic rect must never become the restore state
@@ -438,9 +436,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     } else {
         // e.g. UIPI vs elevated VLC: don't claim in-PiP
         unsafe { SetWindowLongPtrW(hw(h), GWL_STYLE, style) };
-        if fs_origin(style) {
-            unveil_fs_controller(pid); // the rollback ends the session: no veil may outlive it
-        }
+        unveil_fs_controller(pid); // the rollback ends the session: no veil may outlive it
         state::try_delete(&state::state_path());
     }
     ok
@@ -462,9 +458,7 @@ pub fn exit_pip() -> bool {
     let path = state::state_path();
     let Some(s) = state::load(&path) else { return false };
     if !owns_state(&s) {
-        if fs_origin(s.style) {
-            unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
-        }
+        unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
         state::try_delete(&path); // stale: VLC gone or hwnd recycled
         return false;
     }
@@ -472,9 +466,7 @@ pub fn exit_pip() -> bool {
     let after = restore_frame(h, s.style, s.ex_style);
     let ok = unsafe { SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0 };
     if ok || unsafe { IsWindow(hw(h)) } == 0 {
-        if fs_origin(s.style) {
-            unveil_fs_controller(s.pid); // session over: the restored fullscreen gets its strip back
-        }
+        unveil_fs_controller(s.pid); // session over: a restored fullscreen gets its strip back
         state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
     }
     ok
