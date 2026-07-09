@@ -383,6 +383,12 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     // chrome-compensated rect with the region applied immediately - no visible
     // grow-then-clip pass from the converger (it only verifies afterwards)
     let chrome = if o.min { client_chrome(h) } else { None };
+    if fs_origin(style as i64) {
+        // the strip is likely on screen RIGHT NOW (the user was just hovering the
+        // fullscreen video): gone before the PiP lands, not a tick later. One hide
+        // sticks; the daemon tick only re-hides after VLC's own show/hide resync.
+        hide_fs_controller(pid);
+    }
     unsafe {
         // also strip WS_MAXIMIZE: a zoomed window keeps IsZoomed, so Win+Down/Aero would
         // snap the PiP back to Qt's normal placement rect

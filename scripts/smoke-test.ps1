@@ -179,11 +179,21 @@ try {
     # caption-only: Qt autoresize can make the windowed size already match the monitor
     Check "fullscreen: engaged" (-not $fs.caption)
 
+    # summon the controller strip first (hover the fullscreen video) - the realistic
+    # toggle happens with the strip on screen, and enter() must hide it pre-reshape
+    $sw2 = [Smoke.Keys]::GetSystemMetrics(0); $sh2 = [Smoke.Keys]::GetSystemMetrics(1)
+    for ($i = 0; $i -lt 6; $i++) {
+        $px = [int]($sw2 / 2) - 30 + $i * 12; $py = [int]($sh2 / 2) + ($i % 3) * 10
+        [Smoke.Keys]::mouse_event(0x8001, [uint32]($px * 65535 / ($sw2 - 1)), [uint32]($py * 65535 / ($sh2 - 1)), 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+    }
+
     # the enter is one immediate reshape - no handoff wait: state file within ~2 ticks
     Set-Content "$env:TEMP\vlc-pip-request.txt" "toggle"
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($hsw.ElapsedMilliseconds -lt 2000 -and -not (Test-Path "$env:TEMP\vlc-pip.json")) { Start-Sleep -Milliseconds 15 }
     $enterMs = $hsw.ElapsedMilliseconds
+    Check "controller strip: gone before the pip lands" (-not [Smoke.Keys]::FscVisible([IntPtr]::new([long]$fs.hwnd)))
     Start-Sleep -Milliseconds 700
     $fpip = Status
     Check "fullscreen toggle: enters pip" ($fpip.inPip -and -not $fpip.caption)
