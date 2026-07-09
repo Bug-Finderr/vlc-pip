@@ -507,6 +507,15 @@ pub struct RegionTracker {
     heal_tries: u32,
 }
 
+impl RegionTracker {
+    /// Drop only the stability debounce (our own reshapes invalidate it). The dissolve
+    /// baseline deliberately survives: wiping it across a drag would disarm the watch
+    /// exactly when media can end mid-gesture, leaving a stuck fullscreen-origin session.
+    pub fn reset_debounce(&mut self) {
+        self.prev = None;
+    }
+}
+
 /// Qt left fullscreen UNDERNEATH a fullscreen-origin PiP (media end and stop do this
 /// with no input; the window balloons to Qt's windowed geometry within a tick). Dissolve
 /// the session: frame back at Qt's chosen rect, state dropped - the saved fullscreen

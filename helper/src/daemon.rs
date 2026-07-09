@@ -172,7 +172,7 @@ pub fn run(argv: &[String]) -> i32 {
                 native::veil_fs_controller(pip.pid);
             }
             if DRAG.get().state >= DragState::Moving {
-                tracker = native::RegionTracker::default(); // gestures own the window while dragging
+                tracker.reset_debounce(); // gestures own the window while dragging
             } else {
                 native::maintain_region(&mut tracker, s);
             }
@@ -232,7 +232,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
         let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
-        *tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
+        tracker.reset_debounce(); // convergence re-clips from a clean debounce
     }
 }
 
