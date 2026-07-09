@@ -148,21 +148,25 @@ if (Get-Process vlc -ErrorAction SilentlyContinue) {
 # v2.1: gestures persist to config.txt - park it so the run starts from defaults
 $cfg = "$env:APPDATA\vlc\pip\config.txt"
 $cfgBak = "$cfg.smoke-bak"
-if (Test-Path $cfg) { Move-Item $cfg $cfgBak -Force }
-
-# screen:// = live playing video, so the video child window and minimal-look region exist
-$vlcProc = Start-Process $vlcPath 'screen://' -PassThru
-# $before anchors every exact-rect check: wait for Qt's startup autoresize to settle
-# (two identical consecutive rect samples), not a guessed duration
-$prevR = $null
-for ($i = 0; $i -lt 20; $i++) {
-    $cur = Status
-    if ($cur.found -and $prevR -and $cur.x -eq $prevR.x -and $cur.y -eq $prevR.y -and $cur.w -eq $prevR.w -and $cur.h -eq $prevR.h) { break }
-    $prevR = $cur
-    Start-Sleep -Milliseconds 300
-}
+$vlcProc = $null
 
 try {
+    # park INSIDE the try: any later throw still restores the user's config in finally
+    # (preflight throws stay above, where the finally's clear can't touch an unparked config)
+    if (Test-Path $cfg) { Move-Item $cfg $cfgBak -Force }
+
+    # screen:// = live playing video, so the video child window and minimal-look region exist
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    # $before anchors every exact-rect check: wait for Qt's startup autoresize to settle
+    # (two identical consecutive rect samples), not a guessed duration
+    $prevR = $null
+    for ($i = 0; $i -lt 20; $i++) {
+        $cur = Status
+        if ($cur.found -and $prevR -and $cur.x -eq $prevR.x -and $cur.y -eq $prevR.y -and $cur.w -eq $prevR.w -and $cur.h -eq $prevR.h) { break }
+        $prevR = $cur
+        Start-Sleep -Milliseconds 300
+    }
+
     $before = Status
     Check "vlc ready (windowed, caption)" ($before.found -and $before.caption)
 
