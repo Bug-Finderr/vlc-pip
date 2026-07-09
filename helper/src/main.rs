@@ -41,12 +41,7 @@ fn run() -> i32 {
             if native::exit_pip() { 0 } else { 1 }
         }
         "status" => {
-            let s = native::status();
-            let _ = std::fs::write(state::status_path(), &s); // the reliable channel for scripts: written FIRST
-            // stdout is best-effort on a GUI-subsystem exe, and println! PANICS on a broken
-            // pipe (only NULL handles are forgiven) - status must always exit 0 with the file written
-            use std::io::Write;
-            let _ = writeln!(std::io::stdout(), "{s}");
+            let _ = std::fs::write(state::status_path(), native::status());
             0
         }
         "daemon" => daemon::run(tail),

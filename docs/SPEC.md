@@ -87,7 +87,7 @@ Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; fi
 
 Modes (argv[1], ASCII-lowercased). Options parsed from the remaining args (used by `daemon`); `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
 - `exit` - restore; no region loop. Exit 0/1.
-- `status` - print status JSON to stdout (best effort) AND write it to `%TEMP%\vlc-pip-status.json` (the reliable channel). Always exit 0.
+- `status` - write status JSON to `%TEMP%\vlc-pip-status.json`. Always exit 0.
 - `daemon` - run the message loop (single instance via named mutex `"VlcPipDaemon"`; a second instance exits 0 silently, touching no files). Exit 0.
 - anything else (including no args) - "unknown mode" to stderr, exit 2.
 - Every mode first calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`.
