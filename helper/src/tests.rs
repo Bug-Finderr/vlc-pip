@@ -124,10 +124,9 @@ mod geometry {
 mod native {
     use crate::geometry::{self, Corner};
     use crate::native::{plan_region, RegionPlan};
-    use windows_sys::Win32::Foundation::RECT;
 
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-        RECT { left: l, top: t, right: r, bottom: b }
+    fn rect(l: i32, t: i32, r: i32, b: i32) -> geometry::Rect {
+        geometry::Rect { left: l, top: t, right: r, bottom: b }
     }
 
     fn work() -> geometry::Rect {
@@ -252,7 +251,7 @@ mod options {
 }
 
 mod request {
-    use crate::request::*;
+    use crate::state::consume_request as consume;
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pip-req-test-{name}-{}.txt", std::process::id()))

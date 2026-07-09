@@ -179,33 +179,15 @@ pub fn window_owner(h: isize) -> u32 {
     p
 }
 
-/// Restore before enter() snapshots anything: the off-screen iconic rect must never
-/// become the restore state.
-pub fn restore_if_iconic(h: isize) -> bool {
+unsafe extern "system" fn hide_fsc_cb(w: HWND, pid: LPARAM) -> BOOL {
     unsafe {
-        if IsIconic(hw(h)) != 0 {
-            ShowWindow(hw(h), SW_RESTORE);
-            return true;
-        }
-        false
-    }
-}
-
-struct FscTargets {
-    pid: u32,
-    found: Vec<isize>,
-}
-
-unsafe extern "system" fn collect_fsc_cb(w: HWND, l: LPARAM) -> BOOL {
-    unsafe {
-        let ctx = &mut *(l as *mut FscTargets);
         let mut buf = [0u16; 128];
         let n = GetClassNameW(w, buf.as_mut_ptr(), 128);
         if String::from_utf16_lossy(&buf[..n as usize]).starts_with("Qt5QWindowToolSaveBits") {
             let mut p = 0u32;
             GetWindowThreadProcessId(w, &mut p);
-            if p == ctx.pid && IsWindowVisible(w) != 0 {
-                ctx.found.push(w as isize);
+            if p == pid as u32 && IsWindowVisible(w) != 0 {
+                ShowWindow(w, SW_HIDE);
             }
         }
         1
@@ -215,20 +197,12 @@ unsafe extern "system" fn collect_fsc_cb(w: HWND, l: LPARAM) -> BOOL {
 /// Hide VLC's fullscreen controller strip - a separate topmost Qt window (class prefix
 /// "Qt5QWindowToolSaveBits") parked at the screen bottom, shown on hover while VLC
 /// believes it is fullscreen. One hide sticks across hovers (Qt's visibility cache
-/// desyncs from the OS state, verified live), but VLC's own hide timer can resync it,
-/// so this runs every tick while a fullscreen-origin PiP is active - worst case the
-/// strip blinks for one tick. After exit back to fullscreen, VLC's next hover/hide
-/// cycle brings the strip back naturally.
+/// desyncs from the OS state), but VLC's own hide timer can resync it, so this runs
+/// every tick while a fullscreen-origin PiP is active - worst case the strip blinks for
+/// one tick. After exit back to fullscreen, VLC's next hover/hide cycle brings it back.
 pub fn hide_fs_controller(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    let mut ctx = FscTargets { pid, found: Vec::new() };
-    unsafe {
-        EnumWindows(Some(collect_fsc_cb), &mut ctx as *mut FscTargets as LPARAM);
-        for f in ctx.found {
-            ShowWindow(hw(f), SW_HIDE);
-        }
+    if pid != 0 {
+        unsafe { EnumWindows(Some(hide_fsc_cb), pid as LPARAM) };
     }
 }
 
@@ -350,9 +324,11 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    // losslessly reversible; else the off-screen iconic rect gets saved as the restore state
-    restore_if_iconic(h);
     let (r, style, ex) = unsafe {
+        // restore FIRST: the off-screen iconic rect must never become the restore state
+        if IsIconic(hw(h)) != 0 {
+            ShowWindow(hw(h), SW_RESTORE);
+        }
         let mut r: RECT = std::mem::zeroed();
         GetWindowRect(hw(h), &mut r);
         let style = GetWindowLongPtrW(hw(h), GWL_STYLE);
@@ -529,34 +505,13 @@ fn find_video_child(top: isize) -> isize {
     found
 }
 
-fn same_rect(a: &RECT, b: &RECT) -> bool {
-    a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
-}
-
-// Cross-tick measurement memory for the stability debounce; v1 kept these in statics.
-// fs_prev/fs_have: the fullscreen-origin dissolve watch's baseline - the window rect
-// last seen WITH a live video child.
+// Cross-tick measurement memory for the stability debounce. `prev` holds last tick's
+// (window, child) rects; `fs_prev` is the fullscreen-origin dissolve watch's baseline -
+// the window rect last seen WITH a live video child.
+#[derive(Default)]
 pub struct RegionTracker {
-    prev_win: RECT,
-    prev_child: RECT,
-    have_prev: bool,
-    fs_prev: RECT,
-    fs_have: bool,
-}
-
-impl Default for RegionTracker {
-    // manual impl: windows-sys RECT has no Default
-    fn default() -> Self {
-        unsafe {
-            Self {
-                prev_win: std::mem::zeroed(),
-                prev_child: std::mem::zeroed(),
-                have_prev: false,
-                fs_prev: std::mem::zeroed(),
-                fs_have: false,
-            }
-        }
-    }
+    prev: Option<(geometry::Rect, geometry::Rect)>,
+    fs_prev: Option<geometry::Rect>,
 }
 
 /// Qt left fullscreen UNDERNEATH a fullscreen-origin PiP. Media end and stop trigger
@@ -588,14 +543,14 @@ fn dissolve_fs_pip(s: &PipState, path: &Path) {
 /// Acts only on STABLE frames (window+child rects unchanged since the previous tick):
 /// VLC re-fits the child asynchronously after our resize, so a fresh measurement can be
 /// stale and yield garbage chrome (observed in v1: perpetual resize thrash).
-pub fn maintain_region(t: &mut RegionTracker) {
+pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
     let path = state::state_path();
-    let Some(s) = state::load(&path) else {
-        t.have_prev = false;
+    let Some(s) = s else {
+        t.prev = None;
         return;
     };
     if !owns_state(&s) {
-        t.have_prev = false;
+        t.prev = None;
         heal_reopened(&s, &path);
         return;
     }
@@ -605,59 +560,50 @@ pub fn maintain_region(t: &mut RegionTracker) {
 
     // fullscreen-origin dissolve watch - BEFORE the min gate, it guards every fs session
     if fs_origin(s.style) {
-        let mut wr: RECT = unsafe { std::mem::zeroed() };
-        unsafe { GetWindowRect(hw(h), &mut wr) };
+        let wr = window_rect(h).unwrap_or_default();
         if child != 0 {
             // baseline: the rect while video is alive (our reshapes and drags included)
-            t.fs_prev = wr;
-            t.fs_have = true;
-        } else if t.fs_have && !same_rect(&wr, &t.fs_prev) {
+            t.fs_prev = Some(wr);
+        } else if t.fs_prev.is_some_and(|p| p != wr) {
             dissolve_fs_pip(&s, &path);
-            t.have_prev = false;
-            t.fs_have = false;
+            *t = RegionTracker::default();
             return;
         }
     } else {
-        t.fs_have = false;
+        t.fs_prev = None;
     }
 
     if !s.min {
         return;
     }
 
-    unsafe {
-        if child == 0 {
-            t.have_prev = false;
-            if has_region(h) {
-                SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // playback stopped: show full mini UI
-            }
-            return;
+    if child == 0 {
+        t.prev = None;
+        if has_region(h) {
+            unsafe { SetWindowRgn(hw(h), std::ptr::null_mut(), 1) }; // playback stopped: show full mini UI
         }
+        return;
+    }
 
-        let mut wr: RECT = std::mem::zeroed();
-        let mut cr: RECT = std::mem::zeroed();
-        GetWindowRect(hw(h), &mut wr);
-        GetWindowRect(hw(child), &mut cr);
-        let stable = t.have_prev && same_rect(&wr, &t.prev_win) && same_rect(&cr, &t.prev_child);
-        t.prev_win = wr;
-        t.prev_child = cr;
-        t.have_prev = true;
-        if !stable {
-            return; // wait until VLC's re-layout settles
+    let wr = window_rect(h).unwrap_or_default();
+    let cr = window_rect(child).unwrap_or_default();
+    let stable = t.prev == Some((wr, cr));
+    t.prev = Some((wr, cr));
+    if !stable {
+        return; // wait until VLC's re-layout settles
+    }
+
+    match plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
+        RegionPlan::Skip => {}
+        RegionPlan::Resize { x, y, w, h: th } => {
+            unsafe { SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED) };
+            t.prev = None; // our own resize invalidates the measurement
         }
-
-        match plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
-            RegionPlan::Skip => {}
-            RegionPlan::Resize { x, y, w, h: th } => {
-                SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED);
-                t.have_prev = false; // our own resize invalidates the measurement
-            }
-            RegionPlan::Clip { left, top, right, bottom } => {
-                // verify the box, not just presence: a live-clipped resize drag leaves an
-                // approximate region that convergence must confirm or correct
-                if region_box(h) != Some((left, top, right, bottom)) {
-                    set_region(h, left, top, right, bottom);
-                }
+        RegionPlan::Clip { left, top, right, bottom } => {
+            // verify the box, not just presence: a live-clipped resize drag leaves an
+            // approximate region that convergence must confirm or correct
+            if region_box(h) != Some((left, top, right, bottom)) {
+                set_region(h, left, top, right, bottom);
             }
         }
     }
@@ -700,14 +646,13 @@ fn heal_reopened(s: &PipState, path: &Path) {
         if IsIconic(hw(h2)) != 0 {
             return; // heal the normal placement once restored - the iconic rect is garbage
         }
-        let target = RECT { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
-        if MonitorFromRect(&target, MONITOR_DEFAULTTONULL).is_null() {
+        let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
+        let tr = RECT { left: target.left, top: target.top, right: target.right, bottom: target.bottom };
+        if MonitorFromRect(&tr, MONITOR_DEFAULTTONULL).is_null() {
             state::try_delete(path); // monitor layout changed: VLC's own placement is saner
             return;
         }
-        let mut wr: RECT = std::mem::zeroed();
-        GetWindowRect(hw(h2), &mut wr);
-        if same_rect(&wr, &target) {
+        if window_rect(h2) == Some(target) {
             HEAL_TRIES.store(0, Relaxed);
             state::try_delete(path); // heal landed and stuck: done
             return;
@@ -734,8 +679,8 @@ pub(crate) enum RegionPlan {
 // at the corner) or clip to the child area. `work` is lazy - it costs two user32 calls
 // and only the resize branch needs it.
 pub(crate) fn plan_region(
-    wr: &RECT, cr: &RECT, target_w: i32, target_h: i32, corner: geometry::Corner, margin: i32,
-    work: impl FnOnce() -> geometry::Rect,
+    wr: &geometry::Rect, cr: &geometry::Rect, target_w: i32, target_h: i32,
+    corner: geometry::Corner, margin: i32, work: impl FnOnce() -> geometry::Rect,
 ) -> RegionPlan {
     let rel_l = cr.left - wr.left;
     let rel_t = cr.top - wr.top;

@@ -81,6 +81,19 @@ pub(crate) fn write_state(s: &PipState) -> String {
     )
 }
 
+// ---- request file (command channel into the daemon) ---------------------------------
+
+pub fn request_path() -> PathBuf {
+    temp_path("vlc-pip-request.txt")
+}
+
+pub fn consume_request(path: &Path) -> Option<String> {
+    let cmd = std::fs::read_to_string(path).ok()?; // missing or mid-write: retry next poll
+    std::fs::remove_file(path).ok()?; // couldn't delete: leave the command for next poll
+    let cmd = cmd.trim();
+    if cmd.is_empty() { None } else { Some(cmd.to_string()) }
+}
+
 // ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
 
 pub struct StatusInfo {

@@ -18,7 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYDOWN, WM_TIMER,
 };
 
-use crate::{geometry, native, options, request, state};
+use crate::state::PipState;
+use crate::{geometry, native, options, state};
 
 // Everything the hooks touch lives on the pump thread - LL hook callbacks dispatch on
 // the thread that installed them (SPEC R7) - so plain Cells replace atomics, and reads
@@ -87,11 +88,11 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn refresh_state() {
+fn refresh_state(s: Option<PipState>) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
-    let s = state::load(&state::state_path()).filter(native::owns_state);
+    let s = s.filter(native::owns_state);
     PIP.set(Pip {
         hwnd: s.map_or(0, |s| s.hwnd as isize),
         fs: s.is_some_and(|s| native::fs_origin(s.style)),
@@ -109,7 +110,7 @@ pub fn run(argv: &[String]) -> i32 {
 
         // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves
         // one that would kill us on the first tick); only "stop", so a queued toggle survives
-        let rp = request::request_path();
+        let rp = state::request_path();
         if let Ok(c) = std::fs::read_to_string(&rp)
             && c.trim() == "stop"
         {
@@ -141,20 +142,23 @@ pub fn run(argv: &[String]) -> i32 {
         OWNS_ALIVE_FILE.store(true, Relaxed);
         let mut last_beat = Instant::now();
         beat(&mut last_beat);
-        refresh_state(); // a daemon restarted while already in PiP must be guarded from the first message
+        refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
 
         let mut tracker = native::RegionTracker::default();
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             if msg.message == WM_HOTKEY {
                 native::toggle(&options::effective(argv));
-                refresh_state();
+                refresh_state(state::load(&state::state_path()));
             } else if msg.message == WM_TIMER {
                 if last_beat.elapsed() > Duration::from_secs(3) {
                     beat(&mut last_beat);
                 }
                 poll_request(argv);
-                refresh_state(); // the hook cache must reflect a request-triggered toggle within this tick
+                // one state snapshot per tick, shared by the hook cache and the converger;
+                // it must reflect a request-triggered toggle within this same tick
+                let s = state::load(&state::state_path());
+                refresh_state(s);
                 let pip = PIP.get();
                 if pip.fs {
                     // VLC still believes it is fullscreen under this PiP: keep its
@@ -164,7 +168,7 @@ pub fn run(argv: &[String]) -> i32 {
                 if DRAG.get().state >= DragState::Moving {
                     tracker = native::RegionTracker::default(); // gestures own the window while dragging
                 } else {
-                    native::maintain_region(&mut tracker);
+                    native::maintain_region(&mut tracker, s);
                 }
             } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
                 // snapshot BEFORE any Win32 call: SetWindowPos/SetWindowRgn can pump sent
@@ -236,7 +240,7 @@ pub fn run(argv: &[String]) -> i32 {
 }
 
 fn poll_request(argv: &[String]) {
-    match request::consume(&request::request_path()).as_deref() {
+    match state::consume_request(&state::request_path()).as_deref() {
         Some("toggle") => {
             native::toggle(&options::effective(argv));
         }
