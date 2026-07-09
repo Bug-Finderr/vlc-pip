@@ -5,7 +5,7 @@ use crate::geometry::Corner;
 // The PiP state: x..ex_style restore the window; target_w..min are the options in
 // effect at Enter (daemon and one-shot CLI converge on the same geometry); pid guards
 // against HWND recycling. A VALID file on disk == "in PiP".
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
     pub hwnd: i64,
     pub x: i32,
@@ -89,6 +89,10 @@ pub(crate) fn write_state(s: &PipState) -> String {
 
 pub fn request_path() -> PathBuf {
     temp_path("vlc-pip-request.txt")
+}
+
+pub fn status_path() -> PathBuf {
+    temp_path("vlc-pip-status.json")
 }
 
 pub fn consume_request(path: &Path) -> Option<String> {

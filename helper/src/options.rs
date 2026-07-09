@@ -18,18 +18,19 @@ impl Default for PipOptions {
 
 pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions {
     let mut o = PipOptions::default();
+    // w/h pinned positive: 0/negative would park an invisible topmost window
+    let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| n > 0);
     for a in args {
         let Some(i) = a.find('=') else { continue };
         let (k, v) = (&a[..i], &a[i + 1..]);
         match k {
-            // w/h pinned positive: 0/negative would park an invisible topmost window
             "w" => {
-                if let Ok(n) = v.trim().parse() && n > 0 {
+                if let Some(n) = pos(v) {
                     o.w = n;
                 }
             }
             "h" => {
-                if let Ok(n) = v.trim().parse() && n > 0 {
+                if let Some(n) = pos(v) {
                     o.h = n;
                 }
             }

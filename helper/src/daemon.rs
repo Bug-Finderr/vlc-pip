@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, LRESULT, WPARAM};
@@ -22,15 +22,14 @@ use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
 // Everything the hooks touch lives on the pump thread - LL hook callbacks dispatch on
-// the thread that installed them (SPEC R7) - so plain Cells replace atomics, and reads
-// and writes move WHOLE structs: a queued message can never mix stale fields with fresh
-// ones. Hooks still never touch the disk (LowLevelHooksTimeout would silently remove
-// them); the cells are refreshed by the pump, and stale-file DELETION stays in native.
-static KB_HOOK: AtomicIsize = AtomicIsize::new(0);
-static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
-// true while this process owns the heartbeat file; the panic hook (any thread) checks it
-// so a daemon crash deletes the heartbeat and pip.lua respawns immediately instead of
-// treating the dead daemon as alive for up to 15s
+// the thread that installed them (SPEC R7) - so plain Cells hold all hook state, and
+// reads and writes move WHOLE structs: a queued message can never mix stale fields with
+// fresh ones. Hooks still never touch the disk (LowLevelHooksTimeout would silently
+// remove them); the cells are refreshed by the pump, and stale-file DELETION stays in
+// native. The one atomic is for the panic hook, which can fire on any thread:
+// true while this process owns the heartbeat file, so a daemon crash deletes the
+// heartbeat and pip.lua respawns immediately instead of treating the dead daemon as
+// alive for up to 15s.
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 
 const WM_APP_DRAG: u32 = WM_APP;
@@ -72,10 +71,13 @@ struct Click {
 
 /// The current PiP (hwnd 0 = none). `fs` = fullscreen-origin (saved style has no
 /// caption): the keyboard hook swallows Esc and the tick keeps VLC's strip hidden.
+/// `pid` is the owner verified by owns_state - the tick reuses it rather than
+/// re-deriving it from a handle that may have been recycled since.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
     fs: bool,
+    pid: u32,
 }
 
 thread_local! {
@@ -96,147 +98,142 @@ fn refresh_state(s: Option<PipState>) {
     PIP.set(Pip {
         hwnd: s.map_or(0, |s| s.hwnd as isize),
         fs: s.is_some_and(|s| native::fs_origin(s.style)),
+        pid: s.map_or(0, |s| s.pid),
     });
 }
 
 pub fn run(argv: &[String]) -> i32 {
-    unsafe {
-        // single instance; second instance exits 0 before touching any file
-        let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
-        let mutex = CreateMutexW(std::ptr::null(), 1, name.as_ptr()); // held for process lifetime
-        if mutex.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
-            return 0; // already running, or the name is unobtainable: never double-run
-        }
+    // single instance; second instance exits 0 before touching any file
+    let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
+    let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) }; // held for process lifetime
+    if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return 0; // already running, or the name is unobtainable: never double-run
+    }
 
-        // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves
-        // one that would kill us on the first tick); only "stop", so a queued toggle survives
-        let rp = state::request_path();
-        if let Ok(c) = std::fs::read_to_string(&rp)
-            && c.trim() == "stop"
-        {
-            let _ = std::fs::remove_file(&rp);
-        }
+    // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves
+    // one that would kill us on the first tick); only "stop", so a queued toggle survives
+    let rp = state::request_path();
+    if let Ok(c) = std::fs::read_to_string(&rp)
+        && c.trim() == "stop"
+    {
+        let _ = std::fs::remove_file(&rp);
+    }
 
-        let hot = RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0;
-        let timer = SetTimer(std::ptr::null_mut(), 0, 150, None) != 0; // WM_TIMER -> thread queue
+    let (hot, timer, kb, mouse) = unsafe {
         let module = GetModuleHandleW(std::ptr::null());
-        KB_HOOK.store(SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0) as isize, Relaxed);
-        MOUSE_HOOK.store(SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0) as isize, Relaxed);
+        (
+            RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
+            SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0),
+            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0),
+        )
+    };
 
-        // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
-        // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
-        // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
-        let alive = state::temp_path("vlc-pip-daemon.alive");
-        let beat = |last: &mut Instant| {
-            *last = Instant::now();
-            let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let _ = std::fs::write(&alive, format!(
-                "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
-                std::process::id(),
-                hot as i32,
-                timer as i32,
-                (KB_HOOK.load(Relaxed) != 0) as i32,
-                (MOUSE_HOOK.load(Relaxed) != 0) as i32,
-            ));
-        };
-        OWNS_ALIVE_FILE.store(true, Relaxed);
-        let mut last_beat = Instant::now();
-        beat(&mut last_beat);
-        refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
+    // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
+    // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
+    // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
+    let alive = state::temp_path("vlc-pip-daemon.alive");
+    let beat = |last: &mut Instant| {
+        *last = Instant::now();
+        let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let _ = std::fs::write(&alive, format!(
+            "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
+            std::process::id(),
+            hot as i32,
+            timer as i32,
+            (!kb.is_null()) as i32,
+            (!mouse.is_null()) as i32,
+        ));
+    };
+    OWNS_ALIVE_FILE.store(true, Relaxed);
+    let mut last_beat = Instant::now();
+    beat(&mut last_beat);
+    refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
 
-        let mut tracker = native::RegionTracker::default();
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            if msg.message == WM_HOTKEY {
-                native::toggle(&options::effective(argv));
-                refresh_state(state::load(&state::state_path()));
-            } else if msg.message == WM_TIMER {
-                if last_beat.elapsed() > Duration::from_secs(3) {
-                    beat(&mut last_beat);
-                }
-                poll_request(argv);
-                // one state snapshot per tick, shared by the hook cache and the converger;
-                // it must reflect a request-triggered toggle within this same tick
-                let s = state::load(&state::state_path());
-                refresh_state(s);
-                let pip = PIP.get();
-                if pip.fs {
-                    // VLC still believes it is fullscreen under this PiP: keep its
-                    // controller strip off the screen (SPEC section 7)
-                    native::hide_fs_controller(native::window_owner(pip.hwnd));
-                }
-                if DRAG.get().state >= DragState::Moving {
-                    tracker = native::RegionTracker::default(); // gestures own the window while dragging
-                } else {
-                    native::maintain_region(&mut tracker, s);
-                }
-            } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
-                // snapshot BEFORE any Win32 call: SetWindowPos/SetWindowRgn can pump sent
-                // messages, and a hook re-arm mid-call must not be clobbered or half-read
-                let mut d = DRAG.get();
-                d.move_pending = false;
-                DRAG.set(d);
-                // generation guard: a rapid release-and-repress re-arms the gesture; a
-                // message from the previous drag must not apply its stale delta
-                if d.hwnd != 0 && d.hwnd == PIP.get().hwnd && msg.lParam == d.generation as isize {
-                    let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
-                    let resizing = msg.wParam == DragState::Resizing as usize;
-                    let target = if resizing {
-                        geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
-                    } else {
-                        geometry::Rect {
-                            left: d.start.left + dx,
-                            top: d.start.top + dy,
-                            right: d.start.right + dx,
-                            bottom: d.start.bottom + dy,
-                        }
-                    };
-                    if resizing {
-                        // live minimal look: clip to where the video will sit, using the
-                        // per-side chrome measured at drag start; convergence verifies the
-                        // exact box after release
-                        let clip = if d.had_rgn {
-                            let c = geometry::Rect {
-                                left: d.vis.left - d.start.left,
-                                top: d.vis.top - d.start.top,
-                                right: (target.right - target.left) - (d.start.right - d.vis.right),
-                                bottom: (target.bottom - target.top) - (d.start.bottom - d.vis.bottom),
-                            };
-                            (c.right > c.left && c.bottom > c.top).then_some(c)
-                        } else {
-                            None
-                        };
-                        native::drag_resize(d.hwnd, &target, clip.as_ref());
-                    } else {
-                        native::drag_move(d.hwnd, &target);
-                    }
-                    if msg.message == WM_APP_DRAGEND {
-                        // finalize from OUR computed rect: the async SetWindowPos above has
-                        // not landed in VLC yet, so a fresh GetWindowRect would be stale
-                        let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
-                        let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
-                        native::finish_drag(&target, resizing, chrome_w, chrome_h);
-                        tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
-                    }
-                }
+    let mut tracker = native::RegionTracker::default();
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+        if msg.message == WM_HOTKEY {
+            native::toggle(&options::effective(argv));
+            refresh_state(state::load(&state::state_path()));
+        } else if msg.message == WM_TIMER {
+            if last_beat.elapsed() > Duration::from_secs(3) {
+                beat(&mut last_beat);
             }
+            poll_request(argv);
+            // one state snapshot per tick, shared by the hook cache and the converger;
+            // it must reflect a request-triggered toggle within this same tick
+            let s = state::load(&state::state_path());
+            refresh_state(s);
+            let pip = PIP.get();
+            if pip.fs {
+                // VLC still believes it is fullscreen under this PiP: keep its
+                // controller strip off the screen (SPEC section 7)
+                native::hide_fs_controller(pip.pid);
+            }
+            if DRAG.get().state >= DragState::Moving {
+                tracker = native::RegionTracker::default(); // gestures own the window while dragging
+            } else {
+                native::maintain_region(&mut tracker, s);
+            }
+        } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
+            on_drag_msg(&msg, &mut tracker);
+        }
+        unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-
-        let kb = KB_HOOK.load(Relaxed);
-        if kb != 0 {
-            UnhookWindowsHookEx(kb as _);
-        }
-        let mouse = MOUSE_HOOK.load(Relaxed);
-        if mouse != 0 {
-            UnhookWindowsHookEx(mouse as _);
-        }
-        UnregisterHotKey(std::ptr::null_mut(), 1);
-        let _ = std::fs::remove_file(&alive);
-        OWNS_ALIVE_FILE.store(false, Relaxed);
     }
+
+    unsafe {
+        UnhookWindowsHookEx(kb);
+        UnhookWindowsHookEx(mouse);
+        UnregisterHotKey(std::ptr::null_mut(), 1);
+    }
+    let _ = std::fs::remove_file(&alive);
+    OWNS_ALIVE_FILE.store(false, Relaxed);
     0
+}
+
+// The coalesced drag apply. Snapshot the gesture BEFORE any Win32 call: SetWindowPos/
+// SetWindowRgn can pump sent messages, and a hook re-arm mid-call must not be clobbered
+// or half-read. The generation guard drops a queued message from a previous drag (a
+// rapid release-and-repress re-arms the gesture; the stale delta must not apply).
+fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
+    let mut d = DRAG.get();
+    d.move_pending = false;
+    DRAG.set(d);
+    if d.hwnd != PIP.get().hwnd || msg.lParam != d.generation as isize {
+        return;
+    }
+    let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
+    let resizing = msg.wParam == DragState::Resizing as usize;
+    let target = if resizing {
+        geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
+    } else {
+        geometry::Rect {
+            left: d.start.left + dx,
+            top: d.start.top + dy,
+            right: d.start.right + dx,
+            bottom: d.start.bottom + dy,
+        }
+    };
+    if resizing {
+        // live minimal look: clip to where the video will sit, using the per-side chrome
+        // measured at drag start; convergence verifies the exact box after release
+        let clip = d.had_rgn.then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
+        native::drag_resize(d.hwnd, &target, clip.as_ref());
+    } else {
+        native::drag_move(d.hwnd, &target);
+    }
+    if msg.message == WM_APP_DRAGEND {
+        // finalize from OUR computed rect: the async SetWindowPos above has not landed
+        // in VLC yet, so a fresh GetWindowRect would be stale
+        let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
+        let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
+        native::finish_drag(&target, resizing, chrome_w, chrome_h);
+        *tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
+    }
 }
 
 fn poll_request(argv: &[String]) {
@@ -277,7 +274,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
         }
-        CallNextHookEx(KB_HOOK.load(Relaxed) as _, code, wparam, lparam)
+        // CallNextHookEx's hhk parameter is documented as ignored
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 }
 
@@ -305,7 +303,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     // arm a potential drag; the zone (interior vs 16px band) picks move vs
                     // resize; gen bump invalidates any queued message from a prior drag
                     let mut d = Drag { generation: DRAG.get().generation.wrapping_add(1), ..Drag::default() };
-                    if let (Some(vis), Some(wr)) = (native::visible_rect(h), native::window_rect(h)) {
+                    if let Some((vis, wr)) = native::gesture_rects(h) {
                         d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
                         d.vis = vis;
                         d.had_rgn = vis != wr; // visible == window means no region to preserve
@@ -356,6 +354,6 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 }
             }
         }
-        CallNextHookEx(MOUSE_HOOK.load(Relaxed) as _, code, wparam, lparam)
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 }

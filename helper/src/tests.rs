@@ -118,11 +118,34 @@ mod geometry {
         let tiny = rc(0, 0, 200, 200);
         assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, 0, &tiny), rc(0, 0, 256, 144));
     }
+
+    #[test]
+    fn resize_clip_preserves_per_side_chrome() {
+        // vis inset 10/30/10/5 in a 480x270 window; target grown to 580x370
+        let clip = resize_clip(&rc(100, 100, 580, 370), &rc(110, 130, 570, 365), &rc(100, 100, 680, 470));
+        assert_eq!(clip, Some(rc(10, 30, 570, 365)));
+    }
+
+    #[test]
+    fn resize_clip_target_below_chrome_is_none() {
+        // 200px left chrome + 200px right chrome > 210px target width: inverted box
+        let clip = resize_clip(&rc(0, 0, 480, 270), &rc(200, 100, 280, 170), &rc(0, 0, 210, 110));
+        assert_eq!(clip, None);
+    }
 }
 
 mod native {
     use crate::geometry::{self, Corner};
-    use crate::native::{plan_region, RegionPlan};
+    use crate::native::{fs_origin, plan_region, RegionPlan};
+
+    #[test]
+    fn fs_origin_requires_both_caption_bits_absent() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
+        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
+        assert!(fs_origin(0)); // fullscreen: caption fully absent
+        // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
+        assert!(fs_origin(WS_BORDER as i64));
+    }
 
     fn rect(l: i32, t: i32, r: i32, b: i32) -> geometry::Rect {
         geometry::Rect { left: l, top: t, right: r, bottom: b }
@@ -311,6 +334,14 @@ mod state {
         for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min] {
             assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
+    }
+
+    #[test]
+    fn unknown_corner_token_in_full_line_falls_back_to_br() {
+        // corrupt_input pins what is REJECTED; the corner token is the one field that
+        // instead accepts-with-fallback (SPEC 6.1: unknown reads as br)
+        let s = parse_state(&FULL.replace(" br ", " zz ")).unwrap();
+        assert_eq!(s.corner, Corner::Br);
     }
 
     #[test]

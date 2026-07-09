@@ -1,5 +1,4 @@
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -31,6 +30,26 @@ use crate::state::{self, PipState, StatusInfo};
 // handles are *mut c_void: not Send/Sync). Cast at the call boundary only.
 fn hw(h: isize) -> HWND {
     h as HWND
+}
+
+// Closure-based window enumeration (return false to stop). Only for EnumWindows /
+// EnumChildWindows - the LL hook callbacks stay plain unsafe extern fns (SPEC R7).
+unsafe extern "system" fn enum_tramp<F: FnMut(HWND) -> bool>(h: HWND, l: LPARAM) -> BOOL {
+    unsafe { (*(l as *mut F))(h) as BOOL }
+}
+
+fn enum_windows<F: FnMut(HWND) -> bool>(mut f: F) {
+    unsafe { EnumWindows(Some(enum_tramp::<F>), &raw mut f as LPARAM) };
+}
+
+fn enum_children<F: FnMut(HWND) -> bool>(top: isize, mut f: F) {
+    unsafe { EnumChildWindows(hw(top), Some(enum_tramp::<F>), &raw mut f as LPARAM) };
+}
+
+fn class_starts_with(h: HWND, prefix: &str) -> bool {
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), 128) };
+    String::from_utf16_lossy(&buf[..n as usize]).starts_with(prefix)
 }
 
 pub fn enable_dpi_awareness() {
@@ -66,71 +85,44 @@ fn vlc_pids() -> Vec<u32> {
     pids
 }
 
-struct FindCtx<'a> {
-    pids: &'a [u32],
-    best: isize,
-    biggest: isize,
-    biggest_area: i64,
-}
-
-unsafe extern "system" fn find_player_cb(h: HWND, l: LPARAM) -> BOOL {
-    unsafe {
-        let ctx = &mut *(l as *mut FindCtx);
-        if IsWindowVisible(h) == 0 {
-            return 1;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(h, &mut pid);
-        if !ctx.pids.contains(&pid) {
-            return 1;
-        }
-        let mut buf = [0u16; 256];
-        let n = GetWindowTextW(h, buf.as_mut_ptr(), 256);
-        if n == 0 {
-            return 1; // empty title: VLC's hidden/extension windows
-        }
-        let title = String::from_utf16_lossy(&buf[..n as usize]);
-        if title.to_ascii_lowercase().contains("vlc media player") {
-            ctx.best = h as isize;
-            return 0; // stop enumeration
-        }
-        let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(h, &mut r);
-        let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
-        if area > ctx.biggest_area {
-            ctx.biggest_area = area;
-            ctx.biggest = h as isize;
-        }
-        1
-    }
-}
-
 pub fn find_player() -> isize {
     let pids = vlc_pids();
     if pids.is_empty() {
         return 0;
     }
-    let mut ctx = FindCtx { pids: &pids, best: 0, biggest: 0, biggest_area: 0 };
-    unsafe {
-        EnumWindows(Some(find_player_cb), &mut ctx as *mut FindCtx as LPARAM);
-    }
-    if ctx.best != 0 { ctx.best } else { ctx.biggest }
+    let (mut best, mut biggest, mut biggest_area) = (0isize, 0isize, 0i64);
+    enum_windows(|h| {
+        if unsafe { IsWindowVisible(h) } == 0 || !pids.contains(&window_owner(h as isize)) {
+            return true;
+        }
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(h, buf.as_mut_ptr(), 256) };
+        if n == 0 {
+            return true; // empty title: VLC's hidden/extension windows
+        }
+        let title = String::from_utf16_lossy(&buf[..n as usize]);
+        if title.to_ascii_lowercase().contains("vlc media player") {
+            best = h as isize;
+            return false; // stop enumeration
+        }
+        let area = window_rect(h as isize)
+            .map_or(0, |r| (r.right - r.left) as i64 * (r.bottom - r.top) as i64);
+        if area > biggest_area {
+            biggest_area = area;
+            biggest = h as isize;
+        }
+        true
+    });
+    if best != 0 { best } else { biggest }
 }
 
 // ---- state ownership ----------------------------------------------------------------
 
 // Windows recycles HWND values: after VLC dies, the saved handle can belong to another
-// app. IsWindow alone would pass and we'd reshape a foreign window; require the owner
-// PID recorded at Enter.
-pub(crate) fn owns_state(s: &PipState) -> bool {
-    unsafe {
-        if IsWindow(hw(s.hwnd as isize)) == 0 {
-            return false;
-        }
-        let mut p = 0u32;
-        GetWindowThreadProcessId(hw(s.hwnd as isize), &mut p);
-        p != 0 && p == s.pid
-    }
+// app. Handle validity alone would pass and we'd reshape a foreign window; require the
+// owner PID recorded at Enter (a destroyed or recycled HWND yields 0 or a foreign pid).
+pub fn owns_state(s: &PipState) -> bool {
+    s.pid != 0 && window_owner(s.hwnd as isize) == s.pid
 }
 
 // Read-only: a stale state here may be a pending reopen-heal record whose lifecycle
@@ -173,32 +165,28 @@ pub fn window_owner(h: isize) -> u32 {
     p
 }
 
-unsafe extern "system" fn hide_fsc_cb(w: HWND, pid: LPARAM) -> BOOL {
-    unsafe {
-        let mut buf = [0u16; 128];
-        let n = GetClassNameW(w, buf.as_mut_ptr(), 128);
-        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("Qt5QWindowToolSaveBits") {
-            let mut p = 0u32;
-            GetWindowThreadProcessId(w, &mut p);
-            if p == pid as u32 && IsWindowVisible(w) != 0 {
-                ShowWindow(w, SW_HIDE);
-            }
-        }
-        1
-    }
-}
-
 /// Hide VLC's fullscreen controller strip (separate topmost Qt window, shown on hover
 /// while VLC believes it is fullscreen). One hide sticks across hovers, but VLC's own
 /// hide timer can resync Qt's visibility cache, so this runs every tick during a
 /// fullscreen-origin PiP; VLC's next hover cycle brings the strip back after exit.
 pub fn hide_fs_controller(pid: u32) {
-    if pid != 0 {
-        unsafe { EnumWindows(Some(hide_fsc_cb), pid as LPARAM) };
+    if pid == 0 {
+        return;
     }
+    enum_windows(|w| {
+        if class_starts_with(w, "Qt5QWindowToolSaveBits")
+            && window_owner(w as isize) == pid
+            && unsafe { IsWindowVisible(w) } != 0
+        {
+            unsafe { ShowWindow(w, SW_HIDE) };
+        }
+        true
+    });
 }
 
-// ---- drag gesture primitives (hook arms, pump applies) --------------------------------
+// ---- window / region primitives -------------------------------------------------------
+// VLC 3.x hosts the video in a native child whose class starts with "VLC video main";
+// the minimal look clips the top-level window to it via SetWindowRgn.
 
 pub fn window_rect(h: isize) -> Option<geometry::Rect> {
     unsafe {
@@ -210,16 +198,65 @@ pub fn window_rect(h: isize) -> Option<geometry::Rect> {
     }
 }
 
+fn styles(h: isize) -> (isize, isize) {
+    unsafe { (GetWindowLongPtrW(hw(h), GWL_STYLE), GetWindowLongPtrW(hw(h), GWL_EXSTYLE)) }
+}
+
+fn find_video_child(top: isize) -> isize {
+    let mut found = 0isize;
+    enum_children(top, |c| {
+        if unsafe { IsWindowVisible(c) } != 0 && class_starts_with(c, "VLC video main") {
+            found = c as isize;
+            return false;
+        }
+        true
+    });
+    found
+}
+
+// Every region this program sets has a nonempty box, so presence == nonempty box.
+fn has_region(h: isize) -> bool {
+    region_box(h).is_some()
+}
+
+fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let probe = CreateRectRgn(0, 0, 0, 0);
+        let mut b: RECT = std::mem::zeroed();
+        let r = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
+            Some((b.left, b.top, b.right, b.bottom))
+        } else {
+            None
+        };
+        DeleteObject(probe);
+        r
+    }
+}
+
+// Apply a rectangular region (window-relative); the system owns rgn only on success.
+fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
+    unsafe {
+        let rgn = CreateRectRgn(left, top, right, bottom);
+        if SetWindowRgn(hw(h), rgn, 1) == 0 {
+            DeleteObject(rgn);
+        }
+    }
+}
+
+// ---- drag gesture primitives (hook arms, pump applies) --------------------------------
+
 // The minimal-look region clips painting AND hit-testing, so the gesture surface is the
-// region box (offset to screen coords by the window origin), not the window rect.
-pub fn visible_rect(h: isize) -> Option<geometry::Rect> {
+// region box (offset to screen coords by the window origin), not the window rect. One
+// call returns (visible, window) so had_rgn compares a coherent snapshot.
+pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
     let wr = window_rect(h)?;
-    Some(region_box(h).map_or(wr, |(l, t, r, b)| geometry::Rect {
+    let vis = region_box(h).map_or(wr, |(l, t, r, b)| geometry::Rect {
         left: wr.left + l,
         top: wr.top + t,
         right: wr.left + r,
         bottom: wr.top + b,
-    }))
+    });
+    Some((vis, wr))
 }
 
 pub fn drag_band(h: isize) -> i32 {
@@ -286,14 +323,11 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
     if child == 0 {
         return None;
     }
+    let cr = window_rect(child)?;
     unsafe {
         let mut client: RECT = std::mem::zeroed();
         let mut origin = POINT { x: 0, y: 0 };
-        let mut cr: RECT = std::mem::zeroed();
-        if GetClientRect(hw(h), &mut client) == 0
-            || ClientToScreen(hw(h), &mut origin) == 0
-            || GetWindowRect(hw(child), &mut cr) == 0
-        {
+        if GetClientRect(hw(h), &mut client) == 0 || ClientToScreen(hw(h), &mut origin) == 0 {
             return None;
         }
         let l = cr.left - origin.x;
@@ -302,7 +336,7 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
         let b = (origin.y + client.bottom) - cr.bottom;
         // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
         // stale measurement, and a rect the converger would forever Skip must never land
-        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=300).contains(&(l + r)) && (0..=300).contains(&(t + b)) {
+        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=MAX_CHROME).contains(&(l + r)) && (0..=MAX_CHROME).contains(&(t + b)) {
             Some((l, t, r, b))
         } else {
             None
@@ -314,17 +348,12 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
-    let (r, style, ex) = unsafe {
-        // restore FIRST: the off-screen iconic rect must never become the restore state
-        if IsIconic(hw(h)) != 0 {
-            ShowWindow(hw(h), SW_RESTORE);
-        }
-        let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(hw(h), &mut r);
-        let style = GetWindowLongPtrW(hw(h), GWL_STYLE);
-        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        (r, style, ex)
-    };
+    // restore FIRST: the off-screen iconic rect must never become the restore state
+    if unsafe { IsIconic(hw(h)) } != 0 {
+        unsafe { ShowWindow(hw(h), SW_RESTORE) };
+    }
+    let r = window_rect(h).unwrap_or_default();
+    let (style, ex) = styles(h);
     let pid = window_owner(h);
     // save state FIRST, so a failed save can never leave a mutated window with no restore data
     let s = PipState {
@@ -377,6 +406,18 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     }
 }
 
+// Shared exit/dissolve prefix: drop the minimal-look clip BEFORE restoring the saved
+// styles. WS_EX_TOPMOST only changes via SetWindowPos, so the returned after-handle
+// (honoring the user's own always-on-top) goes into the caller's SetWindowPos.
+fn restore_frame(h: isize, style: isize, ex_style: i64) -> HWND {
+    unsafe {
+        SetWindowRgn(hw(h), std::ptr::null_mut(), 1);
+        SetWindowLongPtrW(hw(h), GWL_STYLE, style);
+        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex_style as isize);
+    }
+    if ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST }
+}
+
 pub fn exit_pip() -> bool {
     let path = state::state_path();
     let Some(s) = state::load(&path) else { return false };
@@ -385,12 +426,8 @@ pub fn exit_pip() -> bool {
         return false;
     }
     let h = s.hwnd as isize;
+    let after = restore_frame(h, s.style as isize, s.ex_style);
     unsafe {
-        SetWindowRgn(hw(h), std::ptr::null_mut(), 1); // drop the minimal-look clip before restoring
-        SetWindowLongPtrW(hw(h), GWL_STYLE, s.style as isize);
-        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, s.ex_style as isize);
-        // WS_EX_TOPMOST only changes via SetWindowPos: honor the user's own always-on-top
-        let after = if s.ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST };
         let ok = SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
         if ok || IsWindow(hw(h)) == 0 {
             state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
@@ -405,101 +442,38 @@ pub fn toggle(o: &PipOptions) -> bool {
 
 // ---- status -------------------------------------------------------------------------
 
-pub fn status_path() -> PathBuf {
-    state::temp_path("vlc-pip-status.json")
-}
-
 pub fn status() -> String {
     let h = find_player();
     if h == 0 {
         return state::status_json(None);
     }
-    unsafe {
-        let mut r: RECT = std::mem::zeroed();
-        GetWindowRect(hw(h), &mut r);
-        let style = GetWindowLongPtrW(hw(h), GWL_STYLE);
-        let ex = GetWindowLongPtrW(hw(h), GWL_EXSTYLE);
-        state::status_json(Some(&StatusInfo {
-            hwnd: h as i64,
-            x: r.left,
-            y: r.top,
-            w: r.right - r.left,
-            h: r.bottom - r.top,
-            caption: style & (WS_CAPTION as isize) == (WS_CAPTION as isize), // BOTH bits
-            topmost: ex & (WS_EX_TOPMOST as isize) != 0,
-            in_pip: in_pip(),
-            minimal: has_region(h),
-        }))
-    }
-}
-
-fn has_region(h: isize) -> bool {
-    unsafe {
-        let probe = CreateRectRgn(0, 0, 0, 0);
-        let r = GetWindowRgn(hw(h), probe) != 0; // 0 = ERROR (no region)
-        DeleteObject(probe);
-        r
-    }
-}
-
-fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
-    unsafe {
-        let probe = CreateRectRgn(0, 0, 0, 0);
-        let mut b: RECT = std::mem::zeroed();
-        let r = if GetWindowRgn(hw(h), probe) != 0 && GetRgnBox(probe, &mut b) > NULLREGION {
-            Some((b.left, b.top, b.right, b.bottom))
-        } else {
-            None
-        };
-        DeleteObject(probe);
-        r
-    }
-}
-
-// Apply a rectangular region (window-relative); the system owns rgn only on success.
-fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
-    unsafe {
-        let rgn = CreateRectRgn(left, top, right, bottom);
-        if SetWindowRgn(hw(h), rgn, 1) == 0 {
-            DeleteObject(rgn);
-        }
-    }
+    let r = window_rect(h).unwrap_or_default();
+    let (style, ex) = styles(h);
+    state::status_json(Some(&StatusInfo {
+        hwnd: h as i64,
+        x: r.left,
+        y: r.top,
+        w: r.right - r.left,
+        h: r.bottom - r.top,
+        caption: style & (WS_CAPTION as isize) == (WS_CAPTION as isize), // BOTH bits
+        topmost: ex & (WS_EX_TOPMOST as isize) != 0,
+        in_pip: in_pip(),
+        minimal: has_region(h),
+    }))
 }
 
 // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area -------------
-// VLC 3.x hosts the video in a native child whose class starts with "VLC video main".
 
-unsafe extern "system" fn find_child_cb(c: HWND, l: LPARAM) -> BOOL {
-    unsafe {
-        let found = &mut *(l as *mut isize);
-        if IsWindowVisible(c) == 0 {
-            return 1;
-        }
-        let mut buf = [0u16; 128];
-        let n = GetClassNameW(c, buf.as_mut_ptr(), 128);
-        if String::from_utf16_lossy(&buf[..n as usize]).starts_with("VLC video main") {
-            *found = c as isize;
-            return 0;
-        }
-        1
-    }
-}
-
-fn find_video_child(top: isize) -> isize {
-    let mut found = 0isize;
-    unsafe {
-        EnumChildWindows(hw(top), Some(find_child_cb), &mut found as *mut isize as LPARAM);
-    }
-    found
-}
-
-// Cross-tick measurement memory for the stability debounce. `prev` holds last tick's
-// (window, child) rects; `fs_prev` is the fullscreen-origin dissolve watch's baseline -
-// the window rect last seen WITH a live video child.
+// Cross-tick converger memory. `prev` holds last tick's (window, child) rects for the
+// stability debounce; `fs_prev` is the fullscreen-origin dissolve watch's baseline (the
+// window rect last seen WITH a live video child); `heal_tries` bounds the reopen heal
+// so an unhealable window (e.g. elevated VLC: UIPI silently swallows the SetWindowPos)
+// is never fought forever - ~6s of ticks, then the record is dropped.
 #[derive(Default)]
 pub struct RegionTracker {
     prev: Option<(geometry::Rect, geometry::Rect)>,
     fs_prev: Option<geometry::Rect>,
+    heal_tries: u32,
 }
 
 /// Qt left fullscreen UNDERNEATH a fullscreen-origin PiP (media end and stop do this
@@ -508,15 +482,8 @@ pub struct RegionTracker {
 /// rect must never be restored onto an internally windowed VLC.
 fn dissolve_fs_pip(s: &PipState, path: &Path) {
     let h = s.hwnd as isize;
+    let after = restore_frame(h, s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize, s.ex_style);
     unsafe {
-        SetWindowRgn(hw(h), std::ptr::null_mut(), 1);
-        SetWindowLongPtrW(
-            hw(h),
-            GWL_STYLE,
-            s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize,
-        );
-        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, s.ex_style as isize);
-        let after = if s.ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST };
         SetWindowPos(hw(h), after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
     }
     state::try_delete(path);
@@ -535,16 +502,16 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
     };
     if !owns_state(&s) {
         t.prev = None;
-        heal_reopened(&s, &path);
+        heal_reopened(&mut t.heal_tries, &s, &path);
         return;
     }
-    HEAL_TRIES.store(0, Relaxed); // a live owned PiP ends any interrupted heal cleanly
+    t.heal_tries = 0; // a live owned PiP ends any interrupted heal cleanly
     let h = s.hwnd as isize;
     let child = find_video_child(h);
+    let wr = window_rect(h).unwrap_or_default(); // one snapshot serves watch and debounce
 
     // fullscreen-origin dissolve watch - BEFORE the min gate, it guards every fs session
     if fs_origin(s.style) {
-        let wr = window_rect(h).unwrap_or_default();
         if child != 0 {
             // baseline: the rect while video is alive (our reshapes and drags included)
             t.fs_prev = Some(wr);
@@ -569,7 +536,6 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
         return;
     }
 
-    let wr = window_rect(h).unwrap_or_default();
     let cr = window_rect(child).unwrap_or_default();
     let stable = t.prev == Some((wr, cr));
     t.prev = Some((wr, cr));
@@ -593,16 +559,13 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
     }
 }
 
-// Bounded so an unhealable window (e.g. elevated VLC: UIPI silently swallows the
-// SetWindowPos) is never fought forever: ~6s of ticks, then the record is dropped.
-static HEAL_TRIES: AtomicU32 = AtomicU32::new(0);
-
 /// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
 /// so its next launch opens full-size at the PiP origin, overflowing the screen. The
 /// stale state file is kept as a pending-restore record; when a new player window
 /// appears, apply the saved pre-PiP rect and delete the record only once the rect is
-/// observed to stick - VLC's own startup positioning must not win the race.
-fn heal_reopened(s: &PipState, path: &Path) {
+/// observed to stick - VLC's own startup positioning must not win the race. `tries` is
+/// the tracker's bounded retry counter.
+fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
     if s.w <= 0 || s.h <= 0 || s.pid == 0 {
         state::try_delete(path); // garbage record (pid is 0 if VLC died mid-enter): not healable
         return;
@@ -637,12 +600,13 @@ fn heal_reopened(s: &PipState, path: &Path) {
             return;
         }
         if window_rect(h2) == Some(target) {
-            HEAL_TRIES.store(0, Relaxed);
+            *tries = 0;
             state::try_delete(path); // heal landed and stuck: done
             return;
         }
-        if HEAL_TRIES.fetch_add(1, Relaxed) >= 40 {
-            HEAL_TRIES.store(0, Relaxed);
+        *tries += 1;
+        if *tries > 40 {
+            *tries = 0;
             state::try_delete(path); // not converging: stop fighting the window
             return;
         }
@@ -657,6 +621,11 @@ pub(crate) enum RegionPlan {
     Clip { left: i32, top: i32, right: i32, bottom: i32 },
 }
 
+// Real chrome (menu + controller + borders) is well under this. enter's measurement and
+// the converger MUST share the bound: a chrome enter accepts but plan_region skips
+// would land a rect the converger fights forever.
+const MAX_CHROME: i32 = 300;
+
 // Pure planning math for the minimal-look convergence: resize grows by chrome so the
 // VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
 // child area. `work` is lazy - only the resize branch needs its two user32 calls.
@@ -670,9 +639,8 @@ pub(crate) fn plan_region(
     let ch = cr.bottom - cr.top;
     let chrome_w = (wr.right - wr.left) - cw;
     let chrome_h = (wr.bottom - wr.top) - ch;
-    // real chrome (menu + controller + borders) is well under 300px; negative or huge
-    // delta = stale rects from VLC's async re-layout
-    if !(0..=300).contains(&chrome_w) || !(0..=300).contains(&chrome_h) {
+    // negative or huge delta = stale rects from VLC's async re-layout
+    if !(0..=MAX_CHROME).contains(&chrome_w) || !(0..=MAX_CHROME).contains(&chrome_h) {
         return RegionPlan::Skip;
     }
     if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {

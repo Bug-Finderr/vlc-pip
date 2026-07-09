@@ -131,6 +131,19 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
     Rect { left, top, right, bottom }
 }
 
+/// Window-relative region that keeps the minimal look live through a resize drag: the
+/// per-side chrome measured at drag start, applied to the target size. None when the
+/// target has shrunk below the chrome (an inverted box must not clip).
+pub fn resize_clip(start: &Rect, vis: &Rect, target: &Rect) -> Option<Rect> {
+    let c = Rect {
+        left: vis.left - start.left,
+        top: vis.top - start.top,
+        right: (target.right - target.left) - (start.right - vis.right),
+        bottom: (target.bottom - target.top) - (start.bottom - vis.bottom),
+    };
+    (c.right > c.left && c.bottom > c.top).then_some(c)
+}
+
 pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) -> (i32, i32) {
     let left = work.left + margin;
     let top = work.top + margin;
