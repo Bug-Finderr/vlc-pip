@@ -22,7 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-use crate::geometry;
+use crate::geometry::{self, RegionPlan};
 use crate::options::PipOptions;
 use crate::state::{self, PipState, StatusInfo};
 
@@ -369,7 +369,7 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
     let b = (origin.y + client.bottom) - cr.bottom;
     // no side negative, axis sums in plan_region's envelope: a rect the converger
     // would forever Skip must never land
-    if l >= 0 && t >= 0 && r >= 0 && b >= 0 && chrome_ok(l + r, t + b) {
+    if l >= 0 && t >= 0 && r >= 0 && b >= 0 && geometry::chrome_ok(l + r, t + b) {
         Some((l, t, r, b))
     } else {
         None
@@ -590,7 +590,7 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
         return; // wait until VLC's re-layout settles
     }
 
-    match plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
+    match geometry::plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
         RegionPlan::Skip => {}
         RegionPlan::Resize { x, y, w, h: th } => {
             unsafe { SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED) };
@@ -664,51 +664,3 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
     unsafe { SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE) };
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RegionPlan {
-    Skip,
-    Resize { x: i32, y: i32, w: i32, h: i32 },
-    Clip(geometry::Rect),
-}
-
-// Real chrome (menu + controller + borders) is well under this. enter's measurement and
-// the converger MUST share the bound: a chrome enter accepts but plan_region skips
-// would land a rect the converger fights forever.
-const MAX_CHROME: i32 = 300;
-
-// Per-axis chrome sums: negative or huge = stale rects from VLC's async re-layout.
-fn chrome_ok(w: i32, h: i32) -> bool {
-    (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
-}
-
-// Pure planning math for the minimal-look convergence: resize grows by chrome so the
-// VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
-// child area. `work` is lazy - only the resize branch needs its two user32 calls.
-pub(crate) fn plan_region(
-    wr: &geometry::Rect, cr: &geometry::Rect, target_w: i32, target_h: i32,
-    corner: geometry::Corner, margin: i32, work: impl FnOnce() -> geometry::Rect,
-) -> RegionPlan {
-    let rel_l = cr.left - wr.left;
-    let rel_t = cr.top - wr.top;
-    let cw = cr.right - cr.left;
-    let ch = cr.bottom - cr.top;
-    let chrome_w = (wr.right - wr.left) - cw;
-    let chrome_h = (wr.bottom - wr.top) - ch;
-    if !chrome_ok(chrome_w, chrome_h) {
-        return RegionPlan::Skip;
-    }
-    if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
-        let wa = work();
-        let (vx, vy) = geometry::compute_corner(&wa, target_w, target_h, corner, margin);
-        // targets are pinned positive at both parse boundaries (options + state file),
-        // and chrome is non-negative here, so target + chrome cannot underflow
-        let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
-        if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
-            // already at the computed rect but the child never re-fit: re-issuing the
-            // no-op resize would reset the debounce every tick and loop forever
-            return RegionPlan::Skip;
-        }
-        return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };
-    }
-    RegionPlan::Clip(geometry::Rect { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch })
-}
