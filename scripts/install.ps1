@@ -1,9 +1,16 @@
 # Installs VLC PiP: helper exe, Lua extension, login autostart, and starts the daemon.
+# Release zips ship a prebuilt pip-helper.exe at the root; a source clone builds it.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "cargo not found - install Rust (MSVC toolchain) from https://rustup.rs" }
-cargo build --release --manifest-path "$root\helper\Cargo.toml"
-if ($LASTEXITCODE -ne 0) { throw "build failed" }
+$exeSrc = "$root\pip-helper.exe"
+if (Test-Path $exeSrc) {
+    Write-Host "Installing prebuilt pip-helper.exe"
+} else {
+    if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "cargo not found - install Rust (MSVC toolchain) from https://rustup.rs" }
+    cargo build --release --manifest-path "$root\helper\Cargo.toml"
+    if ($LASTEXITCODE -ne 0) { throw "build failed" }
+    $exeSrc = "$root\helper\target\release\pip-helper.exe"
+}
 
 $pipDir = "$env:APPDATA\vlc\pip"
 $extDir = "$env:APPDATA\vlc\lua\extensions"
@@ -30,7 +37,7 @@ if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
 # a stale heartbeat (survives any force-kill) would make the start verification below vacuous
 Remove-Item "$env:TEMP\vlc-pip-request.txt", "$env:TEMP\vlc-pip-daemon.alive" -Force -ErrorAction SilentlyContinue
 
-Copy-Item "$root\helper\target\release\pip-helper.exe" "$pipDir\pip-helper.exe" -Force
+Copy-Item $exeSrc "$pipDir\pip-helper.exe" -Force
 Copy-Item "$root\extension\pip.lua" "$extDir\pip.lua" -Force   # ONLY the .lua in extensions
 
 # login autostart shortcut (Explorer-launched = GUI, no console)

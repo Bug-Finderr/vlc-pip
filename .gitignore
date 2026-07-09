@@ -1,3 +1,4 @@
 target/
 *.user
 .claude/
+/pip-helper.exe
