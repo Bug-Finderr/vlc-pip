@@ -138,15 +138,6 @@ pub fn run(argv: &[String]) -> i32 {
         return 0; // already running, or the name is unobtainable: never double-run
     }
 
-    // discard a stale pre-launch "stop" ('pip-helper stop' with no daemon alive leaves
-    // one that would kill us on the first tick); only "stop", so a queued toggle survives
-    let rp = state::request_path();
-    if let Ok(c) = std::fs::read_to_string(&rp)
-        && c.trim() == "stop"
-    {
-        let _ = std::fs::remove_file(&rp);
-    }
-
     let (hot, timer) = unsafe {
         (
             RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
@@ -273,9 +264,6 @@ fn poll_request(argv: &[String]) {
         }
         Some("enter") => {
             native::enter(native::find_player(), &options::effective(argv));
-        }
-        Some("exit") => {
-            native::exit_pip();
         }
         Some("stop") => unsafe { PostQuitMessage(0) },
         _ => {}
