@@ -282,7 +282,7 @@ mod state {
     use crate::geometry::Corner;
     use crate::state::*;
 
-    const FULL: &str = "66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345";
+    const FULL: &str = "66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345\n";
 
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pip-state-test-{name}-{}.txt", std::process::id()))
@@ -303,12 +303,13 @@ mod state {
 
     #[test]
     fn corrupt_input_reads_as_none() {
-        let truncated = &FULL[..FULL.len() - 6]; // 12 tokens
-        let extra = format!("{FULL} 7"); // 14 tokens
+        let torn_pid = &FULL[..FULL.len() - 3]; // "...123", no newline: torn write
+        let short = FULL.replace(" 12345\n", "\n"); // 12 tokens
+        let extra = FULL.replace("12345\n", "12345 7\n"); // 14 tokens
         let bad_num = FULL.replace("349110272", "wide");
         let bad_min = FULL.replace(" 1 12345", " yes 12345");
-        for bad in ["", "not a state", truncated, &extra, &bad_num, &bad_min] {
-            assert!(parse_state(bad).is_none(), "should reject: {bad}");
+        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min] {
+            assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
     }
 

@@ -43,10 +43,14 @@ pub fn try_delete(path: &Path) {
     let _ = std::fs::remove_file(path); // transient lock: next caller retries
 }
 
-// One whitespace-separated line, exactly 13 tokens; any deviation reads as None =
-// "not in PiP", so torn or corrupt writes fail closed. pid is LAST: a write truncated
-// mid-token yields a pid that fails the owner check, never a poisoned restore rect.
+// One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
+// reads as None = "not in PiP". The trailing newline is the torn-write sentinel: a
+// truncated write loses it, so a partial line can never parse (a numeric PREFIX of the
+// last token would otherwise pass and misroute a live PiP into the heal path).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {
+    if !s.ends_with('\n') {
+        return None;
+    }
     let t: Vec<&str> = s.split_whitespace().collect();
     let [hwnd, x, y, w, h, style, ex_style, target_w, target_h, corner, margin, min, pid] = t[..]
     else {
@@ -75,7 +79,7 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
 
 pub(crate) fn write_state(s: &PipState) -> String {
     format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
         s.hwnd, s.x, s.y, s.w, s.h, s.style, s.ex_style,
         s.target_w, s.target_h, s.corner.as_str(), s.margin, s.min as u8, s.pid
     )

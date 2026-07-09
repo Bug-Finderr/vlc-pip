@@ -10,8 +10,12 @@ $extDir = "$env:APPDATA\vlc\lua\extensions"
 New-Item -ItemType Directory -Force $pipDir | Out-Null
 New-Item -ItemType Directory -Force $extDir | Out-Null
 
-# restore an in-PiP window with the OLD exe before it is replaced (no-op when not in PiP)
-if (Test-Path "$pipDir\pip-helper.exe") { Start-Process "$pipDir\pip-helper.exe" exit -Wait }
+# restore an in-PiP window with the OLD exe before it is replaced - but only while VLC
+# is running: exit also deletes stale state, and a pending close-in-PiP heal record
+# (VLC closed while in PiP, not yet relaunched) must survive the upgrade
+if ((Get-Process vlc -ErrorAction SilentlyContinue) -and (Test-Path "$pipDir\pip-helper.exe")) {
+    Start-Process "$pipDir\pip-helper.exe" exit -Wait
+}
 
 # stop a running daemon so the exe is not locked (gate on the PROCESS: the alive file
 # can be stale after a force-kill, or purged by Storage Sense while the daemon runs)

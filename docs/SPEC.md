@@ -4,7 +4,7 @@ A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player 
 
 Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
-**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1`, `scripts/uninstall.ps1`, and `extension/pip.lua` (descriptor version aside) carry over from v1. Only `pip-helper.exe`'s implementation swaps; every file format and observable behavior below must hold byte-for-byte.
+**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` end-to-end checks plus the unit suite gate every change; observable behavior below is the contract. File formats are internal to this repo since v2.1.2 (§6.1 - the v1 byte-compat era ended when the C# consumer retired) but are still pinned here because the scripts and pip.lua consume them.
 
 ---
 
@@ -107,13 +107,12 @@ shell:startup\VLC PiP Daemon.lnk  ->  pip-helper.exe daemon  (login auto-start, 
 ## 6. Runtime file contracts (all in `%TEMP%`, truncate-write, UTF-8 no BOM)
 
 ### 6.1 `vlc-pip.state` - the PiP state; its VALID existence IS "in PiP"
-Written by Enter only: one whitespace-separated line of exactly 13 tokens (v2.1.2 replaced v1's byte-compatible JSON - the retired C# was the format's only other consumer):
+Written by Enter only: one newline-terminated line of exactly 13 whitespace-separated tokens (v2.1.2 replaced v1's byte-compatible JSON - the retired C# was the format's only other consumer). The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
 ```
-hwnd x y w h style ex_style target_w target_h corner margin min pid
 66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
 Types: `hwnd`/`style`/`ex_style` i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
-- **Any** parse failure (wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. `pid` is the LAST token so a write truncated mid-token fails the owner check instead of poisoning the restore rect.
+- **Any** parse failure (missing trailing newline, wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. The trailing newline is the torn-write sentinel: a truncated write loses it, so a partial line (which could carry a numeric prefix of `pid`) can never parse.
 - **Stale detection (`owns_state`)**: state is live iff `IsWindow(hwnd)` AND `GetWindowThreadProcessId(hwnd) == pid != 0`. Windows recycles HWNDs - IsWindow alone would pass on a foreign window. Stale state is deleted on sight by InPip/Exit/maintain_region (delete failures swallowed: next caller retries).
 
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
@@ -170,7 +169,7 @@ Entering PiP from a fullscreen VLC is the same immediate reshape as any other en
 
 ### maintain_region() - minimal look, converging per-tick (daemon timer + one-shot loop)
 Cross-tick state: previous window rect + child rect + have_prev flag (reset on missing/stale state, no child, and after our own resize).
-1. Load state; missing → reset, return. Stale → reset, delete, return. `Min=false` → return.
+1. Load state; missing → reset, return. Stale → reset, delete, return. `min=0` → return.
 2. Find the video child: first visible child (recursive) whose class starts with `"VLC video main"`. None (playback stopped) → reset, clear region if present, return.
 3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash in v1). Always record current rects.
 4. **Chrome sanity clamp**: chrome = window minus child size; if any dimension is negative or > 300 px → stale rects, return.
@@ -179,7 +178,7 @@ Cross-tick state: previous window rect + child rect + have_prev flag (reset on m
 
 ### Fullscreen prevention (prevent, don't auto-exit; poll-and-snap-back flickers)
 - **Keys** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd` - for vk == F always, and for vk == Esc when the PiP is fullscreen-origin (see above). Key-ups pass.
-- **Clicks** (`WH_MOUSE_LL`) - the rate-limit, exact bookkeeping (statics: last ALLOWED down time+point, swallow_next_up flag):
+- **Clicks** (`WH_MOUSE_LL`) - the rate-limit, exact bookkeeping (last ALLOWED down time+point, swallow_next_up flag):
   - On `WM_LBUTTONDOWN` over the PiP (root ancestor of `WindowFromPoint` == cached hwnd): `burst = (evt.time - last_allowed_time <= GetDoubleClickTime()) && |dx| <= SM_CXDOUBLECLK && |dy| <= SM_CYDOUBLECLK`. Burst → set swallow_next_up, swallow. Else record this down as the new ALLOWED reference and pass.
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
   - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (v1 bug: swallowing only the 2nd click let the OS pair clicks 1+3 - TRIPLE click fullscreened.)
@@ -263,7 +262,7 @@ New in v2.1; everything above is unchanged. No modifier keys and nothing new is 
 ### Gesture contract
 - **Interior drag = free move.** Press inside the visible PiP, drag past the system drag threshold, release: the window follows live and stays where dropped. Free placement survives the region converger (`plan_region` only repositions during a size correction).
 - **Band drag = aspect-locked resize.** A drag starting in the outer 16px band (DPI-scaled: 16 x dpi/96) of the **visible** rect - the region box, not the window rect - resizes live from that edge or corner, opposite side anchored; pure edges keep the perpendicular center fixed. Corners win where bands overlap. Aspect is the window's at drag start; width clamps to 256px min, capped so neither dimension exceeds 80% of the work area.
-- **Release** derives `Corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `TargetW/H` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. The next enter and any convergence-driven re-park use them.
+- **Release** derives `corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `target_w/h` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. The next enter and any convergence-driven re-park use them.
 - **Wheel: never touched.** Plain wheel = VLC volume - Windows ships "scroll inactive windows" on, so this already works over the unfocused PiP - and Ctrl+wheel = subtitle scale. The hook intercepts no wheel message.
 - Fullscreen guards unchanged: burst-swallowed downs never arm a drag.
 
