@@ -227,7 +227,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 - **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- **Install:** `scripts/install.ps1` - builds, restores an in-PiP window with the old exe (upgrades must not strand a stripped window), stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
+- **Install:** `scripts/install.ps1` - builds, restores an in-PiP window with the old exe (upgrades must not strand a stripped window), stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes stale request and heartbeat files, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
 - **Test:** `cargo test` in `helper/` (pure logic: state file, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
@@ -243,7 +243,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 11. Acceptance test checklist
 
-Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, instant fullscreen-origin enter/exit with the controller strip hidden, close-in-PiP reopen heal).
+Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, instant fullscreen-origin enter/exit with the controller strip never rendering (hover and unfocus/refocus) and rendering again after exit, close-in-PiP reopen heal).
 
 Manual (once per release):
 - [ ] View → "PiP Mode" appears after a VLC restart; repeated menu clicks alternate enter/exit.
@@ -277,7 +277,7 @@ Written on every drag release (from the pump, never the hook; the `pip` folder i
 ### Mechanics
 - The mouse hook arms on an **allowed** button-down over the PiP (cursor origin, window + visible rects, zone) and activates past `SM_CX/CYDRAG`; while active it stores the latest cursor position and posts one **coalesced** `WM_APP` drag message. Idle mouse-move cost is one thread-local read, and the hook still never touches the disk.
 - The pump computes the target rect itself (move = start + delta; resize = aspect plan) and applies it with an async `SetWindowPos`. Every message carries a generation counter, so a rapid release-and-repress can't mix a stale message with re-armed state.
-- The minimal look stays live through a resize: each tick re-clips to the start chrome offsets applied to the new size; after release, convergence verifies the region **box** (not just presence) against the actual video child and corrects it.
+- The minimal look stays live through a resize: each coalesced drag message re-clips to the start chrome offsets applied to the new size; after release, convergence verifies the region **box** (not just presence) against the actual video child and corrects it.
 - Drag-end finalizes **from the computed rect** - the async `SetWindowPos` may not have landed in VLC yet, so a fresh `GetWindowRect` would read stale.
 - `maintain_region` is skipped while a drag is active; after a resize, convergence re-clips with at most a ±2px correction.
 
