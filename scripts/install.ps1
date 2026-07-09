@@ -16,7 +16,6 @@ $extDir = "$env:APPDATA\vlc\lua\extensions"
 New-Item -ItemType Directory -Force $pipDir | Out-Null
 New-Item -ItemType Directory -Force $extDir | Out-Null
 
-
 # stop a running daemon so the exe is not locked; gate on the PROCESS - the alive file can be stale
 if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
     Set-Content "$env:TEMP\vlc-pip-request.txt" "stop"
