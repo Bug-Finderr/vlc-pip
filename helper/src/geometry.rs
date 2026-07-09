@@ -1,5 +1,5 @@
 /// Plain rect so this module stays windows-sys-free (native.rs converts at the boundary).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rect {
     pub left: i32,
     pub top: i32,
@@ -37,36 +37,19 @@ impl Corner {
     }
 }
 
-/// Where within the visible PiP a drag started; stored in an AtomicU8 by the hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
+/// Where within the visible PiP a drag started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DragZone {
-    Interior = 0,
-    Left = 1,
-    Right = 2,
-    Top = 3,
-    Bottom = 4,
-    TopLeft = 5,
-    TopRight = 6,
-    BottomLeft = 7,
-    BottomRight = 8,
-}
-
-impl DragZone {
-    pub fn from_u8(v: u8) -> Self {
-        use DragZone::*;
-        match v {
-            1 => Left,
-            2 => Right,
-            3 => Top,
-            4 => Bottom,
-            5 => TopLeft,
-            6 => TopRight,
-            7 => BottomLeft,
-            8 => BottomRight,
-            _ => Interior,
-        }
-    }
+    #[default]
+    Interior,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// Work-area quadrant of the window center. Ties resolve toward Br.

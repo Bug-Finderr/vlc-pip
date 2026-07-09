@@ -61,14 +61,6 @@ mod geometry {
         assert_eq!(classify_zone(463, 135, &vis, 16), DragZone::Interior);
     }
 
-    #[test]
-    fn drag_zone_u8_round_trip() {
-        use DragZone::*;
-        for z in [Interior, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight] {
-            assert_eq!(DragZone::from_u8(z as u8), z);
-        }
-    }
-
     const WORK: Rect = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
 
     fn rc(l: i32, t: i32, r: i32, b: i32) -> Rect {
