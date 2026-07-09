@@ -123,7 +123,7 @@ Single line, no newline, rewritten on start and then every >3000 ms (checked eac
 ```
 {unix_seconds_utc} pid={pid} hotkey={0|1} timer={0|1} kb={0|1} mouse={0|1}
 ```
-Flags = did RegisterHotKey/SetTimer/each SetWindowsHookExW succeed (their failure is NOT fatal - it is only reported here). Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
+`hotkey`/`timer` = did RegisterHotKey/SetTimer succeed at start; `kb`/`mouse` = is each session LL hook CURRENTLY installed (hooks exist only while a PiP session is live - 0 is the normal idle reading). No failure is fatal - it is only reported here. Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
 **Consumer contract (pip.lua)**: reads the leading number with Lua `read("*n")`; alive iff the parse yields nil (mid-truncate read = daemon IS alive, never respawn) OR `abs(os.time() - ts) < 15`. So the line MUST start with the epoch number.
 
 ### 6.4 `vlc-pip-status.json` - `status` mode output (stdout is unreliable for a GUI exe)
@@ -183,15 +183,16 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
   - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (v1 bug: swallowing only the 2nd click let the OS pair clicks 1+3 - TRIPLE click fullscreened.)
   - `GetDoubleClickTime`/`GetSystemMetrics` queried live per event; timestamps are u32 ms with wrapping subtraction.
-- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing `IsWindow`, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
+- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing the owner-PID guard, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
+- **Hooks exist only while a session is live**: after every cache refresh the pump installs/removes both LL hooks on the none↔some transition (idle daemon = zero presence in the system input path). Removal also resets the drag/click cells - a gesture must not outlive its hooks. Sessions started by the hotkey or a request are armed within the same pump iteration; an external one-shot CLI `enter` is armed on the next tick (≤150 ms).
 
 ### Daemon loop
 1. Named mutex `"VlcPipDaemon"` → second instance exits 0 before touching any file.
 2. Discard pre-launch `stop` request (only `stop`).
-3. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`; install both LL hooks. Failures recorded in heartbeat flags only.
-4. Beat once; refresh hook cache once (a daemon restarted while already in PiP must be guarded from the first message).
-5. Pump: `WM_HOTKEY` → Toggle + refresh cache. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), refresh cache, hide the fullscreen controller strip while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
-6. Cleanup on loop exit: unhook both, unregister hotkey, delete the alive file.
+3. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`. Failures recorded in heartbeat flags only. LL hooks are NOT installed here - they follow the session (see above).
+4. Refresh hook cache once and sync hooks (a daemon restarted while already in PiP must be guarded from the first message); beat once.
+5. Pump: `WM_HOTKEY` → Toggle + refresh cache + sync hooks. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), refresh cache, sync hooks, keep the fullscreen controller strip veiled while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
+6. Cleanup on loop exit: unhook if installed, unregister hotkey, delete the alive file.
 
 ---
 

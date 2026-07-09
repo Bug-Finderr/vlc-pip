@@ -12,8 +12,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
     GetSystemMetrics, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
+    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, KBDLLHOOKSTRUCT,
+    MSG, MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
     WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_SYSKEYDOWN, WM_TIMER,
 };
@@ -108,6 +108,36 @@ fn refresh_hook_cache(s: Option<PipState>) {
     }));
 }
 
+/// LL hooks exist only while a session is live: outside a PiP every guard no-ops, yet
+/// the hooks would still context-switch every keystroke and mouse move on the machine
+/// through this process. Runs after each hook-cache refresh; a failed install retries
+/// on the next refresh.
+fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
+    let want = PIP.get().hwnd != 0;
+    let installed = !hooks.0.is_null();
+    if want == installed {
+        return;
+    }
+    if want {
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            hooks.0 = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0);
+            hooks.1 = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+        }
+    } else {
+        unsafe {
+            UnhookWindowsHookEx(hooks.0);
+            UnhookWindowsHookEx(hooks.1);
+        }
+        *hooks = (std::ptr::null_mut(), std::ptr::null_mut());
+        // a gesture must not outlive its hooks: the button-up that would end it is
+        // never seen, and a stuck Moving state would both suppress the converger and
+        // glue the next session's window to a button that is no longer down
+        DRAG.set(Drag::default());
+        CLICK.set(Click::default());
+    }
+}
+
 pub fn run(argv: &[String]) -> i32 {
     // single instance; second instance exits 0 before touching any file
     let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
@@ -125,21 +155,20 @@ pub fn run(argv: &[String]) -> i32 {
         let _ = std::fs::remove_file(&rp);
     }
 
-    let (hot, timer, kb, mouse) = unsafe {
-        let module = GetModuleHandleW(std::ptr::null());
+    let (hot, timer) = unsafe {
         (
             RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
             SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0),
-            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0),
         )
     };
+    let mut hooks: (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
 
     // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
-    // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
-    // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
+    // (pip.lua) check the leading epoch-seconds for freshness. kb/mouse report whether
+    // the session hooks are CURRENTLY installed (SPEC 6.3). Write failures are
+    // swallowed: NEVER let the heartbeat kill the pump.
     let alive = state::alive_path();
-    let beat = |last: &mut Instant| {
+    let beat = |last: &mut Instant, kb: bool, mouse: bool| {
         *last = Instant::now();
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let _ = std::fs::write(&alive, format!(
@@ -147,14 +176,15 @@ pub fn run(argv: &[String]) -> i32 {
             std::process::id(),
             hot as i32,
             timer as i32,
-            (!kb.is_null()) as i32,
-            (!mouse.is_null()) as i32,
+            kb as i32,
+            mouse as i32,
         ));
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
-    beat(&mut last_beat);
     refresh_hook_cache(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
+    sync_hooks(&mut hooks);
+    beat(&mut last_beat, !hooks.0.is_null(), !hooks.1.is_null());
 
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -162,15 +192,17 @@ pub fn run(argv: &[String]) -> i32 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
             refresh_hook_cache(state::load(&state::state_path()));
+            sync_hooks(&mut hooks); // armed before the user can physically click the fresh PiP
         } else if msg.message == WM_TIMER {
             if last_beat.elapsed() > Duration::from_secs(3) {
-                beat(&mut last_beat);
+                beat(&mut last_beat, !hooks.0.is_null(), !hooks.1.is_null());
             }
             poll_request(argv);
             // one state snapshot per tick, shared by the hook cache and the converger;
             // it must reflect a request-triggered toggle within this same tick
             let s = state::load(&state::state_path());
             refresh_hook_cache(s);
+            sync_hooks(&mut hooks);
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its
@@ -192,8 +224,8 @@ pub fn run(argv: &[String]) -> i32 {
     }
 
     unsafe {
-        UnhookWindowsHookEx(kb);
-        UnhookWindowsHookEx(mouse);
+        UnhookWindowsHookEx(hooks.0); // harmless when never installed (null)
+        UnhookWindowsHookEx(hooks.1);
         UnregisterHotKey(std::ptr::null_mut(), 1);
     }
     let _ = std::fs::remove_file(&alive);
