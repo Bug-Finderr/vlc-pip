@@ -365,7 +365,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         && ((m.pt.x - d.origin.0).abs() > GetSystemMetrics(SM_CXDRAG)
                             || (m.pt.y - d.origin.1).abs() > GetSystemMetrics(SM_CYDRAG))
                     {
-                        d.state = if d.zone == geometry::DragZone::Interior {
+                        d.state = if d.zone == (0, 0) {
                             DragState::Moving
                         } else {
                             DragState::Resizing

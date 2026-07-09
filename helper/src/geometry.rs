@@ -37,20 +37,9 @@ impl Corner {
     }
 }
 
-/// Where within the visible PiP a drag started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DragZone {
-    #[default]
-    Interior,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
+/// Where within the visible PiP a drag started, as per-axis signs (-1 low edge, 1 high
+/// edge, 0 neither): (0,0) is the interior = move, anything else resizes from that edge.
+pub type DragZone = (i32, i32);
 
 /// Work-area quadrant of the window center. Ties resolve toward Br.
 pub fn nearest_corner(win: &Rect, work: &Rect) -> Corner {
@@ -66,44 +55,24 @@ pub fn nearest_corner(win: &Rect, work: &Rect) -> Corner {
     }
 }
 
-/// Zone of a point in the visible rect: outer `band` px = resize, else move. Corners win.
+/// Zone of a point in the visible rect: outer `band` px = resize, else move. Corners win
+/// because the axes are independent; the low edge wins where opposite bands overlap.
 pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
-    let l = x < vis.left + band;
-    let r = x >= vis.right - band;
-    let t = y < vis.top + band;
-    let b = y >= vis.bottom - band;
-    match (l, r, t, b) {
-        (true, _, true, _) => DragZone::TopLeft,
-        (_, true, true, _) => DragZone::TopRight,
-        (true, _, _, true) => DragZone::BottomLeft,
-        (_, true, _, true) => DragZone::BottomRight,
-        (true, ..) => DragZone::Left,
-        (_, true, ..) => DragZone::Right,
-        (_, _, true, _) => DragZone::Top,
-        (_, _, _, true) => DragZone::Bottom,
-        _ => DragZone::Interior,
-    }
+    let sx = if x < vis.left + band { -1 } else if x >= vis.right - band { 1 } else { 0 };
+    let sy = if y < vis.top + band { -1 } else if y >= vis.bottom - band { 1 } else { 0 };
+    (sx, sy)
 }
 
 /// New window rect for a live resize drag. The dominant relative delta drives the scale
 /// (edges have one axis by construction); the other dimension follows start's aspect,
 /// including at the clamps. i64 products: screen coords can make i32 overflow.
 pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) -> Rect {
-    use DragZone::*;
     let (w0, h0) = (start.right - start.left, start.bottom - start.top);
     if w0 < 1 || h0 < 1 {
         return *start; // garbage measurement: no-op
     }
-    let dw = match zone {
-        Right | TopRight | BottomRight => dx,
-        Left | TopLeft | BottomLeft => -dx,
-        _ => 0,
-    };
-    let dh = match zone {
-        Bottom | BottomLeft | BottomRight => dy,
-        Top | TopLeft | TopRight => -dy,
-        _ => 0,
-    };
+    // a -1 (low) edge grows when the pointer moves toward negative; 0 = axis not dragged
+    let (dw, dh) = (zone.0 * dx, zone.1 * dy);
     let width_driven = i64::from(dw.abs()) * i64::from(h0) >= i64::from(dh.abs()) * i64::from(w0);
     let min_w = 256;
     let max_w = ((work.right - work.left) * 4 / 5)
@@ -112,17 +81,17 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
     let raw_w = if width_driven { w0 + dw } else { (i64::from(h0 + dh) * i64::from(w0) / i64::from(h0)) as i32 };
     let w = raw_w.clamp(min_w, max_w);
     let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
-    let (left, right) = match zone {
-        Left | TopLeft | BottomLeft => (start.right - w, start.right),
-        Right | TopRight | BottomRight => (start.left, start.left + w),
+    let (left, right) = match zone.0 {
+        -1 => (start.right - w, start.right),
+        1 => (start.left, start.left + w),
         _ => {
             let l = start.left + (w0 - w) / 2;
             (l, l + w)
         }
     };
-    let (top, bottom) = match zone {
-        Top | TopLeft | TopRight => (start.bottom - h, start.bottom),
-        Bottom | BottomLeft | BottomRight => (start.top, start.top + h),
+    let (top, bottom) = match zone.1 {
+        -1 => (start.bottom - h, start.bottom),
+        1 => (start.top, start.top + h),
         _ => {
             let t = start.top + (h0 - h) / 2;
             (t, t + h)
