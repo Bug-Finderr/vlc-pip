@@ -33,7 +33,7 @@ The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal 
 
 - Windows 10/11 x64; VLC 3.x only (3.0.23 verified). VLC 4.0 changes the video window architecture and needs re-validation.
 - While in PiP, the F key and double/triple/spam-clicks cannot fullscreen the video; everything behaves normally outside PiP.
-- Toggling PiP while VLC is fullscreen is instant, and toggling back returns you to fullscreen; VLC's fullscreen controller strip stays hidden while the PiP is up.
+- Toggling PiP while VLC is fullscreen is instant, and toggling back returns you to fullscreen.
 - Security model: the helper's IPC files live in per-user `%TEMP%`, so any same-user process can drive the helper - which grants nothing it couldn't already do directly via Win32. For that reason, never run the helper - daemon or one-shot commands - elevated.
 - Crashes leave a trace at `%TEMP%\vlc-pip-crash.txt`.
 
