@@ -220,7 +220,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 - **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
   Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- **Install:** `scripts/install.ps1` - installs the prebuilt exe from the zip root when no `helper/` source tree is present (a clone always builds - a stray root exe must never shadow the source), else builds; restores an in-PiP window with the old exe (upgrades must not strand a stripped window), stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes stale request and heartbeat files, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
+- **Install:** `scripts/install.ps1` - installs the prebuilt exe from the zip root when no `helper/` source tree is present (a clone always builds - a stray root exe must never shadow the source), else builds; stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes stale request and heartbeat files, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
 - **Test:** `cargo test` in `helper/` (pure logic: state file, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
 - **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
 
