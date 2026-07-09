@@ -358,23 +358,21 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
         return None;
     }
     let cr = window_rect(child)?;
-    unsafe {
-        let mut client: RECT = std::mem::zeroed();
-        let mut origin = POINT { x: 0, y: 0 };
-        if GetClientRect(hw(h), &mut client) == 0 || ClientToScreen(hw(h), &mut origin) == 0 {
-            return None;
-        }
-        let l = cr.left - origin.x;
-        let t = cr.top - origin.y;
-        let r = (origin.x + client.right) - cr.right;
-        let b = (origin.y + client.bottom) - cr.bottom;
-        // no side negative, axis sums in plan_region's envelope: a rect the converger
-        // would forever Skip must never land
-        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && chrome_ok(l + r, t + b) {
-            Some((l, t, r, b))
-        } else {
-            None
-        }
+    let mut client: RECT = unsafe { std::mem::zeroed() };
+    let mut origin = POINT { x: 0, y: 0 };
+    if unsafe { GetClientRect(hw(h), &mut client) == 0 || ClientToScreen(hw(h), &mut origin) == 0 } {
+        return None;
+    }
+    let l = cr.left - origin.x;
+    let t = cr.top - origin.y;
+    let r = (origin.x + client.right) - cr.right;
+    let b = (origin.y + client.bottom) - cr.bottom;
+    // no side negative, axis sums in plan_region's envelope: a rect the converger
+    // would forever Skip must never land
+    if l >= 0 && t >= 0 && r >= 0 && b >= 0 && chrome_ok(l + r, t + b) {
+        Some((l, t, r, b))
+    } else {
+        None
     }
 }
 
@@ -416,28 +414,26 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         // screen RIGHT NOW: veil it before the PiP lands, not a tick later
         veil_fs_controller(pid);
     }
-    unsafe {
-        // WS_MAXIMIZE too: a zoomed window keeps IsZoomed, and Aero snap would then
-        // bounce the PiP back to Qt's normal placement rect
-        SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
-        let wa = work_area(h);
-        let (vx, vy) = geometry::compute_corner(&wa, o.w, o.h, o.corner, o.margin);
-        let (x, y, tw, th) = match chrome {
-            Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
-            None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
-        };
-        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
-        if ok {
-            if let Some((cl, ct, _, _)) = chrome {
-                set_region(h, &geometry::Rect { left: cl, top: ct, right: cl + o.w, bottom: ct + o.h });
-            }
-        } else {
-            // e.g. UIPI vs elevated VLC: don't claim in-PiP
-            SetWindowLongPtrW(hw(h), GWL_STYLE, style);
-            state::try_delete(&state::state_path());
+    // WS_MAXIMIZE too: a zoomed window keeps IsZoomed, and Aero snap would then
+    // bounce the PiP back to Qt's normal placement rect
+    unsafe { SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize)) };
+    let wa = work_area(h);
+    let (vx, vy) = geometry::compute_corner(&wa, o.w, o.h, o.corner, o.margin);
+    let (x, y, tw, th) = match chrome {
+        Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
+        None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
+    };
+    let ok = unsafe { SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0 };
+    if ok {
+        if let Some((cl, ct, _, _)) = chrome {
+            set_region(h, &geometry::Rect { left: cl, top: ct, right: cl + o.w, bottom: ct + o.h });
         }
-        ok
+    } else {
+        // e.g. UIPI vs elevated VLC: don't claim in-PiP
+        unsafe { SetWindowLongPtrW(hw(h), GWL_STYLE, style) };
+        state::try_delete(&state::state_path());
     }
+    ok
 }
 
 // Shared exit/dissolve prefix: drop the minimal-look clip BEFORE restoring the saved
@@ -464,16 +460,14 @@ pub fn exit_pip() -> bool {
     }
     let h = s.hwnd;
     let after = restore_frame(h, s.style, s.ex_style);
-    unsafe {
-        let ok = SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
-        if ok || IsWindow(hw(h)) == 0 {
-            if fs_origin(s.style) {
-                unveil_fs_controller(s.pid); // session over: the restored fullscreen gets its strip back
-            }
-            state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
+    let ok = unsafe { SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0 };
+    if ok || unsafe { IsWindow(hw(h)) } == 0 {
+        if fs_origin(s.style) {
+            unveil_fs_controller(s.pid); // session over: the restored fullscreen gets its strip back
         }
-        ok
+        state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
     }
+    ok
 }
 
 pub fn toggle(o: &PipOptions) -> bool {
@@ -648,28 +642,26 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
     if h2 == 0 {
         return;
     }
-    unsafe {
-        if IsIconic(hw(h2)) != 0 {
-            return; // heal the normal placement once restored - the iconic rect is garbage
-        }
-        let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
-        if MonitorFromRect(&to_win(&target), MONITOR_DEFAULTTONULL).is_null() {
-            state::try_delete(path); // monitor layout changed: VLC's own placement is saner
-            return;
-        }
-        if window_rect(h2) == Some(target) {
-            t.heal_tries = 0;
-            state::try_delete(path); // heal landed and stuck: done
-            return;
-        }
-        t.heal_tries += 1;
-        if t.heal_tries > 40 {
-            t.heal_tries = 0;
-            state::try_delete(path); // not converging: stop fighting the window
-            return;
-        }
-        SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE);
+    if unsafe { IsIconic(hw(h2)) } != 0 {
+        return; // heal the normal placement once restored - the iconic rect is garbage
     }
+    let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
+    if unsafe { MonitorFromRect(&to_win(&target), MONITOR_DEFAULTTONULL) }.is_null() {
+        state::try_delete(path); // monitor layout changed: VLC's own placement is saner
+        return;
+    }
+    if window_rect(h2) == Some(target) {
+        t.heal_tries = 0;
+        state::try_delete(path); // heal landed and stuck: done
+        return;
+    }
+    t.heal_tries += 1;
+    if t.heal_tries > 40 {
+        t.heal_tries = 0;
+        state::try_delete(path); // not converging: stop fighting the window
+        return;
+    }
+    unsafe { SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE) };
 }
 
 #[derive(Debug, PartialEq, Eq)]
