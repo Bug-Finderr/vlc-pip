@@ -7,13 +7,13 @@ use crate::geometry::Corner;
 // against HWND recycling. A VALID file on disk == "in PiP".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub style: i64,
-    pub ex_style: i64,
+    pub style: isize,
+    pub ex_style: isize,
     pub target_w: i32,
     pub target_h: i32,
     pub corner: Corner,
@@ -105,7 +105,7 @@ pub fn consume_request(path: &Path) -> Option<String> {
 // ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
 
 pub struct StatusInfo {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,

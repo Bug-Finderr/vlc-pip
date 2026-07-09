@@ -94,12 +94,11 @@ fn refresh_state(s: Option<PipState>) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
-    let s = s.filter(native::owns_state);
-    PIP.set(Pip {
-        hwnd: s.map_or(0, |s| s.hwnd as isize),
-        fs: s.is_some_and(|s| native::fs_origin(s.style)),
-        pid: s.map_or(0, |s| s.pid),
-    });
+    PIP.set(s.filter(native::owns_state).map_or(Pip::default(), |s| Pip {
+        hwnd: s.hwnd,
+        fs: native::fs_origin(s.style),
+        pid: s.pid,
+    }));
 }
 
 pub fn run(argv: &[String]) -> i32 {

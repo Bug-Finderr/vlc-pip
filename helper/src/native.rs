@@ -122,7 +122,7 @@ pub fn find_player() -> isize {
 // app. Handle validity alone would pass and we'd reshape a foreign window; require the
 // owner PID recorded at Enter (a destroyed or recycled HWND yields 0 or a foreign pid).
 pub fn owns_state(s: &PipState) -> bool {
-    s.pid != 0 && window_owner(s.hwnd as isize) == s.pid
+    s.pid != 0 && window_owner(s.hwnd) == s.pid
 }
 
 // Read-only: a stale state here may be a pending reopen-heal record whose lifecycle
@@ -152,8 +152,8 @@ pub fn work_area(h: isize) -> geometry::Rect {
 
 /// Was this PiP taken from a fullscreen VLC? The saved pre-PiP style tells (caption
 /// fully absent). Drives the Esc swallow, the strip hiding, and the heal skip.
-pub fn fs_origin(style: i64) -> bool {
-    style as isize & WS_CAPTION as isize != WS_CAPTION as isize
+pub fn fs_origin(style: isize) -> bool {
+    style & WS_CAPTION as isize != WS_CAPTION as isize
 }
 
 /// Owner PID (0 when the window is gone).
@@ -328,7 +328,7 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
     if !owns_state(&s) {
         return; // VLC died mid-drag: next tick's maintain_region cleans up
     }
-    let work = work_area(s.hwnd as isize);
+    let work = work_area(s.hwnd);
     s.corner = geometry::nearest_corner(fin, &work);
     if resized {
         let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
@@ -383,13 +383,13 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     let pid = window_owner(h);
     // save state FIRST, so a failed save can never leave a mutated window with no restore data
     let s = PipState {
-        hwnd: h as i64,
+        hwnd: h,
         x: r.left,
         y: r.top,
         w: r.right - r.left,
         h: r.bottom - r.top,
-        style: style as i64,
-        ex_style: ex as i64,
+        style,
+        ex_style: ex,
         target_w: o.w,
         target_h: o.h,
         corner: o.corner,
@@ -403,7 +403,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     // chrome measured pre-strip lets enter land in ONE SetWindowPos at the final
     // chrome-compensated rect with the region already applied (no grow-then-clip flash)
     let chrome = if o.min { client_chrome(h) } else { None };
-    if fs_origin(style as i64) {
+    if fs_origin(style) {
         // the user was likely just hovering the fullscreen video, so the strip is on
         // screen RIGHT NOW: veil it before the PiP lands, not a tick later
         veil_fs_controller(pid);
@@ -435,13 +435,13 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
 // Shared exit/dissolve prefix: drop the minimal-look clip BEFORE restoring the saved
 // styles. WS_EX_TOPMOST only changes via SetWindowPos, so the returned after-handle
 // (honoring the user's own always-on-top) goes into the caller's SetWindowPos.
-fn restore_frame(h: isize, style: isize, ex_style: i64) -> HWND {
+fn restore_frame(h: isize, style: isize, ex_style: isize) -> HWND {
     unsafe {
         SetWindowRgn(hw(h), std::ptr::null_mut(), 1);
         SetWindowLongPtrW(hw(h), GWL_STYLE, style);
-        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex_style as isize);
+        SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex_style);
     }
-    if ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST }
+    if ex_style & (WS_EX_TOPMOST as isize) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST }
 }
 
 pub fn exit_pip() -> bool {
@@ -454,8 +454,8 @@ pub fn exit_pip() -> bool {
         state::try_delete(&path); // stale: VLC gone or hwnd recycled
         return false;
     }
-    let h = s.hwnd as isize;
-    let after = restore_frame(h, s.style as isize, s.ex_style);
+    let h = s.hwnd;
+    let after = restore_frame(h, s.style, s.ex_style);
     unsafe {
         let ok = SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
         if ok || IsWindow(hw(h)) == 0 {
@@ -482,7 +482,7 @@ pub fn status() -> String {
     let r = window_rect(h).unwrap_or_default();
     let (style, ex) = styles(h);
     state::status_json(Some(&StatusInfo {
-        hwnd: h as i64,
+        hwnd: h,
         x: r.left,
         y: r.top,
         w: r.right - r.left,
@@ -524,8 +524,8 @@ impl RegionTracker {
 /// the session: frame back at Qt's chosen rect, state dropped - the saved fullscreen
 /// rect must never be restored onto an internally windowed VLC.
 fn dissolve_fs_pip(s: &PipState, path: &Path) {
-    let h = s.hwnd as isize;
-    let after = restore_frame(h, s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize, s.ex_style);
+    let h = s.hwnd;
+    let after = restore_frame(h, s.style | (WS_CAPTION | WS_THICKFRAME) as isize, s.ex_style);
     unsafe {
         SetWindowPos(hw(h), after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
     }
@@ -551,7 +551,7 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
     }
     t.heal_tries = 0; // a live owned PiP ends any interrupted heal cleanly
     t.heal_wait = 0;
-    let h = s.hwnd as isize;
+    let h = s.hwnd;
     let child = find_video_child(h);
     let wr = window_rect(h).unwrap_or_default(); // one snapshot serves watch and debounce
 

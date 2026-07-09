@@ -141,10 +141,10 @@ mod native {
     #[test]
     fn fs_origin_requires_both_caption_bits_absent() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
-        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
+        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as isize)); // ordinary windowed VLC
         assert!(fs_origin(0)); // fullscreen: caption fully absent
         // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
-        assert!(fs_origin(WS_BORDER as i64));
+        assert!(fs_origin(WS_BORDER as isize));
     }
 
     fn rect(l: i32, t: i32, r: i32, b: i32) -> geometry::Rect {
