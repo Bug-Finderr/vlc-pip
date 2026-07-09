@@ -52,6 +52,15 @@ fn class_starts_with(h: HWND, prefix: &str) -> bool {
     String::from_utf16_lossy(&buf[..n as usize]).starts_with(prefix)
 }
 
+/// Owner PID (0 when the window is gone).
+fn window_owner(h: isize) -> u32 {
+    let mut p = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hw(h), &mut p);
+    }
+    p
+}
+
 pub fn enable_dpi_awareness() {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -131,37 +140,17 @@ pub fn in_pip() -> bool {
     state::load(&state::state_path()).is_some_and(|s| owns_state(&s))
 }
 
-// ---- enter / exit / toggle ----------------------------------------------------------
-
-pub fn work_area(h: isize) -> geometry::Rect {
-    unsafe {
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = size_of::<MONITORINFO>() as u32;
-        GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
-        from_win(&mi.rcWork)
-    }
-}
-
 // ---- fullscreen-origin PiP -----------------------------------------------------------
 // PiP from a fullscreen VLC is the same instant reshape; VLC's internal fullscreen state
 // stays ON for the whole session (Qt only restores its windowed geometry from an
 // UNTOUCHED fullscreen window - leaving fullscreen first or after desyncs it, SPEC 7).
 // Exit restores the saved fullscreen style+rect verbatim. Meanwhile the controller strip
-// is kept hidden each tick and the keyboard hook swallows Esc/F.
+// is kept veiled each tick and the keyboard hook swallows Esc/F.
 
 /// Was this PiP taken from a fullscreen VLC? The saved pre-PiP style tells (caption
-/// fully absent). Drives the Esc swallow, the strip hiding, and the heal skip.
+/// fully absent). Drives the Esc swallow, the strip veil, and the heal skip.
 pub fn fs_origin(style: isize) -> bool {
     style & WS_CAPTION as isize != WS_CAPTION as isize
-}
-
-/// Owner PID (0 when the window is gone).
-pub fn window_owner(h: isize) -> u32 {
-    let mut p = 0u32;
-    unsafe {
-        GetWindowThreadProcessId(hw(h), &mut p);
-    }
-    p
 }
 
 fn for_each_fs_controller(pid: u32, f: impl Fn(HWND)) {
@@ -210,8 +199,6 @@ pub fn unveil_fs_controller(pid: u32) {
 }
 
 // ---- window / region primitives -------------------------------------------------------
-// VLC 3.x hosts the video in a native child whose class starts with "VLC video main";
-// the minimal look clips the top-level window to it via SetWindowRgn.
 
 // windows-sys RECT <-> geometry::Rect, converted only here (geometry stays FFI-free)
 fn from_win(r: &RECT) -> geometry::Rect {
@@ -236,6 +223,17 @@ fn styles(h: isize) -> (isize, isize) {
     unsafe { (GetWindowLongPtrW(hw(h), GWL_STYLE), GetWindowLongPtrW(hw(h), GWL_EXSTYLE)) }
 }
 
+pub fn work_area(h: isize) -> geometry::Rect {
+    unsafe {
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
+        from_win(&mi.rcWork)
+    }
+}
+
+// VLC 3.x hosts the video in a native child whose class starts with "VLC video main";
+// the minimal look clips the top-level window to it via SetWindowRgn.
 fn find_video_child(top: isize) -> isize {
     let mut found = 0isize;
     enum_children(top, |c| {
@@ -348,6 +346,8 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
     let _ = state::save(&s, &path); // failure swallowed: the gesture already holds on screen
     crate::options::save_config(s.target_w, s.target_h, s.corner);
 }
+
+// ---- enter / exit / toggle ------------------------------------------------------------
 
 // Client-relative chrome around the video child (menu above, controller below): Qt
 // widgets in the CLIENT area, so the offsets survive the border strip and predict where
