@@ -52,10 +52,8 @@ pub fn try_delete(path: &Path) {
     let _ = std::fs::remove_file(path); // transient lock: next caller retries
 }
 
-// One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
-// reads as None = "not in PiP". The trailing newline is the torn-write sentinel: a
-// truncated write loses it, so a partial line can never parse (a numeric PREFIX of the
-// last token would otherwise pass and misroute a live PiP into the heal path).
+// One whitespace line of exactly 13 tokens; any deviation reads as None. The trailing
+// newline is the torn-write sentinel: a truncated write can never parse (SPEC 6.1).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {
     if !s.ends_with('\n') {
         return None;
@@ -111,28 +109,4 @@ pub fn consume_request(path: &Path) -> Option<String> {
     std::fs::remove_file(path).ok()?; // couldn't delete: leave the command for next poll
     let cmd = cmd.trim();
     if cmd.is_empty() { None } else { Some(cmd.to_string()) }
-}
-
-// ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
-
-pub struct StatusInfo {
-    pub hwnd: isize,
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-    pub caption: bool,
-    pub topmost: bool,
-    pub in_pip: bool,
-    pub minimal: bool,
-}
-
-pub fn status_json(s: Option<&StatusInfo>) -> String {
-    match s {
-        None => r#"{"found":false}"#.to_string(),
-        Some(s) => format!(
-            r#"{{"found":true,"hwnd":{},"x":{},"y":{},"w":{},"h":{},"caption":{},"topmost":{},"inPip":{},"minimal":{}}}"#,
-            s.hwnd, s.x, s.y, s.w, s.h, s.caption, s.topmost, s.in_pip, s.minimal
-        ),
-    }
 }
