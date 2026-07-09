@@ -37,13 +37,13 @@ flowchart LR
     K & M -.->|read pump-thread cache,<br>never the disk| CACHE["cached HWND"]
 ```
 
-Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
+Key mechanisms, each earned by a real bug (details in [SPEC.md](SPEC.md) §7-8):
 
 - **Fullscreen prevention is preventive, not reactive.** A poll-and-snap-back guard flickers; instead the mouse hook swallows every button-down within double-click time/rect of the last *allowed* down, so the OS can never synthesize `WM_LBUTTONDBLCLK` (swallowing only the 2nd click let clicks 1+3 pair - triple-click fullscreened).
 - **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread.
 - **Hooks exist only while a PiP session is live.** Outside a session every guard no-ops, so the daemon installs the LL hooks when a session appears and removes them when it ends - an idle daemon has zero presence in the system input path.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
-- **The heartbeat file** (`vlc-pip-daemon.alive`, epoch + arming flags, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
+- **The heartbeat file** (`vlc-pip-daemon.alive`, the epoch, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
 - **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape as any enter - VLC's internal fullscreen state simply stays on for the whole PiP session (clearing it first cost the user ~1s of dead screen, and Qt only restores its windowed geometry from an untouched fullscreen window). The daemon veils VLC's fullscreen controller strip with an empty window region - unrenderable no matter how often VLC re-shows it on hover or refocus, unveiled when the session ends - and the keyboard hook swallows Esc alongside F, so input cannot trip Qt's state underneath the PiP. Exit restores the saved fullscreen style and rect verbatim: the user came from fullscreen and gets fullscreen back, internally consistent. When playback ends or stops, VLC leaves fullscreen by itself - the daemon detects Qt's re-layout and dissolves the session into a plain windowed VLC, exactly where stock VLC would land ([SPEC.md](SPEC.md) §7).
 - **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms a gesture (interior = free move, outer 16px band of the visible rect = aspect-locked resize); the hook only stores the latest cursor position and posts one coalesced `WM_APP` message with a generation counter (a rapid release-and-repress can't mix stale deltas), and the pump computes and applies the rect - finalizing on release from its own computed rect, never `GetWindowRect` after the async `SetWindowPos` - and persists size + nearest corner to `config.txt`. Full contract: [SPEC.md](SPEC.md) §12.
 - **Close-in-PiP heal (v2.1).** VLC closed while in PiP saves the PiP geometry as its own; the daemon keeps the stale state as a pending-restore record and re-applies the pre-PiP rect once a new player window appears, deleting the state only when the rect sticks ([SPEC.md](SPEC.md) §12).
@@ -58,7 +58,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 | Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
-CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
+CLI modes: `exit|status|daemon` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
 
 ## Development
 
@@ -67,4 +67,4 @@ cargo test --manifest-path helper\Cargo.toml          # pure-logic unit tests
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # end-to-end against live VLC
 ```
 
-The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the v1-earned gotchas that must not regress.
+The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the gotchas that must not regress.

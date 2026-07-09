@@ -1,5 +1,5 @@
 /// Plain rect so this module stays windows-sys-free (native.rs converts at the boundary).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Rect {
     pub left: i32,
     pub top: i32,
@@ -7,13 +7,12 @@ pub struct Rect {
     pub bottom: i32,
 }
 
-/// The four PiP corners; anything unknown pins to Br (v1 semantics, same fallback everywhere).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The four PiP corners; anything unknown pins to Br.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Corner {
     Tl,
     Tr,
     Bl,
-    #[default]
     Br,
 }
 
@@ -37,8 +36,7 @@ impl Corner {
     }
 }
 
-/// Where within the visible PiP a drag started, as per-axis signs (-1 low edge, 1 high
-/// edge, 0 neither): (0,0) is the interior = move, anything else resizes from that edge.
+/// Per-axis drag-start signs (-1 low edge, 1 high, 0 neither): (0,0) = interior move, else resize from that edge.
 pub type DragZone = (i32, i32);
 
 /// Work-area quadrant of the window center. Ties resolve toward Br.
@@ -55,17 +53,14 @@ pub fn nearest_corner(win: &Rect, work: &Rect) -> Corner {
     }
 }
 
-/// Zone of a point in the visible rect: outer `band` px = resize, else move. Corners win
-/// because the axes are independent; the low edge wins where opposite bands overlap.
+/// Outer `band` px = resize, else move; the low edge wins where opposite bands overlap.
 pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
     let sx = if x < vis.left + band { -1 } else if x >= vis.right - band { 1 } else { 0 };
     let sy = if y < vis.top + band { -1 } else if y >= vis.bottom - band { 1 } else { 0 };
     (sx, sy)
 }
 
-/// New window rect for a live resize drag. The dominant relative delta drives the scale
-/// (edges have one axis by construction); the other dimension follows start's aspect,
-/// including at the clamps. i64 products: screen coords can make i32 overflow.
+/// Dominant relative delta drives the scale; the other axis follows start's aspect even at the clamps (i64: screen coords overflow i32).
 pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) -> Rect {
     let (w0, h0) = (start.right - start.left, start.bottom - start.top);
     if w0 < 1 || h0 < 1 {
@@ -100,9 +95,7 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
     Rect { left, top, right, bottom }
 }
 
-/// Window-relative region that keeps the minimal look live through a resize drag: the
-/// per-side chrome measured at drag start, applied to the target size. None when the
-/// target has shrunk below the chrome (an inverted box must not clip).
+/// Keeps the minimal look live through a resize drag; None when the target shrank below the drag-start chrome.
 pub fn resize_clip(start: &Rect, vis: &Rect, target: &Rect) -> Option<Rect> {
     let c = Rect {
         left: vis.left - start.left,
@@ -128,19 +121,17 @@ pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) 
 
 // ---- minimal-look convergence planning (applied by native::maintain_region) -----------
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum RegionPlan {
     Skip,
     Resize { x: i32, y: i32, w: i32, h: i32 },
     Clip(Rect),
 }
 
-// enter's measurement and the converger MUST share the bound: a chrome enter accepts
-// but plan_region skips would land a rect the converger fights forever.
+// enter's chrome bound and the converger's MUST match, else enter can land a rect the converger fights forever
 pub(crate) const MAX_CHROME: i32 = 300;
 
-/// Target sizes pinned at every parse boundary (options and state file): keeps
-/// target + chrome away from i32 overflow, which release builds silently wrap (SPEC 6.1).
+/// Pinned at every parse boundary: keeps target + chrome away from i32 overflow, which release builds silently wrap (SPEC 6.1).
 pub(crate) fn target_ok(n: i32) -> bool {
     (1..=16_384).contains(&n)
 }
@@ -150,9 +141,7 @@ pub(crate) fn chrome_ok(w: i32, h: i32) -> bool {
     (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
 }
 
-// Pure planning math for the minimal-look convergence: resize grows by chrome so the
-// VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
-// child area. `work` is lazy - only the resize branch needs its two user32 calls.
+// Resize grows by chrome so the VIDEO is exactly target WxH at the corner; `work` is lazy - only the resize branch needs it.
 pub(crate) fn plan_region(
     wr: &Rect, cr: &Rect, target_w: i32, target_h: i32,
     corner: Corner, margin: i32, work: impl FnOnce() -> Rect,
@@ -169,12 +158,10 @@ pub(crate) fn plan_region(
     if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
         let wa = work();
         let (vx, vy) = compute_corner(&wa, target_w, target_h, corner, margin);
-        // targets pass target_ok at both parse boundaries and chrome passed chrome_ok,
-        // so target + chrome can neither underflow nor overflow
+        // target_ok (both parse boundaries) + chrome_ok bound both terms: the sum cannot overflow
         let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
         if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
-            // already at the computed rect but the child never re-fit: re-issuing the
-            // no-op resize would reset the debounce every tick and loop forever
+            // already at the computed rect: re-issuing the no-op resize would reset the debounce every tick and loop forever
             return RegionPlan::Skip;
         }
         return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };

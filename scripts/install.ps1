@@ -1,11 +1,8 @@
-# Installs VLC PiP: helper exe, Lua extension, login autostart, and starts the daemon.
-# Release zips ship a prebuilt pip-helper.exe at the root; a source clone builds it.
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $exeSrc = "$root\pip-helper.exe"
 if ((Test-Path $exeSrc) -and -not (Test-Path "$root\helper\Cargo.toml")) {
-    # no source tree = release zip: install the shipped exe. A clone always builds -
-    # a stray root exe must never silently shadow the source.
+    # no source tree = release zip; a clone always builds - a stray root exe must never shadow the source
     Write-Host "Installing prebuilt pip-helper.exe"
 } else {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "cargo not found - install Rust (MSVC toolchain) from https://rustup.rs" }
@@ -19,15 +16,7 @@ $extDir = "$env:APPDATA\vlc\lua\extensions"
 New-Item -ItemType Directory -Force $pipDir | Out-Null
 New-Item -ItemType Directory -Force $extDir | Out-Null
 
-# restore an in-PiP window with the OLD exe before it is replaced - but only while VLC
-# is running: exit also deletes stale state, and a pending close-in-PiP heal record
-# (VLC closed while in PiP, not yet relaunched) must survive the upgrade
-if ((Get-Process vlc -ErrorAction SilentlyContinue) -and (Test-Path "$pipDir\pip-helper.exe")) {
-    Start-Process "$pipDir\pip-helper.exe" exit -Wait
-}
-
-# stop a running daemon so the exe is not locked (gate on the PROCESS: the alive file
-# can be stale after a force-kill, or purged by Storage Sense while the daemon runs)
+# stop a running daemon so the exe is not locked; gate on the PROCESS - the alive file can be stale
 if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
     Set-Content "$env:TEMP\vlc-pip-request.txt" "stop"
     $deadline = (Get-Date).AddSeconds(5)
@@ -35,8 +24,7 @@ if (Get-Process pip-helper -ErrorAction SilentlyContinue) {
     $left = Get-Process pip-helper -ErrorAction SilentlyContinue
     if ($left) { $left | Stop-Process -Force -Confirm:$false; $left | Wait-Process -Timeout 3 -ErrorAction SilentlyContinue }
 }
-# a stale request (an unconsumed "stop") would make the fresh daemon act on it within 150ms;
-# a stale heartbeat (survives any force-kill) would make the start verification below vacuous
+# a stale "stop" would kill the fresh daemon within 150ms; a stale heartbeat makes the start check vacuous
 Remove-Item "$env:TEMP\vlc-pip-request.txt", "$env:TEMP\vlc-pip-daemon.alive" -Force -ErrorAction SilentlyContinue
 
 Copy-Item $exeSrc "$pipDir\pip-helper.exe" -Force

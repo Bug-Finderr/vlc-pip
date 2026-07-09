@@ -2,10 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::geometry::Corner;
 
-// The PiP state: x..ex_style restore the window; target_w..min are the options in
-// effect at Enter (daemon and one-shot CLI converge on the same geometry); pid guards
-// against HWND recycling. A VALID file on disk == "in PiP".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A VALID file on disk == "in PiP"; x..ex_style restore the window, target_w..min are the options in
+// effect at Enter, pid guards against HWND recycling.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PipState {
     pub hwnd: isize,
     pub x: i32,
@@ -22,8 +21,7 @@ pub struct PipState {
     pub pid: u32,
 }
 
-/// %TEMP%\{name} for every IPC file (all five SPEC section 6 names live in this file;
-/// pip.lua and the scripts hardcode them - frozen).
+/// %TEMP%\{name} for every IPC file; pip.lua and the scripts hardcode the names - frozen (SPEC 6).
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
@@ -52,8 +50,7 @@ pub fn try_delete(path: &Path) {
     let _ = std::fs::remove_file(path); // transient lock: next caller retries
 }
 
-// One whitespace line of exactly 13 tokens; any deviation reads as None. The trailing
-// newline is the torn-write sentinel: a truncated write can never parse (SPEC 6.1).
+// The trailing newline is the torn-write sentinel: a truncated write can never parse (SPEC 6.1).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {
     if !s.ends_with('\n') {
         return None;
@@ -71,8 +68,7 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         h: h.parse().ok()?,
         style: style.parse().ok()?,
         ex_style: ex_style.parse().ok()?,
-        // same pin as options::parse_options: a hand-edited target outside 1..=16384
-        // must read as no-state, not reach the converger
+        // same pin as parse_options: a hand-edited target outside 1..=16384 must read as no-state
         target_w: target_w.parse().ok().filter(|&n| crate::geometry::target_ok(n))?,
         target_h: target_h.parse().ok().filter(|&n| crate::geometry::target_ok(n))?,
         corner: Corner::parse(corner),
