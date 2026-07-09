@@ -110,31 +110,35 @@ fn refresh_hook_cache(s: Option<PipState>) {
 
 /// LL hooks exist only while a session is live: outside a PiP every guard no-ops, yet
 /// the hooks would still context-switch every keystroke and mouse move on the machine
-/// through this process. Runs after each hook-cache refresh; a failed install retries
-/// on the next refresh.
+/// through this process. Runs after each hook-cache refresh, per slot - only null
+/// slots install (a failed install retries next refresh, and a live handle is never
+/// overwritten and leaked), only non-null slots unhook.
 fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
-    let want = PIP.get().hwnd != 0;
-    let installed = !hooks.0.is_null();
-    if want == installed {
-        return;
-    }
-    if want {
+    if PIP.get().hwnd != 0 {
         unsafe {
             let module = GetModuleHandleW(std::ptr::null());
-            hooks.0 = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0);
-            hooks.1 = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+            if hooks.0.is_null() {
+                hooks.0 = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0);
+            }
+            if hooks.1.is_null() {
+                hooks.1 = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+            }
         }
-    } else {
-        unsafe {
-            UnhookWindowsHookEx(hooks.0);
-            UnhookWindowsHookEx(hooks.1);
+    } else if !hooks.0.is_null() || !hooks.1.is_null() {
+        for h in [hooks.0, hooks.1] {
+            if !h.is_null() {
+                unsafe { UnhookWindowsHookEx(h) };
+            }
         }
         *hooks = (std::ptr::null_mut(), std::ptr::null_mut());
         // a gesture must not outlive its hooks: the button-up that would end it is
         // never seen, and a stuck Moving state would both suppress the converger and
-        // glue the next session's window to a button that is no longer down
+        // glue the next session's window to a button that is no longer down. The
+        // click cell only clears its swallow flag - the last-allowed-down reference
+        // must survive, or a toggle-retoggle inside double-click time lets the OS
+        // pair a pre-teardown click with a fresh one into WM_LBUTTONDBLCLK.
         DRAG.set(Drag::default());
-        CLICK.set(Click::default());
+        CLICK.set(Click { swallow_next_up: false, ..CLICK.get() });
     }
 }
 

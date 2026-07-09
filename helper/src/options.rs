@@ -18,8 +18,9 @@ impl Default for PipOptions {
 
 pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions {
     let mut o = PipOptions::default();
-    // w/h pinned positive: 0/negative would park an invisible topmost window
-    let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| n > 0);
+    // w/h pinned to 1..=16384: 0/negative would park an invisible topmost window, and
+    // huge values would overflow the converger's target+chrome math
+    let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| crate::geometry::target_ok(n));
     for a in args {
         let Some(i) = a.find('=') else { continue };
         let (k, v) = (&a[..i], &a[i + 1..]);

@@ -380,6 +380,13 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
+    // overwriting a stale record consumes it, like exit and heal do - a fullscreen-origin
+    // one may have left a veiled strip on a still-running VLC (recycled hwnd): unveil it
+    if let Some(old) = state::load(&state::state_path())
+        && fs_origin(old.style)
+    {
+        unveil_fs_controller(old.pid);
+    }
     // restore FIRST: the off-screen iconic rect must never become the restore state
     if unsafe { IsIconic(hw(h)) } != 0 {
         unsafe { ShowWindow(hw(h), SW_RESTORE) };
@@ -431,6 +438,9 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     } else {
         // e.g. UIPI vs elevated VLC: don't claim in-PiP
         unsafe { SetWindowLongPtrW(hw(h), GWL_STYLE, style) };
+        if fs_origin(style) {
+            unveil_fs_controller(pid); // the rollback ends the session: no veil may outlive it
+        }
         state::try_delete(&state::state_path());
     }
     ok

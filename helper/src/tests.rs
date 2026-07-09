@@ -222,9 +222,12 @@ mod options {
     }
 
     #[test]
-    fn non_positive_w_h_ignored() {
+    fn out_of_range_w_h_ignored() {
         let o = parse_options(["w=0", "h=-500"]);
         assert_eq!((o.w, o.h), (480, 270));
+        let big = parse_options(["w=16385", "h=2147483647"]);
+        assert_eq!((big.w, big.h), (480, 270)); // above the 16384 pin: overflow-proof
+        assert_eq!(parse_options(["w=16384"]).w, 16384); // the boundary itself is valid
     }
 
     #[test]
@@ -317,8 +320,9 @@ mod state {
         let extra = FULL.replace("12345\n", "12345 7\n"); // 14 tokens
         let bad_num = FULL.replace("349110272", "wide");
         let bad_min = FULL.replace(" 1 12345", " yes 12345");
-        let bad_target = FULL.replace(" 480 270 br ", " -500 270 br "); // targets pinned positive
-        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min, &bad_target] {
+        let bad_target = FULL.replace(" 480 270 br ", " -500 270 br "); // targets pinned 1..=16384
+        let big_target = FULL.replace(" 480 270 br ", " 2147483647 270 br "); // would overflow target+chrome
+        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min, &bad_target, &big_target] {
             assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
     }

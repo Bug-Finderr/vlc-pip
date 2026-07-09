@@ -3,7 +3,9 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 $exeSrc = "$root\pip-helper.exe"
-if (Test-Path $exeSrc) {
+if ((Test-Path $exeSrc) -and -not (Test-Path "$root\helper\Cargo.toml")) {
+    # no source tree = release zip: install the shipped exe. A clone always builds -
+    # a stray root exe must never silently shadow the source.
     Write-Host "Installing prebuilt pip-helper.exe"
 } else {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw "cargo not found - install Rust (MSVC toolchain) from https://rustup.rs" }

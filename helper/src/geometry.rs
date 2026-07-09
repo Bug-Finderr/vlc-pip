@@ -171,6 +171,13 @@ pub(crate) enum RegionPlan {
 // would land a rect the converger fights forever.
 pub(crate) const MAX_CHROME: i32 = 300;
 
+/// Target sizes are pinned to this at every parse boundary (options and state file).
+/// An 8K display is 7680 wide, so past this is corrupt or hostile input - and it keeps
+/// `target + chrome` far from i32 overflow, which release builds would silently wrap.
+pub(crate) fn target_ok(n: i32) -> bool {
+    (1..=16_384).contains(&n)
+}
+
 /// Per-axis chrome sums: negative or huge = stale rects from VLC's async re-layout.
 pub(crate) fn chrome_ok(w: i32, h: i32) -> bool {
     (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
@@ -195,8 +202,8 @@ pub(crate) fn plan_region(
     if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
         let wa = work();
         let (vx, vy) = compute_corner(&wa, target_w, target_h, corner, margin);
-        // targets are pinned positive at both parse boundaries (options + state file),
-        // and chrome is non-negative here, so target + chrome cannot underflow
+        // targets pass target_ok at both parse boundaries and chrome passed chrome_ok,
+        // so target + chrome can neither underflow nor overflow
         let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
         if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
             // already at the computed rect but the child never re-fit: re-issuing the
