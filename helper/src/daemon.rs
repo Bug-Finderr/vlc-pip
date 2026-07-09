@@ -97,7 +97,7 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn refresh_state(s: Option<PipState>) {
+fn refresh_hook_cache(s: Option<PipState>) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
@@ -138,7 +138,7 @@ pub fn run(argv: &[String]) -> i32 {
     // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
     // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
     // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
-    let alive = state::temp_path("vlc-pip-daemon.alive");
+    let alive = state::alive_path();
     let beat = |last: &mut Instant| {
         *last = Instant::now();
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -154,14 +154,14 @@ pub fn run(argv: &[String]) -> i32 {
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
     beat(&mut last_beat);
-    refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
+    refresh_hook_cache(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
 
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            refresh_state(state::load(&state::state_path()));
+            refresh_hook_cache(state::load(&state::state_path()));
         } else if msg.message == WM_TIMER {
             if last_beat.elapsed() > Duration::from_secs(3) {
                 beat(&mut last_beat);
@@ -170,7 +170,7 @@ pub fn run(argv: &[String]) -> i32 {
             // one state snapshot per tick, shared by the hook cache and the converger;
             // it must reflect a request-triggered toggle within this same tick
             let s = state::load(&state::state_path());
-            refresh_state(s);
+            refresh_hook_cache(s);
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its

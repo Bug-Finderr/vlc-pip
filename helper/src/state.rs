@@ -22,13 +22,22 @@ pub struct PipState {
     pub pid: u32,
 }
 
-/// %TEMP%\{name} for every IPC file.
-pub fn temp_path(name: &str) -> PathBuf {
+/// %TEMP%\{name} for every IPC file (all five SPEC section 6 names live in this file;
+/// pip.lua and the scripts hardcode them - frozen).
+fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
 pub fn state_path() -> PathBuf {
     temp_path("vlc-pip.state")
+}
+
+pub fn alive_path() -> PathBuf {
+    temp_path("vlc-pip-daemon.alive")
+}
+
+pub fn crash_path() -> PathBuf {
+    temp_path("vlc-pip-crash.txt")
 }
 
 pub fn load(path: &Path) -> Option<PipState> {
