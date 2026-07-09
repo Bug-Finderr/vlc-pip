@@ -21,15 +21,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
-// Everything the hooks touch lives on the pump thread - LL hook callbacks dispatch on
-// the thread that installed them (SPEC R7) - so plain Cells hold all hook state, and
-// reads and writes move WHOLE structs: a queued message can never mix stale fields with
-// fresh ones. Hooks still never touch the disk (LowLevelHooksTimeout would silently
-// remove them); the cells are refreshed by the pump, and stale-file DELETION stays in
-// native. The one atomic is for the panic hook, which can fire on any thread:
-// true while this process owns the heartbeat file, so a daemon crash deletes the
-// heartbeat and pip.lua respawns immediately instead of treating the dead daemon as
-// alive for up to 15s.
+// LL hook callbacks dispatch on the pump thread (SPEC R7): plain Cells hold all hook
+// state, read and written as WHOLE structs, and hooks never touch the disk (SPEC 6.3).
+// The one atomic serves the panic hook, which can fire on any thread (SPEC 6.3).
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 
 const WM_APP_DRAG: u32 = WM_APP;
@@ -108,11 +102,8 @@ fn refresh_hook_cache(s: Option<PipState>) {
     }));
 }
 
-/// LL hooks exist only while a session is live: outside a PiP every guard no-ops, yet
-/// the hooks would still context-switch every keystroke and mouse move on the machine
-/// through this process. Runs after each hook-cache refresh, per slot - only null
-/// slots install (a failed install retries next refresh, and a live handle is never
-/// overwritten and leaked), only non-null slots unhook.
+/// LL hooks exist only while a session is live (SPEC 7). Per slot: only null slots
+/// install (failed installs retry, live handles never leak), non-null slots unhook.
 fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
     if PIP.get().hwnd != 0 {
         unsafe {
@@ -131,12 +122,9 @@ fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
             }
         }
         *hooks = (std::ptr::null_mut(), std::ptr::null_mut());
-        // a gesture must not outlive its hooks: the button-up that would end it is
-        // never seen, and a stuck Moving state would both suppress the converger and
-        // glue the next session's window to a button that is no longer down. The
-        // click cell only clears its swallow flag - the last-allowed-down reference
-        // must survive, or a toggle-retoggle inside double-click time lets the OS
-        // pair a pre-teardown click with a fresh one into WM_LBUTTONDBLCLK.
+        // a gesture must not outlive its hooks (the ending button-up is never seen);
+        // the click cell keeps its last-allowed-down so a toggle-retoggle inside
+        // double-click time cannot pair clicks across sessions (SPEC 7)
         DRAG.set(Drag::default());
         CLICK.set(Click { swallow_next_up: false, ..CLICK.get() });
     }
@@ -321,10 +309,8 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 }
 
-// Rate-limit clicks over the PiP window: swallow every button-down within double-click
-// time+rect of the last ALLOWED button-down, so no two clicks the OS actually receives
-// can ever pair into a synthesized WM_LBUTTONDBLCLK (swallowing only the 2nd click lets
-// a triple click through - the OS pairs clicks 1+3 and VLC fullscreens).
+// Rate-limit clicks over the PiP: swallow any button-down within double-click time+rect
+// of the last ALLOWED down, so no two delivered clicks can pair into a dblclick (SPEC 7).
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if code >= 0 {

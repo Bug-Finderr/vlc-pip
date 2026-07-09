@@ -135,14 +135,12 @@ pub(crate) enum RegionPlan {
     Clip(Rect),
 }
 
-// Real chrome (menu + controller + borders) is well under this. enter's measurement and
-// the converger MUST share the bound: a chrome enter accepts but plan_region skips
-// would land a rect the converger fights forever.
+// enter's measurement and the converger MUST share the bound: a chrome enter accepts
+// but plan_region skips would land a rect the converger fights forever.
 pub(crate) const MAX_CHROME: i32 = 300;
 
-/// Target sizes are pinned to this at every parse boundary (options and state file).
-/// An 8K display is 7680 wide, so past this is corrupt or hostile input - and it keeps
-/// `target + chrome` far from i32 overflow, which release builds would silently wrap.
+/// Target sizes pinned at every parse boundary (options and state file): keeps
+/// target + chrome away from i32 overflow, which release builds silently wrap (SPEC 6.1).
 pub(crate) fn target_ok(n: i32) -> bool {
     (1..=16_384).contains(&n)
 }

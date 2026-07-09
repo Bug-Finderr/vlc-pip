@@ -52,10 +52,8 @@ pub fn try_delete(path: &Path) {
     let _ = std::fs::remove_file(path); // transient lock: next caller retries
 }
 
-// One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
-// reads as None = "not in PiP". The trailing newline is the torn-write sentinel: a
-// truncated write loses it, so a partial line can never parse (a numeric PREFIX of the
-// last token would otherwise pass and misroute a live PiP into the heal path).
+// One whitespace line of exactly 13 tokens; any deviation reads as None. The trailing
+// newline is the torn-write sentinel: a truncated write can never parse (SPEC 6.1).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {
     if !s.ends_with('\n') {
         return None;
