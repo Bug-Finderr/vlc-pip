@@ -78,6 +78,20 @@ function Stop-InstalledHelper([string]$executable, [string]$requestPath) {
     if (@(Get-InstalledHelperProcess $executable).Count -gt 0) { throw "installed pip-helper is still running" }
 }
 
+function Stop-StartedProcess($process) {
+    if (-not $process.HasExited) {
+        try { $process.Kill() } catch [InvalidOperationException] { }
+    }
+    if (-not $process.WaitForExit(3000)) { throw "failed daemon did not stop" }
+}
+
+function Remove-OrphanedHeartbeat([string]$path) {
+    if (@(Get-Process -Name pip-helper -ErrorAction SilentlyContinue).Count -eq 0 -and
+        (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
 function Test-DaemonHeartbeat(
     [string]$line,
     [uint32]$processId,

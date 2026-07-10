@@ -13,6 +13,7 @@ function Assert-Throws([scriptblock]$action, $message) {
 
 $state = Join-Path ([IO.Path]::GetTempPath()) "vlc-pip-script-test-$PID.state"
 $package = Join-Path ([IO.Path]::GetTempPath()) "vlc-pip-package-test-$PID"
+$heartbeat = Join-Path ([IO.Path]::GetTempPath()) "vlc-pip-heartbeat-test-$PID.alive"
 try {
     [IO.File]::WriteAllText($state, "1 2 3 4 5 6 7 8 9 br 10 1 42`n")
     Assert-True ((Read-PipStatePid $state) -eq 42) "valid state PID was not read"
@@ -30,7 +31,42 @@ try {
 
     Assert-True (Test-SamePath "C:\Temp\PIP-HELPER.exe" "c:\temp\pip-helper.exe") "path comparison must ignore case"
     Assert-True (-not (Test-SamePath "C:\Temp\one.exe" "C:\Temp\two.exe")) "different paths matched"
-    Assert-True (@(Get-InstalledHelperProcess "$state-never-an-exe").Count -eq 0) "process name alone matched"
+
+    $matching = [pscustomobject]@{ Id = 1; Path = "C:\Temp\PIP-HELPER.exe" }
+    $foreign = [pscustomobject]@{ Id = 2; Path = "C:\Elsewhere\pip-helper.exe" }
+    $unreadable = [pscustomobject]@{ Id = 3 }
+    Add-Member -InputObject $unreadable -MemberType ScriptProperty -Name Path -Value { throw "denied" }
+    $script:fakeProcesses = @($matching, $foreign, $unreadable)
+    function Get-Process { param($Name, $Id, $ErrorAction); $script:fakeProcesses }
+    try {
+        $selected = @(Get-InstalledHelperProcess "c:\temp\pip-helper.exe")
+        Assert-True ($selected.Count -eq 1 -and $selected[0].Id -eq 1) "exact-path process filter selected the wrong processes"
+    } finally {
+        Remove-Item Function:\Get-Process
+    }
+
+    $script:fakeKilled = $false
+    $launched = [pscustomobject]@{}
+    Add-Member -InputObject $launched -MemberType ScriptProperty -Name HasExited -Value { $script:fakeKilled }
+    Add-Member -InputObject $launched -MemberType ScriptProperty -Name Path -Value { throw "denied" }
+    Add-Member -InputObject $launched -MemberType ScriptMethod -Name Kill -Value { $script:fakeKilled = $true }
+    Add-Member -InputObject $launched -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $script:fakeKilled }
+    Stop-StartedProcess $launched
+    Assert-True $script:fakeKilled "directly launched process was not stopped when Path was unreadable"
+
+    [IO.File]::WriteAllText($heartbeat, "torn")
+    $script:fakeProcesses = @()
+    function Get-Process { param($Name, $Id, $ErrorAction); $script:fakeProcesses }
+    try {
+        Remove-OrphanedHeartbeat $heartbeat
+        Assert-True (-not (Test-Path -LiteralPath $heartbeat)) "orphaned malformed heartbeat survived"
+        [IO.File]::WriteAllText($heartbeat, "torn")
+        $script:fakeProcesses = @($foreign)
+        Remove-OrphanedHeartbeat $heartbeat
+        Assert-True (Test-Path -LiteralPath $heartbeat) "heartbeat with a live pip-helper owner was removed"
+    } finally {
+        Remove-Item Function:\Get-Process
+    }
 
     $line = "100 pid=42 hotkey=0 timer=1 kb=0 mouse=1"
     Assert-True (Test-DaemonHeartbeat $line 42 100 105) "valid heartbeat was rejected"
@@ -79,6 +115,7 @@ try {
 } finally {
     Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $package -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $heartbeat -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Script contracts PASS"

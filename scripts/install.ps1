@@ -64,19 +64,9 @@ try {
 
     if (-not $verified) { throw "daemon startup could not be verified" }
 } catch {
-    if ($null -ne $daemon -and -not $daemon.HasExited -and
-        (Test-InstalledHelperProcess $daemon $installedExe)) {
-        try { $daemon.Kill() } catch [InvalidOperationException] { }
-        if (-not $daemon.WaitForExit(3000)) { throw "failed daemon did not stop" }
-    }
-    if (Test-Path -LiteralPath $alivePath -PathType Leaf) {
-        try {
-            $heartbeat = [IO.File]::ReadAllText($alivePath)
-            if ($null -ne $daemon -and
-                (Test-DaemonHeartbeat $heartbeat ([uint32]$daemon.Id) $startedAt)) {
-                Remove-Item -LiteralPath $alivePath -Force
-            }
-        } catch [IO.IOException] { }
+    if ($null -ne $daemon) {
+        Stop-StartedProcess $daemon
+        Remove-OrphanedHeartbeat $alivePath
     }
     throw
 }
