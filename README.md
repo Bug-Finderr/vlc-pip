@@ -37,4 +37,4 @@ The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal 
 
 ## Contributing
 
-Issues are welcome. PRs are not accepted.
+Issues are welcome. PRs are not accepted and will be auto-closed.
