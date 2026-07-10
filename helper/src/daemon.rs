@@ -79,17 +79,14 @@ thread_local! {
     static PIP: Cell<Pip> = Cell::new(Pip::default());
 }
 
-fn refresh_hook_cache(s: Option<PipState>) {
+/// Hooks exist only while a session is live (SPEC 7); only null slots install, so failed installs retry and live handles never leak.
+fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
     // owns_state, not IsWindow: heal records keep stale states alive, and a recycled HWND must never re-arm guards on a foreign window
     PIP.set(s.filter(native::owns_state).map_or(Pip::default(), |s| Pip {
         hwnd: s.hwnd,
         fs: native::fs_origin(s.style),
         pid: s.pid,
     }));
-}
-
-/// Hooks exist only while a session is live (SPEC 7); only null slots install, so failed installs retry and live handles never leak.
-fn sync_hooks(hooks: &mut (HHOOK, HHOOK)) {
     if PIP.get().hwnd != 0 {
         unsafe {
             let module = GetModuleHandleW(std::ptr::null());
@@ -136,8 +133,7 @@ pub fn run(argv: &[String]) -> i32 {
         let _ = std::fs::write(&alive, epoch.to_string());
     };
     let mut last_beat = Instant::now();
-    refresh_hook_cache(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
-    sync_hooks(&mut hooks);
+    sync_session(&mut hooks, state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
     beat(&mut last_beat);
 
     let mut tracker = native::RegionTracker::default();
@@ -145,8 +141,7 @@ pub fn run(argv: &[String]) -> i32 {
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            refresh_hook_cache(state::load(&state::state_path()));
-            sync_hooks(&mut hooks); // armed before the user can physically click the fresh PiP
+            sync_session(&mut hooks, state::load(&state::state_path())); // armed before the user can physically click the fresh PiP
         } else if msg.message == WM_TIMER {
             if last_beat.elapsed() > Duration::from_secs(3) {
                 beat(&mut last_beat);
@@ -154,8 +149,7 @@ pub fn run(argv: &[String]) -> i32 {
             poll_request(argv);
             // one snapshot per tick, loaded after poll_request so a request-triggered toggle lands this same tick
             let s = state::load(&state::state_path());
-            refresh_hook_cache(s);
-            sync_hooks(&mut hooks);
+            sync_session(&mut hooks, s);
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its strip unrenderable (SPEC 7)
@@ -175,11 +169,8 @@ pub fn run(argv: &[String]) -> i32 {
         }
     }
 
-    unsafe {
-        UnhookWindowsHookEx(hooks.0); // harmless when never installed (null)
-        UnhookWindowsHookEx(hooks.1);
-        UnregisterHotKey(std::ptr::null_mut(), 1);
-    }
+    sync_session(&mut hooks, None);
+    unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     0
 }
