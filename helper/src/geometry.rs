@@ -7,7 +7,6 @@ pub struct Rect {
     pub bottom: i32,
 }
 
-/// The four PiP corners; anything unknown pins to Br.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Corner {
     Tl,
@@ -116,8 +115,6 @@ pub fn compute_corner(work: &Rect, w: i32, h: i32, corner: Corner, margin: i32) 
         Corner::Br => (right, bottom),
     }
 }
-
-// ---- minimal-look convergence planning (applied by native::maintain_region) -----------
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum RegionPlan {

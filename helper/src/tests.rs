@@ -158,7 +158,7 @@ mod native {
     use crate::native::fs_origin;
 
     #[test]
-    fn fs_origin_requires_both_caption_bits_absent() {
+    fn fs_origin_is_missing_full_caption_mask() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
         assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as isize)); // ordinary windowed VLC
         assert!(fs_origin(0)); // fullscreen: caption fully absent

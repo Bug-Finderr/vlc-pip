@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::geometry::Corner;
 
-// A VALID file on disk == "in PiP"; x..ex_style restore the window, target_w..min are the options in
-// effect at Enter, pid guards against HWND recycling.
+// One 13-token line (SPEC 6.1); "in PiP" only when owns_state passes - a valid stale record is a pending heal.
 #[derive(Clone, Copy)]
 pub struct PipState {
     pub hwnd: isize,
@@ -89,8 +88,6 @@ pub(crate) fn write_state(s: &PipState) -> String {
         s.target_w, s.target_h, s.corner.as_str(), s.margin, s.min as u8, s.pid
     )
 }
-
-// ---- request file (command channel into the daemon) ---------------------------------
 
 pub fn request_path() -> PathBuf {
     temp_path("vlc-pip-request.txt")

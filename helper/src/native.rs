@@ -135,10 +135,9 @@ fn in_pip() -> bool {
     state::load(&state::state_path()).is_some_and(|s| owns_state(&s))
 }
 
-// ---- fullscreen-origin PiP -----------------------------------------------------------
-// VLC's internal fullscreen state stays ON all session: strip veiled, Esc/F swallowed, until exit (SPEC 7).
+// ---- fullscreen-origin PiP: fs state stays ON all session - strip veiled, Esc/F swallowed (SPEC 7) ----
 
-/// Fullscreen-origin PiP: the saved pre-PiP style lacks the full caption (both WS_CAPTION bits).
+/// The saved pre-PiP style lacks the full WS_CAPTION mask (a partial mask is still fs-origin).
 pub fn fs_origin(style: isize) -> bool {
     style & WS_CAPTION as isize != WS_CAPTION as isize
 }
@@ -366,7 +365,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         pid,
     };
     if state::save(&s, &state::state_path()).is_err() {
-        return false; // nothing mutated yet: fail cleanly, retry next toggle
+        return false;
     }
     // chrome measured pre-strip: enter lands in ONE SetWindowPos with the region pre-applied (no grow-then-clip flash)
     let chrome = if o.min { client_chrome(h) } else { None };
@@ -413,7 +412,7 @@ pub fn exit_pip() -> bool {
         if fs_origin(s.style) {
             unveil_fs_controller(s.pid); // hwnd recycled with VLC alive: give the strip back
         }
-        state::try_delete(&path); // stale: VLC gone or hwnd recycled
+        state::try_delete(&path);
         return false;
     }
     let h = s.hwnd;
@@ -556,7 +555,7 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
     }
     if fs_origin(s.style) {
         // an fs-origin record holds the FULLSCREEN rect: never heal to it (Qt persisted its true windowed geometry itself)
-        unveil_fs_controller(s.pid); // no-op if the process died with the session
+        unveil_fs_controller(s.pid);
         state::try_delete(path);
         return;
     }

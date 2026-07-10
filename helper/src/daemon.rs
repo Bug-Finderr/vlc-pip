@@ -110,12 +110,11 @@ pub fn run(argv: &[String]) -> i32 {
 
     unsafe {
         RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32);
-        SetTimer(std::ptr::null_mut(), 0, 150, None); // WM_TIMER -> thread queue
+        SetTimer(std::ptr::null_mut(), 0, 150, None);
     }
     let mut hooks: (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
 
-    // Heartbeat: pip.lua checks the leading epoch for freshness (a force-killed daemon
-    // can't delete the file); write failures are swallowed - never kill the pump (SPEC 6.3)
+    // heartbeat: leading epoch = pip.lua's freshness check; write failures never kill the pump (SPEC 6.3)
     let alive = state::alive_path();
     let beat = |last: &mut Instant| {
         *last = Instant::now();
@@ -142,11 +141,10 @@ pub fn run(argv: &[String]) -> i32 {
             sync_session(&mut hooks, s);
             let pip = PIP.get();
             if pip.fs {
-                // VLC still believes it is fullscreen under this PiP: keep its strip unrenderable (SPEC 7)
                 native::veil_fs_controller(pip.pid);
             }
             if DRAG.get().state == DragState::Active {
-                tracker.reset_debounce(); // gestures own the window while dragging
+                tracker.reset_debounce();
             } else {
                 native::maintain_region(&mut tracker, s);
             }
@@ -161,8 +159,7 @@ pub fn run(argv: &[String]) -> i32 {
     0
 }
 
-// Snapshot the gesture BEFORE any Win32 call (SetWindowPos/SetWindowRgn can pump sent messages); the
-// generation guard drops queued messages from a previous drag.
+// Snapshot the gesture BEFORE any Win32 call: SetWindowPos/SetWindowRgn can pump sent messages.
 fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let mut d = DRAG.get();
     d.move_pending = false;
@@ -183,18 +180,16 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         }
     };
     if resizing {
-        // clip to where the video will sit (chrome measured at drag start); convergence verifies after release
         let clip = (d.vis != d.start).then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
     } else {
         native::drag_move(d.hwnd, &target);
     }
     if msg.message == WM_APP_DRAGEND {
-        // finalize from OUR computed rect: the async SetWindowPos has not landed, a fresh GetWindowRect would be stale
         let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
         let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
-        tracker.reset_debounce(); // convergence re-clips from a clean debounce
+        tracker.reset_debounce();
     }
 }
 
@@ -254,7 +249,6 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         return 1;
                     }
                     CLICK.set(Click { time: m.time, x: m.pt.x, y: m.pt.y, ..c });
-                    // arm a potential drag; the gen bump invalidates any queued message from a prior drag
                     let mut d = Drag { generation: DRAG.get().generation.wrapping_add(1), ..Drag::default() };
                     if let Some((vis, wr)) = native::gesture_rects(h) {
                         d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));

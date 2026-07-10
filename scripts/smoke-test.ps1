@@ -8,7 +8,7 @@ function Status {
     Get-Content "$env:TEMP\vlc-pip-status.json" -Raw | ConvertFrom-Json
 }
 function Req($cmd) { Set-Content "$env:TEMP\vlc-pip-request.txt" $cmd }
-# poll until the condition holds (true) or the cap passes (returns the final evaluation)
+# on cap expiry returns the condition's final evaluation, not $false
 function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $capMs) {
@@ -171,7 +171,6 @@ try {
     Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
         ($afterSpam.x -eq $pip.x -and $afterSpam.w -eq $pip.w -and $afterSpam.h -eq $pip.h -and $afterSpam.inPip)
 
-    # interior drag = free move; band drag = aspect-locked resize; wheel untouched
     DragFrom $cx $cy ($cx - 220) ($cy - 160)
     $moved = Status
     Check "drag-move: at delta, size held, still pip" `
@@ -209,7 +208,6 @@ try {
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
 
-    # global hotkey enters, request-file exits: both paths share one state
     SendCtrlAltP
     Check "hotkey enters pip" (WaitFor { (Status).inPip } 3000 150)
     Req "toggle"
