@@ -6,16 +6,16 @@ use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT,
-    MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
+    GetAsyncKeyState, GetDoubleClickTime, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey,
+    UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_SYSKEYDOWN, WM_TIMER,
+    CallNextHookEx, DispatchMessageW, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW,
+    GetSystemMetrics, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW,
+    SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, SetTimer, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_TIMER,
+    WindowFromPoint,
 };
 
 use crate::state::PipState;
@@ -122,7 +122,12 @@ pub fn run(argv: &[String]) -> i32 {
     let (hot, timer, kb, mouse) = unsafe {
         let module = GetModuleHandleW(std::ptr::null());
         (
-            RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                1,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_P as u32,
+            ) != 0,
             SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
             SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0),
             SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0),
@@ -135,15 +140,20 @@ pub fn run(argv: &[String]) -> i32 {
     let alive = state::temp_path("vlc-pip-daemon.alive");
     let beat = |last: &mut Instant| {
         *last = Instant::now();
-        let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let _ = std::fs::write(&alive, format!(
-            "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
-            std::process::id(),
-            hot as i32,
-            timer as i32,
-            (!kb.is_null()) as i32,
-            (!mouse.is_null()) as i32,
-        ));
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = std::fs::write(
+            &alive,
+            format!(
+                "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
+                std::process::id(),
+                hot as i32,
+                timer as i32,
+                (!kb.is_null()) as i32,
+                (!mouse.is_null()) as i32,
+            ),
+        );
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
@@ -221,7 +231,10 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     if resizing {
         // live minimal look: clip to where the video will sit, using the per-side chrome
         // measured at drag start; convergence verifies the exact box after release
-        let clip = d.had_rgn.then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
+        let clip = d
+            .had_rgn
+            .then(|| geometry::resize_clip(&d.start, &d.vis, &target))
+            .flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
     } else {
         native::drag_move(d.hwnd, &target);
@@ -299,12 +312,21 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         CLICK.set(c);
                         return 1;
                     }
-                    CLICK.set(Click { time: m.time, x: m.pt.x, y: m.pt.y, ..c });
+                    CLICK.set(Click {
+                        time: m.time,
+                        x: m.pt.x,
+                        y: m.pt.y,
+                        ..c
+                    });
                     // arm a potential drag; the zone (interior vs 16px band) picks move vs
                     // resize; gen bump invalidates any queued message from a prior drag
-                    let mut d = Drag { generation: DRAG.get().generation.wrapping_add(1), ..Drag::default() };
+                    let mut d = Drag {
+                        generation: DRAG.get().generation.wrapping_add(1),
+                        ..Drag::default()
+                    };
                     if let Some((vis, wr)) = native::gesture_rects(h) {
-                        d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
+                        d.zone =
+                            geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
                         d.vis = vis;
                         d.had_rgn = vis != wr; // visible == window means no region to preserve
                         d.start = wr;
@@ -333,7 +355,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         d.latest = (m.pt.x, m.pt.y);
                         if !d.move_pending {
                             d.move_pending = true;
-                            PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAG, d.state as usize, d.generation as isize);
+                            PostThreadMessageW(
+                                GetCurrentThreadId(),
+                                WM_APP_DRAG,
+                                d.state as usize,
+                                d.generation as isize,
+                            );
                         }
                     }
                     DRAG.set(d);
@@ -344,7 +371,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 d.state = DragState::Idle;
                 DRAG.set(d);
                 if st >= DragState::Moving {
-                    PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, st as usize, d.generation as isize);
+                    PostThreadMessageW(
+                        GetCurrentThreadId(),
+                        WM_APP_DRAGEND,
+                        st as usize,
+                        d.generation as isize,
+                    );
                 }
                 let mut c = CLICK.get();
                 if c.swallow_next_up {

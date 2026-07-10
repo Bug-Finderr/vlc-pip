@@ -52,7 +52,21 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         return None;
     }
     let t: Vec<&str> = s.split_whitespace().collect();
-    let [hwnd, x, y, w, h, style, ex_style, target_w, target_h, corner, margin, min, pid] = t[..]
+    let [
+        hwnd,
+        x,
+        y,
+        w,
+        h,
+        style,
+        ex_style,
+        target_w,
+        target_h,
+        corner,
+        margin,
+        min,
+        pid,
+    ] = t[..]
     else {
         return None;
     };
@@ -80,8 +94,19 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
 pub(crate) fn write_state(s: &PipState) -> String {
     format!(
         "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
-        s.hwnd, s.x, s.y, s.w, s.h, s.style, s.ex_style,
-        s.target_w, s.target_h, s.corner.as_str(), s.margin, s.min as u8, s.pid
+        s.hwnd,
+        s.x,
+        s.y,
+        s.w,
+        s.h,
+        s.style,
+        s.ex_style,
+        s.target_w,
+        s.target_h,
+        s.corner.as_str(),
+        s.margin,
+        s.min as u8,
+        s.pid
     )
 }
 
@@ -99,7 +124,11 @@ pub fn consume_request(path: &Path) -> Option<String> {
     let cmd = std::fs::read_to_string(path).ok()?; // missing or mid-write: retry next poll
     std::fs::remove_file(path).ok()?; // couldn't delete: leave the command for next poll
     let cmd = cmd.trim();
-    if cmd.is_empty() { None } else { Some(cmd.to_string()) }
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    }
 }
 
 // ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------
