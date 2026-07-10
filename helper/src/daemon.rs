@@ -263,7 +263,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         d.origin = (m.pt.x, m.pt.y);
                         d.hwnd = h;
                         d.state = DragState::Armed;
-                    } // either probe failed: window vanished under the click - stay idle
+                    } // probe failed or degenerate rect: window vanished under the click - stay idle
                     DRAG.set(d);
                 }
             } else if wparam as u32 == WM_MOUSEMOVE {

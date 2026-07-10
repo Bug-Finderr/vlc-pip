@@ -61,11 +61,9 @@ pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
 }
 
 /// Dominant relative delta drives the scale; the other axis follows start's aspect even at the clamps (i64: screen coords overflow i32).
+/// Callers guarantee a positive start rect (gesture_rects filters degenerates) - the axis math divides by w0/h0.
 pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) -> Rect {
     let (w0, h0) = (start.right - start.left, start.bottom - start.top);
-    if w0 < 1 || h0 < 1 {
-        return *start; // garbage measurement: no-op
-    }
     // a -1 (low) edge grows when the pointer moves toward negative; 0 = axis not dragged
     let (dw, dh) = (zone.0 * dx, zone.1 * dy);
     let width_driven = i64::from(dw.abs()) * i64::from(h0) >= i64::from(dh.abs()) * i64::from(w0);

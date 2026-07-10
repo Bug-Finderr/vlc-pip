@@ -107,11 +107,6 @@ mod geometry {
     }
 
     #[test]
-    fn resize_degenerate_start_is_noop() {
-        assert_eq!(plan_resize(&rc(0, 0, 0, 270), (1, 1), 50, 50, &WORK), rc(0, 0, 0, 270));
-    }
-
-    #[test]
     fn resize_tiny_work_area_clamp_does_not_panic() {
         // 80% of 200 < 256: max floors to min - clamp() must not see min > max
         let tiny = rc(0, 0, 200, 200);

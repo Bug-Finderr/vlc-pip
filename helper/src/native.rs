@@ -254,7 +254,7 @@ fn set_region(h: isize, r: &geometry::Rect) {
 
 // The region clips hit-testing too: gesture surface = region box in screen coords, one coherent snapshot.
 pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
-    let wr = window_rect(h)?;
+    let wr = window_rect(h).filter(|r| r.right > r.left && r.bottom > r.top)?; // plan_resize divides by these
     let vis = region_box(h).map_or(wr, |b| geometry::Rect {
         left: wr.left + b.left,
         top: wr.top + b.top,
