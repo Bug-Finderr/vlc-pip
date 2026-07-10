@@ -585,6 +585,65 @@ fn restore_frame(h: isize, style: isize, ex_style: isize) -> HWND {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreResult {
+    Restored,
+    Failed,
+    Pending,
+}
+
+impl RestoreResult {
+    pub(crate) fn code(self) -> i32 {
+        match self {
+            Self::Restored => 0,
+            Self::Failed => 1,
+            Self::Pending => 4,
+        }
+    }
+}
+
+fn restore_state(s: &PipState, path: &Path, drop_gone: bool) -> bool {
+    let h = s.hwnd;
+    let after = restore_frame(h, s.style, s.ex_style);
+    unsafe {
+        if SetWindowPos(
+            hw(h),
+            after,
+            s.x,
+            s.y,
+            s.w,
+            s.h,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        ) != 0
+        {
+            return drop_state(s, path);
+        }
+        if drop_gone && IsWindow(hw(h)) == 0 {
+            let _ = drop_state(s, path);
+        }
+    }
+    false
+}
+
+/// Repair artifacts from a one-shot exit that raced a daemon tick holding old state.
+pub fn repair_ended_session(s: &PipState) {
+    if owns_state(s) {
+        let after = restore_frame(s.hwnd, s.style, s.ex_style);
+        unsafe {
+            SetWindowPos(
+                hw(s.hwnd),
+                after,
+                s.x,
+                s.y,
+                s.w,
+                s.h,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+            );
+        }
+    }
+    unveil_if_fs(s);
+}
+
 pub fn exit_pip() -> bool {
     let path = state::state_path();
     let Some(s) = state::load(&path) else {
@@ -594,22 +653,22 @@ pub fn exit_pip() -> bool {
         let _ = drop_state(&s, &path); // stale: VLC gone or hwnd recycled
         return false;
     }
-    let h = s.hwnd;
-    let after = restore_frame(h, s.style, s.ex_style);
-    unsafe {
-        let ok = SetWindowPos(
-            hw(h),
-            after,
-            s.x,
-            s.y,
-            s.w,
-            s.h,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-        ) != 0;
-        if ok || IsWindow(hw(h)) == 0 {
-            let _ = drop_state(&s, &path); // live-window restore failure keeps state so the next toggle retries
-        }
-        ok
+    restore_state(&s, &path, true)
+}
+
+/// Installer/uninstaller restore: an unowned record is pending heal, never stale cleanup.
+pub fn maintenance_restore() -> RestoreResult {
+    let path = state::state_path();
+    let Some(s) = state::load(&path) else {
+        return RestoreResult::Failed;
+    };
+    if !owns_state(&s) {
+        return RestoreResult::Pending;
+    }
+    if restore_state(&s, &path, false) {
+        RestoreResult::Restored
+    } else {
+        RestoreResult::Failed
     }
 }
 
@@ -924,6 +983,13 @@ mod internal_tests {
         assert!(!reopen_replacement_ready(42, &[42]));
         assert!(!reopen_replacement_ready(42, &[7, 42]));
         assert!(reopen_replacement_ready(42, &[7]));
+    }
+
+    #[test]
+    fn maintenance_restore_has_distinct_terminal_codes() {
+        assert_eq!(RestoreResult::Restored.code(), 0);
+        assert_eq!(RestoreResult::Failed.code(), 1);
+        assert_eq!(RestoreResult::Pending.code(), 4);
     }
 
     #[test]

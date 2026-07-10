@@ -8,8 +8,13 @@ $heartbeatPath = "$env:TEMP\vlc-pip-daemon.alive"
 # WinExe stdout is invisible to PowerShell capture; run the helper and read its
 # status-file channel instead of capturing output.
 function Status {
-    Start-Process $exe status -Wait
-    Get-Content "$env:TEMP\vlc-pip-status.json" -Raw | ConvertFrom-Json
+    $path = "$env:TEMP\vlc-pip-status.json"
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    $process = Start-Process $exe status -PassThru -Wait
+    if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "helper status failed"
+    }
+    Get-Content $path -Raw | ConvertFrom-Json
 }
 function Req($cmd) { Set-Content "$env:TEMP\vlc-pip-request.txt" $cmd }
 function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {

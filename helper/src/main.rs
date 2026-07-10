@@ -49,6 +49,7 @@ fn run() -> i32 {
             one_shot(native::enter(native::find_player(), &o), &o)
         }
         "exit" => i32::from(!native::exit_pip()),
+        "restore" => native::maintenance_restore().code(),
         "status" => {
             let s = native::status();
             let _ = std::fs::write(state::status_path(), &s); // the reliable channel for scripts: written FIRST

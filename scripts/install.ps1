@@ -21,10 +21,15 @@ $statePath = "$env:TEMP\vlc-pip.state"
 $requestPath = "$env:TEMP\vlc-pip-request.txt"
 $alivePath = "$env:TEMP\vlc-pip-daemon.alive"
 
-# Restore with the old binary before replacing it; an absent owner means reopen-heal is pending.
-Resolve-PipState $statePath $installedExe
+# Stop first so no timer tick can reapply a stale fullscreen veil after restoration.
+Assert-PipStatePrerequisites $statePath $installedExe
 Stop-InstalledHelper $installedExe $requestPath
-Resolve-PipState $statePath $installedExe
+try { Resolve-PipState $statePath $installedExe }
+catch {
+    $restoreError = $_
+    Start-InstalledDaemon $installedExe $alivePath
+    throw $restoreError
+}
 
 foreach ($path in @($requestPath, $alivePath, "$env:TEMP\vlc-pip.json")) {
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
@@ -43,32 +48,6 @@ $shortcut.TargetPath = $installedExe
 $shortcut.Arguments = "daemon"
 $shortcut.Save()
 
-$startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$daemon = $null
-try {
-    $daemon = Start-Process -FilePath $installedExe -ArgumentList "daemon" -PassThru -WindowStyle Hidden
-    $deadline = (Get-Date).AddSeconds(5)
-    $verified = $false
-    do {
-        try {
-            $daemon.Refresh()
-            if ($daemon.HasExited) { break }
-            if (Test-Path -LiteralPath $alivePath -PathType Leaf) {
-                $heartbeat = [IO.File]::ReadAllText($alivePath)
-                $verified = (Test-InstalledHelperProcess $daemon $installedExe) -and
-                    (Test-DaemonHeartbeat $heartbeat ([uint32]$daemon.Id) $startedAt)
-            }
-        } catch [IO.IOException] { }
-        if (-not $verified) { Start-Sleep -Milliseconds 100 }
-    } while (-not $verified -and (Get-Date) -lt $deadline)
-
-    if (-not $verified) { throw "daemon startup could not be verified" }
-} catch {
-    if ($null -ne $daemon) {
-        Stop-StartedProcess $daemon
-        Remove-OrphanedHeartbeat $alivePath
-    }
-    throw
-}
+Start-InstalledDaemon $installedExe $alivePath
 
 Write-Host "Installed. Restart VLC to see View > PiP Mode. Hotkey: Ctrl+Alt+P"

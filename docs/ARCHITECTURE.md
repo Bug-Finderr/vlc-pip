@@ -41,7 +41,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 
 - **Fullscreen prevention is preventive, not reactive.** A poll-and-snap-back guard flickers; instead the mouse hook swallows every button-down within double-click time/rect of the last *allowed* down, so the OS can never synthesize `WM_LBUTTONDBLCLK` (swallowing only the 2nd click let clicks 1+3 pair - triple-click fullscreened). Every keyboard/mouse suppression first revalidates that the cached HWND still belongs to the cached PID.
 - **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread, including immediately after maintenance ends a session.
-- **Hooks follow the owned PiP session.** The idle daemon has no LL hooks. Each null slot installs independently while a session is active; failed installs retry without duplicating a live hook. On session end, each non-null slot unhooks independently and failed removals retry, with the cleared cache making any retained hook pass input through.
+- **Hooks follow the owned PiP session.** The idle daemon has no LL hooks. Each null slot installs independently while a session is active; failed installs retry without duplicating a live hook. If an external one-shot exit races a timer holding the old state, the next sync reapplies the cached restore snapshot only after confirming the state file is absent. Terminal daemon transitions skip that repair. Failed hook removals retry, with the cleared cache making any retained hook pass input through.
 - **The pump handles thread messages directly.** It creates no windows and accepts no text input, so its `WM_HOTKEY`, `WM_TIMER`, and coalesced `WM_APP` messages need neither `TranslateMessage` nor `DispatchMessageW`.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
 - **The heartbeat file** (`vlc-pip-daemon.alive`, epoch + arming flags, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
@@ -59,7 +59,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 | Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
-CLI modes: `toggle|enter|exit|status|daemon|stop` (`status` writes `%TEMP%\vlc-pip-status.json`; a GUI-subsystem exe's stdout is unreliable).
+CLI modes: `toggle|enter|exit|restore|status|daemon|stop`. `restore` is the installer's non-destructive owned-state restore; `status` writes `%TEMP%\vlc-pip-status.json` because a GUI-subsystem exe's stdout is unreliable.
 
 ## Development
 

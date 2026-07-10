@@ -69,13 +69,14 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// Cached owned PiP (hwnd 0 = none). `fs` drives fullscreen guards; `pid` prevents a
-/// recycled handle from targeting another process.
+/// Cached owned PiP (hwnd 0 = none). The snapshot repairs a concurrent one-shot exit
+/// after a timer already loaded the old state.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
     fs: bool,
     pid: u32,
+    snapshot: Option<PipState>,
 }
 
 thread_local! {
@@ -88,7 +89,13 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
+fn ended_session(previous: Pip, current: Pip, state_exists: bool) -> Option<PipState> {
+    (current.hwnd == 0 && !state_exists)
+        .then_some(previous.snapshot)
+        .flatten()
+}
+
+fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: bool) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
@@ -99,8 +106,17 @@ fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
             hwnd: s.hwnd,
             fs: native::fs_origin(s.style),
             pid: s.pid,
+            snapshot: Some(s),
         });
     PIP.set(pip);
+
+    if repair_ended
+        && previous.snapshot.is_some()
+        && pip.hwnd == 0
+        && let Some(s) = ended_session(previous, pip, state::state_path().exists())
+    {
+        native::repair_ended_session(&s);
+    }
 
     if previous.hwnd != 0 && (previous.hwnd != pip.hwnd || previous.pid != pip.pid) {
         DRAG.set(DRAG.get().reset());
@@ -196,7 +212,7 @@ pub fn run(argv: &[String]) -> i32 {
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
-    sync_session(&mut hooks, state::load(&state::state_path()));
+    sync_session(&mut hooks, state::load(&state::state_path()), false);
     beat(&mut last_beat, &hooks);
 
     let mut tracker = native::RegionTracker::default();
@@ -204,13 +220,13 @@ pub fn run(argv: &[String]) -> i32 {
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            sync_session(&mut hooks, state::load(&state::state_path()));
+            sync_session(&mut hooks, state::load(&state::state_path()), true);
         } else if msg.message == WM_TIMER {
             poll_request(argv);
             // The normal tick shares one post-request snapshot between session sync and
             // maintenance. A terminal maintenance change alone triggers a second load.
             let s = state::load(&state::state_path());
-            sync_session(&mut hooks, s);
+            sync_session(&mut hooks, s, true);
             let pip = PIP.get();
             if pip.fs {
                 native::veil_fs_controller(pip.pid);
@@ -222,7 +238,7 @@ pub fn run(argv: &[String]) -> i32 {
                 native::maintain_region(&mut tracker, s)
             };
             if state_dropped {
-                sync_session(&mut hooks, state::load(&state::state_path()));
+                sync_session(&mut hooks, state::load(&state::state_path()), false);
             }
             if last_beat.elapsed() > Duration::from_secs(3) {
                 beat(&mut last_beat, &hooks);
@@ -232,7 +248,7 @@ pub fn run(argv: &[String]) -> i32 {
         }
     }
 
-    sync_session(&mut hooks, None);
+    sync_session(&mut hooks, None, false);
     unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     OWNS_ALIVE_FILE.store(false, Relaxed);
@@ -486,5 +502,43 @@ mod internal_tests {
         assert!(reset.state == DragState::Idle);
         assert_eq!(reset.hwnd, 0);
         assert!(!reset.move_pending);
+    }
+
+    #[test]
+    fn ended_session_repairs_only_when_state_file_is_absent() {
+        let saved = PipState {
+            hwnd: 1,
+            x: 100,
+            y: 200,
+            w: 1000,
+            h: 640,
+            style: 0,
+            ex_style: 0,
+            target_w: 480,
+            target_h: 270,
+            corner: geometry::Corner::Br,
+            margin: 16,
+            min: true,
+            pid: 42,
+        };
+        let fullscreen = Pip {
+            hwnd: 1,
+            fs: true,
+            pid: 42,
+            snapshot: Some(saved),
+        };
+        let windowed = Pip {
+            hwnd: 1,
+            fs: false,
+            pid: 42,
+            snapshot: Some(saved),
+        };
+
+        assert_eq!(
+            ended_session(fullscreen, Pip::default(), false),
+            Some(saved)
+        );
+        assert_eq!(ended_session(fullscreen, Pip::default(), true), None);
+        assert_eq!(ended_session(fullscreen, windowed, false), None);
     }
 }

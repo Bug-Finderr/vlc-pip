@@ -76,6 +76,20 @@ try {
     Assert-True (-not (Test-DaemonHeartbeat ($line -replace "kb=0", "kb=2") 42 100 105)) "invalid flag was accepted"
     Assert-True (-not (Test-DaemonHeartbeat "$line`n" 42 100 105)) "non-exact heartbeat was accepted"
 
+    $script:fakeDaemon = [pscustomobject]@{ Id = $PID; Path = "C:\Temp\pip-helper.exe"; HasExited = $false }
+    Add-Member -InputObject $script:fakeDaemon -MemberType ScriptMethod -Name Refresh -Value { }
+    function Start-Process {
+        param($FilePath, $ArgumentList, [switch]$PassThru, $WindowStyle)
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        [IO.File]::WriteAllText($heartbeat, "$now pid=$PID hotkey=1 timer=1 kb=0 mouse=0")
+        $script:fakeDaemon
+    }
+    try {
+        Start-InstalledDaemon "C:\Temp\pip-helper.exe" $heartbeat
+    } finally {
+        Remove-Item Function:\Start-Process
+    }
+
     New-Item -ItemType Directory -Path "$package\helper" | Out-Null
     [IO.File]::WriteAllText("$package\helper\Cargo.toml", "[package]")
     [IO.File]::WriteAllText("$package\pip-helper.exe", "fake")
@@ -88,27 +102,38 @@ try {
     [IO.File]::WriteAllText($state, "1 2 3 4 5 6 7 8 9 br 10 1 0`n")
     $oldHelper = "$package\installed-helper.exe"
     [IO.File]::WriteAllText($oldHelper, "fake")
-    Resolve-PipState $state $oldHelper
-    Assert-True (Test-Path -LiteralPath $state) "installer path deleted a pending-heal state"
-    Assert-Throws { Resolve-PipState $state $oldHelper -RequireRestore } "uninstall accepted a pending-heal state"
+    Assert-PipStatePrerequisites $state $oldHelper
     Remove-Item -LiteralPath $oldHelper
-    Assert-Throws { Resolve-PipState $state $oldHelper } "state without its installed helper was accepted"
+    Assert-Throws { Assert-PipStatePrerequisites $state $oldHelper } "state without its installed helper was accepted"
 
     [IO.File]::WriteAllText($oldHelper, "fake")
-    $script:removeStateOnExit = $true
+    $script:restoreExitCode = 0
+    $script:removeStateOnRestore = $true
     function Start-Process {
         param($FilePath, $ArgumentList, [switch]$PassThru, [switch]$Wait, $WindowStyle)
-        if ($script:removeStateOnExit) { Remove-Item -LiteralPath $state }
-        [pscustomobject]@{ ExitCode = 9 }
+        if ($ArgumentList -ne "restore") { throw "maintenance used the wrong helper mode: $ArgumentList" }
+        if ($script:removeStateOnRestore) { Remove-Item -LiteralPath $state }
+        [pscustomobject]@{ ExitCode = $script:restoreExitCode }
     }
     try {
         [IO.File]::WriteAllText($state, "1 2 3 4 5 6 7 8 9 br 10 1 $PID`n")
         Resolve-PipState $state $oldHelper
-        Assert-True (-not (Test-Path -LiteralPath $state)) "nonzero exit blocked a completed restore"
+        Assert-True (-not (Test-Path -LiteralPath $state)) "successful restore did not consume state"
 
-        $script:removeStateOnExit = $false
+        $script:restoreExitCode = 4
+        $script:removeStateOnRestore = $false
         [IO.File]::WriteAllText($state, "1 2 3 4 5 6 7 8 9 br 10 1 $PID`n")
-        Assert-Throws { Resolve-PipState $state $oldHelper } "live state survived exit without aborting"
+        Resolve-PipState $state $oldHelper
+        Assert-True (Test-Path -LiteralPath $state) "installer deleted a pending-heal state"
+        Assert-Throws { Resolve-PipState $state $oldHelper -RequireRestore } "uninstall accepted a pending-heal state"
+
+        $script:restoreExitCode = 2
+        Assert-Throws { Resolve-PipState $state $oldHelper } "unknown helper mode was accepted as pending heal"
+
+        $script:restoreExitCode = 1
+        $script:removeStateOnRestore = $true
+        [IO.File]::WriteAllText($state, "1 2 3 4 5 6 7 8 9 br 10 1 $PID`n")
+        Assert-Throws { Resolve-PipState $state $oldHelper } "failed restore was accepted because state disappeared"
     } finally {
         Remove-Item Function:\Start-Process
     }

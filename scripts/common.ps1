@@ -11,6 +11,14 @@ function Read-PipStatePid([string]$path) {
     $processId
 }
 
+function Assert-PipStatePrerequisites([string]$statePath, [string]$executable) {
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return }
+    $null = Read-PipStatePid $statePath
+    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+        throw "PiP state exists but the installed helper is missing"
+    }
+}
+
 function Get-PrebuiltHelper([string]$root) {
     if (Test-Path -LiteralPath "$root\helper\Cargo.toml" -PathType Leaf) { return }
     $executable = "$root\pip-helper.exe"
@@ -40,23 +48,17 @@ function Get-InstalledHelperProcess([string]$executable) {
     }
 }
 
-function Test-ProcessAlive([uint32]$processId) {
-    if ($processId -eq 0 -or $processId -gt [int]::MaxValue) { return $false }
-    $null -ne (Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue)
-}
-
 function Resolve-PipState([string]$statePath, [string]$executable, [switch]$requireRestore) {
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return }
-    $ownerProcess = Read-PipStatePid $statePath
-    if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-        throw "PiP state exists but the installed helper is missing"
+    Assert-PipStatePrerequisites $statePath $executable
+    $restore = Start-Process -FilePath $executable -ArgumentList "restore" -PassThru -Wait -WindowStyle Hidden
+    $stateExists = Test-Path -LiteralPath $statePath -PathType Leaf
+    if ($restore.ExitCode -eq 0 -and -not $stateExists) { return }
+    if ($restore.ExitCode -eq 4 -and $stateExists) {
+        if ($requireRestore) { throw "PiP restore is pending; launch VLC, wait for restore, then retry" }
+        return
     }
-    if (Test-ProcessAlive $ownerProcess) {
-        $null = Start-Process -FilePath $executable -ArgumentList "exit" -PassThru -Wait -WindowStyle Hidden
-        if (Test-Path -LiteralPath $statePath) { throw "the active PiP window could not be restored" }
-    } elseif ($requireRestore -and (Test-Path -LiteralPath $statePath)) {
-        throw "PiP restore is pending; launch VLC, wait for restore, then retry"
-    }
+    throw "the active PiP window could not be restored safely"
 }
 
 function Stop-InstalledHelper([string]$executable, [string]$requestPath) {
@@ -108,4 +110,34 @@ function Test-DaemonHeartbeat(
         return $false
     }
     $reportedProcess -eq $processId -and $epoch -ge $notBefore -and [Math]::Abs($now - $epoch) -lt 15
+}
+
+function Start-InstalledDaemon([string]$executable, [string]$alivePath) {
+    $startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $daemon = $null
+    try {
+        $daemon = Start-Process -FilePath $executable -ArgumentList "daemon" -PassThru -WindowStyle Hidden
+        $deadline = (Get-Date).AddSeconds(5)
+        $verified = $false
+        do {
+            try {
+                $daemon.Refresh()
+                if ($daemon.HasExited) { break }
+                if (Test-Path -LiteralPath $alivePath -PathType Leaf) {
+                    $heartbeat = [IO.File]::ReadAllText($alivePath)
+                    $verified = (Test-InstalledHelperProcess $daemon $executable) -and
+                        (Test-DaemonHeartbeat $heartbeat ([uint32]$daemon.Id) $startedAt)
+                }
+            } catch [IO.IOException] { }
+            if (-not $verified) { Start-Sleep -Milliseconds 100 }
+        } while (-not $verified -and (Get-Date) -lt $deadline)
+
+        if (-not $verified) { throw "daemon startup could not be verified" }
+    } catch {
+        if ($null -ne $daemon) {
+            Stop-StartedProcess $daemon
+            Remove-OrphanedHeartbeat $alivePath
+        }
+        throw
+    }
 }
