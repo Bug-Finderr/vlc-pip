@@ -20,15 +20,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
-// Everything the hooks touch lives on the pump thread - LL hook callbacks dispatch on
-// the thread that installed them (SPEC R7) - so plain Cells hold all hook state, and
-// reads and writes move WHOLE structs: a queued message can never mix stale fields with
-// fresh ones. Hooks still never touch the disk (LowLevelHooksTimeout would silently
-// remove them); the cells are refreshed by the pump, and stale-file DELETION stays in
-// native. The one atomic is for the panic hook, which can fire on any thread:
-// true while this process owns the heartbeat file, so a daemon crash deletes the
-// heartbeat and pip.lua respawns immediately instead of treating the dead daemon as
-// alive for up to 15s.
+// LL hooks dispatch on the installing pump thread (SPEC R7), so Cells hold hook state.
+// Whole-struct moves prevent mixed snapshots, and hooks avoid disk I/O that could exceed
+// LowLevelHooksTimeout. The only atomic lets the panic hook delete our heartbeat.
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 
 const WM_APP_DRAG: u32 = WM_APP;
@@ -75,10 +69,8 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// The current PiP (hwnd 0 = none). `fs` = fullscreen-origin (saved style has no
-/// caption): the keyboard hook swallows Esc and the tick keeps VLC's strip hidden.
-/// `pid` is the owner verified by owns_state - the tick reuses it rather than
-/// re-deriving it from a handle that may have been recycled since.
+/// Cached owned PiP (hwnd 0 = none). `fs` drives fullscreen guards; `pid` prevents a
+/// recycled handle from targeting another process.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
@@ -153,7 +145,6 @@ pub(crate) fn heartbeat_line(
 }
 
 pub fn run(argv: &[String]) -> i32 {
-    // single instance; second instance exits 0 before touching any file
     let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
     let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) }; // held for process lifetime
     if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -222,8 +213,6 @@ pub fn run(argv: &[String]) -> i32 {
             sync_session(&mut hooks, s);
             let pip = PIP.get();
             if pip.fs {
-                // VLC still believes it is fullscreen under this PiP: keep its
-                // controller strip off the screen (SPEC section 7)
                 native::veil_fs_controller(pip.pid);
             }
             let state_dropped = if DRAG.get().state == DragState::Active {
@@ -393,8 +382,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         y: m.pt.y,
                         ..c
                     });
-                    // arm a potential drag; the zone (interior vs 16px band) picks move vs
-                    // resize; gen bump invalidates any queued message from a prior drag
+                    // The generation invalidates queued messages from a prior gesture.
                     let mut d = Drag {
                         generation: DRAG.get().generation.wrapping_add(1),
                         ..Drag::default()

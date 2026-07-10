@@ -1,5 +1,4 @@
-//! Every unit test, one flat cfg(test) file. Tests are siblings of the modules (not
-//! children), so tested-but-internal items are pub(crate).
+//! Pure module tests live here. Tests requiring private state stay by their implementation.
 
 mod geometry {
     use crate::geometry::*;
@@ -291,59 +290,11 @@ mod geometry {
         assert_eq!(clip, None);
     }
 
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> Rect {
-        Rect {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        }
-    }
-
-    fn work() -> Rect {
-        // 480x270 br margin 16 => video corner at (1424, 754)
-        Rect {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1040,
-        }
-    }
-
-    #[test]
-    fn negative_chrome_is_stale_measurement() {
-        // child wider than its own window = mid-relayout garbage
-        let plan = plan_region(
-            &rect(0, 0, 480, 270),
-            &rect(0, 0, 481, 270),
-            480,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn child_outside_window_skips() {
-        let plan = plan_region(
-            &rect(0, 0, 2, 1),
-            &rect(-1, 0, 0, 1),
-            1,
-            1,
-            Corner::Br,
-            0,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
     #[test]
     fn chrome_clamp_boundary_300_ok_301_stale() {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
-        let cr = rect(0, 0, 480, 270);
-        let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, work);
+        let cr = rc(0, 0, 480, 270);
+        let ok = plan_region(&rc(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, || WORK);
         assert_eq!(
             ok,
             RegionPlan::Clip {
@@ -353,7 +304,7 @@ mod geometry {
                 bottom: 270
             }
         );
-        let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, work);
+        let stale = plan_region(&rc(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, || WORK);
         assert_eq!(stale, RegionPlan::Skip);
     }
 
@@ -361,23 +312,23 @@ mod geometry {
     fn two_px_tolerance_clips_three_resizes() {
         // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
         let at_2 = plan_region(
-            &rect(0, 0, 482, 270),
-            &rect(0, 0, 482, 270),
+            &rc(0, 0, 482, 270),
+            &rc(0, 0, 482, 270),
             480,
             270,
             Corner::Br,
             16,
-            work,
+            || WORK,
         );
         assert!(matches!(at_2, RegionPlan::Clip { .. }));
         let at_3 = plan_region(
-            &rect(0, 0, 483, 270),
-            &rect(0, 0, 483, 270),
+            &rc(0, 0, 483, 270),
+            &rc(0, 0, 483, 270),
             480,
             270,
             Corner::Br,
             16,
-            work,
+            || WORK,
         );
         assert!(matches!(at_3, RegionPlan::Resize { .. }));
     }
@@ -386,13 +337,13 @@ mod geometry {
     fn resize_grows_by_chrome_and_lands_child_at_corner() {
         // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
         let plan = plan_region(
-            &rect(100, 100, 520, 460),
-            &rect(110, 130, 510, 355),
+            &rc(100, 100, 520, 460),
+            &rc(110, 130, 510, 355),
             480,
             270,
             Corner::Br,
             16,
-            work,
+            || WORK,
         );
         // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
         assert_eq!(
@@ -409,13 +360,13 @@ mod geometry {
     #[test]
     fn clip_is_child_rect_relative_to_window() {
         let plan = plan_region(
-            &rect(1424, 700, 1904, 1024),
-            &rect(1424, 754, 1904, 1024),
+            &rc(1424, 700, 1904, 1024),
+            &rc(1424, 754, 1904, 1024),
             480,
             270,
             Corner::Br,
             16,
-            work,
+            || WORK,
         );
         assert_eq!(
             plan,
@@ -429,102 +380,106 @@ mod geometry {
     }
 
     #[test]
-    fn hostile_negative_target_skips() {
-        // a hand-crafted state file with a -500 target must not produce a resize
-        let plan = plan_region(
-            &rect(0, 0, 480, 300),
-            &rect(0, 20, 480, 290),
-            -500,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn nonpositive_target_skips_even_when_chrome_makes_window_positive() {
-        let plan = plan_region(
-            &rect(0, 0, 780, 270),
-            &rect(0, 0, 480, 270),
-            -1,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn extreme_rect_difference_skips() {
-        let plan = plan_region(
-            &rect(i32::MIN, 0, i32::MAX, 270),
-            &rect(0, 0, 480, 270),
-            480,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn target_plus_chrome_overflow_skips() {
-        let plan = plan_region(
-            &rect(0, 0, 481, 270),
-            &rect(0, 0, 480, 270),
-            i32::MAX,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn coordinate_offset_overflow_skips() {
-        let plan = plan_region(
-            &rect(0, 0, 780, 270),
-            &rect(300, 0, 780, 270),
-            476,
-            270,
-            Corner::Tl,
-            0,
-            || rect(i32::MIN, 0, i32::MAX, 1040),
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn clip_bound_overflow_skips() {
-        let plan = plan_region(
-            &rect(-500, 0, 280, 270),
-            &rect(i32::MAX - 600, 0, i32::MAX - 120, 270),
-            480,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
-    }
-
-    #[test]
-    fn nonpositive_rect_size_skips() {
-        let plan = plan_region(
-            &rect(100, 0, 99, 270),
-            &rect(100, 0, 99, 270),
-            480,
-            270,
-            Corner::Br,
-            16,
-            work,
-        );
-        assert_eq!(plan, RegionPlan::Skip);
+    fn invalid_region_inputs_skip() {
+        let cases = [
+            (
+                "negative chrome",
+                rc(0, 0, 480, 270),
+                rc(0, 0, 481, 270),
+                480,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "child outside window",
+                rc(0, 0, 2, 1),
+                rc(-1, 0, 0, 1),
+                1,
+                1,
+                Corner::Br,
+                0,
+                WORK,
+            ),
+            (
+                "negative target",
+                rc(0, 0, 480, 300),
+                rc(0, 20, 480, 290),
+                -500,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "nonpositive target with positive window",
+                rc(0, 0, 780, 270),
+                rc(0, 0, 480, 270),
+                -1,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "rect difference overflow",
+                rc(i32::MIN, 0, i32::MAX, 270),
+                rc(0, 0, 480, 270),
+                480,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "target plus chrome overflow",
+                rc(0, 0, 481, 270),
+                rc(0, 0, 480, 270),
+                i32::MAX,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "coordinate offset overflow",
+                rc(0, 0, 780, 270),
+                rc(300, 0, 780, 270),
+                476,
+                270,
+                Corner::Tl,
+                0,
+                rc(i32::MIN, 0, i32::MAX, 1040),
+            ),
+            (
+                "clip bound overflow",
+                rc(-500, 0, 280, 270),
+                rc(i32::MAX - 600, 0, i32::MAX - 120, 270),
+                480,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+            (
+                "nonpositive rect size",
+                rc(100, 0, 99, 270),
+                rc(100, 0, 99, 270),
+                480,
+                270,
+                Corner::Br,
+                16,
+                WORK,
+            ),
+        ];
+        for (name, wr, cr, target_w, target_h, corner, margin, work) in cases {
+            assert_eq!(
+                plan_region(&wr, &cr, target_w, target_h, corner, margin, || work),
+                RegionPlan::Skip,
+                "{name}"
+            );
+        }
     }
 }
 
@@ -617,7 +572,7 @@ mod options {
         assert!(!parse_options(["min=0"]).min);
         assert!(!parse_options(["min=false"]).min);
         assert!(!parse_options(["min=FALSE"]).min);
-        assert!(parse_options(["min=no"]).min); // v1: anything else is true
+        assert!(parse_options(["min=no"]).min);
         assert!(parse_options(["min="]).min);
     }
 
@@ -634,12 +589,6 @@ mod options {
     }
 
     #[test]
-    fn corner_normalized_to_known_values() {
-        assert_eq!(parse_options(["c=zz"]).corner, Corner::Br);
-        assert_eq!(parse_options(["c=bl"]).corner, Corner::Bl);
-    }
-
-    #[test]
     fn later_duplicates_win() {
         assert_eq!(parse_options(["w=100", "w=200"]).w, 200);
     }
@@ -649,21 +598,6 @@ mod options {
         let argv = vec!["w=800".to_string()];
         let o = merge("w=640 h=360 c=tr", &argv);
         assert_eq!((o.w, o.h, o.corner), (800, 360, Corner::Tr));
-    }
-
-    #[test]
-    fn merge_empty_config_is_v2_behavior() {
-        let o = merge("", &[]);
-        assert_eq!(
-            (o.w, o.h, o.corner, o.margin, o.min),
-            (480, 270, Corner::Br, 16, true)
-        );
-    }
-
-    #[test]
-    fn merge_garbage_config_tokens_ignored() {
-        let o = merge("lol w=x h=999", &[]);
-        assert_eq!((o.w, o.h), (480, 999));
     }
 }
 

@@ -4,7 +4,7 @@ use crate::geometry::Corner;
 
 // The PiP state: x..ex_style restore the window; target_w..min are the options in
 // effect at Enter (daemon and one-shot CLI converge on the same geometry); pid guards
-// against HWND recycling. A VALID file on disk == "in PiP".
+// against HWND recycling. A valid file is either an owned PiP or a pending reopen heal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
     pub hwnd: isize,
@@ -40,7 +40,7 @@ pub fn crash_path() -> PathBuf {
 }
 
 pub fn load(path: &Path) -> Option<PipState> {
-    parse_state(&std::fs::read_to_string(path).ok()?) // missing or unreadable = "not in PiP"
+    parse_state(&std::fs::read_to_string(path).ok()?)
 }
 
 pub fn save(s: &PipState, path: &Path) -> std::io::Result<()> {
@@ -56,7 +56,7 @@ pub fn try_delete(path: &Path) -> bool {
 }
 
 // One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
-// reads as None = "not in PiP". The trailing newline is the torn-write sentinel: a
+// is not a usable session record. The trailing newline is the torn-write sentinel: a
 // truncated write loses it, so a partial line can never parse (a numeric PREFIX of the
 // last token would otherwise pass and misroute a live PiP into the heal path).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {

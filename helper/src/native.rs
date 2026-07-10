@@ -170,7 +170,6 @@ pub fn fs_origin(style: isize) -> bool {
     style & WS_CAPTION as isize != WS_CAPTION as isize
 }
 
-/// Owner PID (0 when the window is gone).
 pub fn window_owner(h: isize) -> u32 {
     let mut p = 0u32;
     unsafe {
@@ -280,7 +279,7 @@ fn find_video_child(top: isize) -> isize {
     found
 }
 
-// Every region this program sets has a nonempty box, so presence == nonempty box.
+// Every region set on the main VLC window has a nonempty box, so presence == nonempty box.
 fn has_region(h: isize) -> bool {
     region_box(h).is_some()
 }
@@ -303,6 +302,9 @@ fn region_box(h: isize) -> Option<(i32, i32, i32, i32)> {
 fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
     unsafe {
         let rgn = CreateRectRgn(left, top, right, bottom);
+        if rgn.is_null() {
+            return;
+        }
         if SetWindowRgn(hw(h), rgn, 1) == 0 {
             DeleteObject(rgn);
         }
@@ -348,7 +350,6 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
     unsafe {
         match clip {
             Some(c) => {
-                // keep the minimal look live through the resize (region is window-relative)
                 set_region(h, c.left, c.top, c.right, c.bottom);
             }
             None => {
@@ -411,22 +412,15 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
         if GetClientRect(hw(h), &mut client) == 0 || ClientToScreen(hw(h), &mut origin) == 0 {
             return None;
         }
-        let difference = |a: i32, b: i32| {
-            i64::from(a)
-                .checked_sub(i64::from(b))
-                .and_then(|n| n.try_into().ok())
-        };
-        let sum = |a: i32, b: i32| {
-            i64::from(a)
-                .checked_add(i64::from(b))
-                .and_then(|n| n.try_into().ok())
-        };
-        let l = difference(cr.left, origin.x)?;
-        let t = difference(cr.top, origin.y)?;
-        let r = difference(sum(origin.x, client.right)?, cr.right)?;
-        let b = difference(sum(origin.y, client.bottom)?, cr.bottom)?;
-        let chrome_w = sum(l, r)?;
-        let chrome_h = sum(t, b)?;
+        let l = cr.left.checked_sub(origin.x)?;
+        let t = cr.top.checked_sub(origin.y)?;
+        let r = origin.x.checked_add(client.right)?.checked_sub(cr.right)?;
+        let b = origin
+            .y
+            .checked_add(client.bottom)?
+            .checked_sub(cr.bottom)?;
+        let chrome_w = l.checked_add(r)?;
+        let chrome_h = t.checked_add(b)?;
         // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
         // stale measurement, and a rect the converger would forever Skip must never land
         if l >= 0
@@ -468,40 +462,30 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         return false;
     };
     let chrome = if o.min { client_chrome(h) } else { None };
-    let difference = |a: i32, b: i32| {
-        i64::from(a)
-            .checked_sub(i64::from(b))
-            .and_then(|n| n.try_into().ok())
-    };
-    let sum = |a: i32, b: i32| {
-        i64::from(a)
-            .checked_add(i64::from(b))
-            .and_then(|n| n.try_into().ok())
-    };
     let (x, y, tw, th, clip) = match chrome {
         Some((cl, ct, cr, cb)) => {
-            let Some(x) = difference(vx, cl) else {
+            let Some(x) = vx.checked_sub(cl) else {
                 return false;
             };
-            let Some(y) = difference(vy, ct) else {
+            let Some(y) = vy.checked_sub(ct) else {
                 return false;
             };
-            let Some(chrome_w) = sum(cl, cr) else {
+            let Some(chrome_w) = cl.checked_add(cr) else {
                 return false;
             };
-            let Some(chrome_h) = sum(ct, cb) else {
+            let Some(chrome_h) = ct.checked_add(cb) else {
                 return false;
             };
-            let Some(tw) = sum(o.w, chrome_w) else {
+            let Some(tw) = o.w.checked_add(chrome_w) else {
                 return false;
             };
-            let Some(th) = sum(o.h, chrome_h) else {
+            let Some(th) = o.h.checked_add(chrome_h) else {
                 return false;
             };
-            let Some(right) = sum(cl, o.w) else {
+            let Some(right) = cl.checked_add(o.w) else {
                 return false;
             };
-            let Some(bottom) = sum(ct, o.h) else {
+            let Some(bottom) = ct.checked_add(o.h) else {
                 return false;
             };
             (x, y, tw, th, Some((cl, ct, right, bottom)))
@@ -512,10 +496,10 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     let Some(r) = window_rect(h) else {
         return false;
     };
-    let Some(rw) = difference(r.right, r.left) else {
+    let Some(rw) = r.right.checked_sub(r.left) else {
         return false;
     };
-    let Some(rh) = difference(r.bottom, r.top) else {
+    let Some(rh) = r.bottom.checked_sub(r.top) else {
         return false;
     };
     if rw <= 0 || rh <= 0 {
@@ -721,7 +705,7 @@ fn dissolve_fs_pip(s: &PipState, path: &Path) -> bool {
 pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) -> bool {
     let path = state::state_path();
     let Some(s) = s else {
-        t.prev = None;
+        *t = RegionTracker::default();
         return false;
     };
     if !owns_state(&s) {
@@ -737,7 +721,6 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) -> bool {
     // fullscreen-origin dissolve watch - BEFORE the min gate, it guards every fs session
     if fs_origin(s.style) {
         if child != 0 {
-            // baseline: the rect while video is alive (our reshapes and drags included)
             t.fs_prev = Some(wr);
         } else if t.fs_prev.is_some_and(|p| p != wr) {
             let dropped = dissolve_fs_pip(&s, &path);
@@ -975,5 +958,24 @@ mod internal_tests {
         assert_eq!(tracker.fs_prev, Some(baseline));
         assert_eq!(tracker.heal_tries, 9);
         assert_eq!(tracker.heal_wait, 6);
+    }
+
+    #[test]
+    fn absent_state_resets_all_session_tracking() {
+        let previous = rect(1, 2, 3, 4);
+        let baseline = rect(5, 6, 7, 8);
+        let mut tracker = RegionTracker {
+            prev: Some((previous, previous)),
+            fs_prev: Some(baseline),
+            heal_tries: 9,
+            heal_wait: 6,
+        };
+
+        assert!(!maintain_region(&mut tracker, None));
+
+        assert_eq!(tracker.prev, None);
+        assert_eq!(tracker.fs_prev, None);
+        assert_eq!(tracker.heal_tries, 0);
+        assert_eq!(tracker.heal_wait, 0);
     }
 }

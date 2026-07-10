@@ -7,7 +7,7 @@ pub struct Rect {
     pub bottom: i32,
 }
 
-/// The four PiP corners; anything unknown pins to Br (v1 semantics, same fallback everywhere).
+/// The four PiP corners. Unknown input falls back to Br.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Corner {
     Tl,
@@ -236,76 +236,66 @@ pub(crate) fn plan_region(
     if target_w <= 0 || target_h <= 0 {
         return RegionPlan::Skip;
     }
-    let difference = |a: i32, b: i32| {
-        i64::from(a)
-            .checked_sub(i64::from(b))
-            .and_then(|n| n.try_into().ok())
-    };
-    let sum = |a: i32, b: i32| {
-        i64::from(a)
-            .checked_add(i64::from(b))
-            .and_then(|n| n.try_into().ok())
-    };
-    let Some(rel_l) = difference(cr.left, wr.left) else {
+    let Some(rel_l) = cr.left.checked_sub(wr.left) else {
         return RegionPlan::Skip;
     };
-    let Some(rel_t) = difference(cr.top, wr.top) else {
+    let Some(rel_t) = cr.top.checked_sub(wr.top) else {
         return RegionPlan::Skip;
     };
-    let Some(rel_r) = difference(wr.right, cr.right) else {
+    let Some(rel_r) = wr.right.checked_sub(cr.right) else {
         return RegionPlan::Skip;
     };
-    let Some(rel_b) = difference(wr.bottom, cr.bottom) else {
+    let Some(rel_b) = wr.bottom.checked_sub(cr.bottom) else {
         return RegionPlan::Skip;
     };
     if rel_l < 0 || rel_t < 0 || rel_r < 0 || rel_b < 0 {
         return RegionPlan::Skip;
     }
-    let Some(cw) = difference(cr.right, cr.left) else {
+    let Some(cw) = cr.right.checked_sub(cr.left) else {
         return RegionPlan::Skip;
     };
-    let Some(ch) = difference(cr.bottom, cr.top) else {
+    let Some(ch) = cr.bottom.checked_sub(cr.top) else {
         return RegionPlan::Skip;
     };
-    let Some(ww) = difference(wr.right, wr.left) else {
+    let Some(ww) = wr.right.checked_sub(wr.left) else {
         return RegionPlan::Skip;
     };
-    let Some(wh) = difference(wr.bottom, wr.top) else {
+    let Some(wh) = wr.bottom.checked_sub(wr.top) else {
         return RegionPlan::Skip;
     };
     if cw <= 0 || ch <= 0 || ww <= 0 || wh <= 0 {
         return RegionPlan::Skip;
     }
-    let Some(chrome_w) = difference(ww, cw) else {
+    let Some(chrome_w) = ww.checked_sub(cw) else {
         return RegionPlan::Skip;
     };
-    let Some(chrome_h) = difference(wh, ch) else {
+    let Some(chrome_h) = wh.checked_sub(ch) else {
         return RegionPlan::Skip;
     };
     // Negative or huge delta means stale rects from VLC's asynchronous re-layout.
     if !(0..=MAX_CHROME).contains(&chrome_w) || !(0..=MAX_CHROME).contains(&chrome_h) {
         return RegionPlan::Skip;
     }
-    let Some(width_delta) = difference(cw, target_w) else {
+    let Some(width_delta) = cw.checked_sub(target_w) else {
         return RegionPlan::Skip;
     };
-    let Some(height_delta) = difference(ch, target_h) else {
+    let Some(height_delta) = ch.checked_sub(target_h) else {
         return RegionPlan::Skip;
     };
     if width_delta.abs() > 2 || height_delta.abs() > 2 {
         let Some((vx, vy)) = compute_corner(&work(), target_w, target_h, corner, margin) else {
             return RegionPlan::Skip;
         };
-        let Some(tw) = sum(target_w, chrome_w) else {
+        let Some(tw) = target_w.checked_add(chrome_w) else {
             return RegionPlan::Skip;
         };
-        let Some(th) = sum(target_h, chrome_h) else {
+        let Some(th) = target_h.checked_add(chrome_h) else {
             return RegionPlan::Skip;
         };
-        let Some(tx) = difference(vx, rel_l) else {
+        let Some(tx) = vx.checked_sub(rel_l) else {
             return RegionPlan::Skip;
         };
-        let Some(ty) = difference(vy, rel_t) else {
+        let Some(ty) = vy.checked_sub(rel_t) else {
             return RegionPlan::Skip;
         };
         return RegionPlan::Resize {
@@ -315,10 +305,10 @@ pub(crate) fn plan_region(
             h: th,
         };
     }
-    let Some(right) = sum(rel_l, cw) else {
+    let Some(right) = rel_l.checked_add(cw) else {
         return RegionPlan::Skip;
     };
-    let Some(bottom) = sum(rel_t, ch) else {
+    let Some(bottom) = rel_t.checked_add(ch) else {
         return RegionPlan::Skip;
     };
     RegionPlan::Clip {
