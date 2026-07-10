@@ -227,9 +227,34 @@ mod geometry {
     #[test]
     fn resize_low_edge_handles_min_pointer_delta() {
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (-1, 0), i32::MIN, 0, &WORK),
+            plan_resize(&rc(0, 0, 480, 270), (-1, 0), i64::from(i32::MIN), 0, &WORK),
             rc(-999, -280, 480, 551)
         );
+    }
+
+    #[test]
+    fn resize_accepts_full_pointer_delta_width() {
+        let full_delta = i64::from(i32::MAX) - i64::from(i32::MIN);
+        assert_eq!(
+            plan_resize(&rc(0, 0, 480, 270), (1, 0), full_delta, 0, &WORK),
+            rc(0, -280, 1479, 551)
+        );
+    }
+
+    #[test]
+    fn move_translation_preserves_normal_behavior() {
+        assert_eq!(
+            plan_move(&rc(100, 100, 580, 370), 20, -30),
+            Some(rc(120, 70, 600, 340))
+        );
+    }
+
+    #[test]
+    fn move_translation_rejects_unrepresentable_coordinates() {
+        let start = rc(i32::MAX - 480, 0, i32::MAX, 270);
+        assert_eq!(plan_move(&start, 1, 0), None);
+        let full_delta = i64::from(i32::MAX) - i64::from(i32::MIN);
+        assert_eq!(plan_move(&rc(0, 0, 480, 270), full_delta, 0), None);
     }
 
     #[test]
@@ -761,6 +786,21 @@ mod state {
     #[test]
     fn load_missing_file_returns_none() {
         assert_eq!(load(&tmp("nope")), None);
+    }
+
+    #[test]
+    fn try_delete_reports_failure_success_and_absence() {
+        let path = tmp("delete-result");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&path);
+        std::fs::create_dir(&path).unwrap();
+        assert!(!try_delete(&path));
+        assert!(path.is_dir());
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "state").unwrap();
+        assert!(try_delete(&path));
+        assert!(try_delete(&path)); // NotFound is already the desired state
     }
 
     #[test]

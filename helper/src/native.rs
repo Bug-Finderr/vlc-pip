@@ -235,9 +235,9 @@ fn unveil_if_fs(s: &PipState) {
     }
 }
 
-fn drop_state(s: &PipState, path: &Path) {
+fn drop_state(s: &PipState, path: &Path) -> bool {
     unveil_if_fs(s);
-    state::try_delete(path);
+    state::try_delete(path)
 }
 
 // ---- window / region primitives -------------------------------------------------------
@@ -579,7 +579,7 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
             SetWindowLongPtrW(hw(h), GWL_STYLE, style);
-            drop_state(&s, &path);
+            let _ = drop_state(&s, &path);
         }
         ok
     }
@@ -607,7 +607,7 @@ pub fn exit_pip() -> bool {
         return false;
     };
     if !owns_state(&s) {
-        drop_state(&s, &path); // stale: VLC gone or hwnd recycled
+        let _ = drop_state(&s, &path); // stale: VLC gone or hwnd recycled
         return false;
     }
     let h = s.hwnd;
@@ -623,7 +623,7 @@ pub fn exit_pip() -> bool {
             SWP_FRAMECHANGED | SWP_SHOWWINDOW,
         ) != 0;
         if ok || IsWindow(hw(h)) == 0 {
-            drop_state(&s, &path); // live-window restore failure keeps state so the next toggle retries
+            let _ = drop_state(&s, &path); // live-window restore failure keeps state so the next toggle retries
         }
         ok
     }
@@ -678,13 +678,20 @@ impl RegionTracker {
     pub fn reset_debounce(&mut self) {
         self.prev = None;
     }
+
+    fn finish_state_drop(&mut self, dropped: bool) -> bool {
+        if dropped {
+            *self = Self::default();
+        }
+        dropped
+    }
 }
 
 /// Qt left fullscreen UNDERNEATH a fullscreen-origin PiP (media end and stop do this
 /// with no input; the window balloons to Qt's windowed geometry within a tick). Dissolve
-/// the session: frame back at Qt's chosen rect, state dropped - the saved fullscreen
-/// rect must never be restored onto an internally windowed VLC.
-fn dissolve_fs_pip(s: &PipState, path: &Path) {
+/// the session: frame back at Qt's chosen rect, then drop state. A failed deletion keeps
+/// the tracker's live-video baseline so the next tick retries the terminal transition.
+fn dissolve_fs_pip(s: &PipState, path: &Path) -> bool {
     let h = s.hwnd;
     let after = restore_frame(
         h,
@@ -702,7 +709,7 @@ fn dissolve_fs_pip(s: &PipState, path: &Path) {
             SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
         );
     }
-    drop_state(s, path);
+    drop_state(s, path)
 }
 
 /// Converging per-tick maintenance (daemon timer + one-shot enter): no video -> clear
@@ -733,9 +740,8 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) -> bool {
             // baseline: the rect while video is alive (our reshapes and drags included)
             t.fs_prev = Some(wr);
         } else if t.fs_prev.is_some_and(|p| p != wr) {
-            dissolve_fs_pip(&s, &path);
-            *t = RegionTracker::default();
-            return true;
+            let dropped = dissolve_fs_pip(&s, &path);
+            return t.finish_state_drop(dropped);
         }
     } else {
         t.fs_prev = None;
@@ -803,10 +809,12 @@ pub(crate) fn heal_target(s: &PipState) -> Option<geometry::Rect> {
 }
 
 fn finish_heal(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) -> bool {
-    *tries = 0;
-    *wait = 0;
-    drop_state(s, path);
-    true
+    let dropped = drop_state(s, path);
+    if dropped {
+        *tries = 0;
+        *wait = 0;
+    }
+    dropped
 }
 
 /// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
@@ -913,13 +921,41 @@ mod internal_tests {
             "pip-maintenance-signal-test-{}.state",
             std::process::id()
         ));
-        std::fs::write(&path, "pending").unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&path);
+        std::fs::create_dir(&path).unwrap();
         let (mut tries, mut wait) = (9, 6);
+        assert!(!heal_reopened(&mut tries, &mut wait, &state(0), &path));
+        assert!(path.is_dir());
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "pending").unwrap();
         assert!(heal_reopened(&mut tries, &mut wait, &state(0), &path));
         assert!(!path.exists());
+    }
 
-        let (mut tries, mut wait) = (0, 1);
-        assert!(!heal_reopened(&mut tries, &mut wait, &state(42), &path));
+    #[test]
+    fn failed_state_drop_preserves_dissolve_baseline() {
+        let path = std::env::temp_dir().join(format!(
+            "pip-dissolve-drop-test-{}.state",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&path);
+        std::fs::create_dir(&path).unwrap();
+        let baseline = rect(1, 2, 3, 4);
+        let mut tracker = RegionTracker {
+            fs_prev: Some(baseline),
+            ..RegionTracker::default()
+        };
+
+        assert!(!tracker.finish_state_drop(drop_state(&state(42), &path)));
+        assert_eq!(tracker.fs_prev, Some(baseline));
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "pending").unwrap();
+        assert!(tracker.finish_state_drop(drop_state(&state(42), &path)));
+        assert_eq!(tracker.fs_prev, None);
     }
 
     #[test]

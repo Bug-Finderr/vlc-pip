@@ -261,21 +261,31 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let pip = PIP.get();
     if d.hwnd != pip.hwnd
         || msg.lParam != d.generation as isize
-        || !drag_owner_is_current(pip.pid, native::window_owner(d.hwnd))
+        || !owner_is_current(pip.pid, native::window_owner(d.hwnd))
     {
         return;
     }
-    let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
+    let (dx, dy) = (
+        pointer_delta(d.latest.0, d.origin.0),
+        pointer_delta(d.latest.1, d.origin.1),
+    );
     let resizing = d.zone != (0, 0);
     let target = if resizing {
-        geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
+        Some(geometry::plan_resize(
+            &d.start,
+            d.zone,
+            dx,
+            dy,
+            &native::work_area(d.hwnd),
+        ))
     } else {
-        geometry::Rect {
-            left: d.start.left + dx,
-            top: d.start.top + dy,
-            right: d.start.right + dx,
-            bottom: d.start.bottom + dy,
+        geometry::plan_move(&d.start, dx, dy)
+    };
+    let Some(target) = target else {
+        if msg.message == WM_APP_DRAGEND {
+            tracker.reset_debounce();
         }
+        return;
     };
     if resizing {
         // live minimal look: clip to where the video will sit, using the per-side chrome
@@ -297,8 +307,12 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     }
 }
 
-fn drag_owner_is_current(cached_pid: u32, current_pid: u32) -> bool {
+fn owner_is_current(cached_pid: u32, current_pid: u32) -> bool {
     cached_pid != 0 && cached_pid == current_pid
+}
+
+fn pointer_delta(current: i32, origin: i32) -> i64 {
+    i64::from(current) - i64::from(origin)
 }
 
 fn poll_request(argv: &[String]) {
@@ -322,7 +336,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         if code >= 0 && (wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             let pip = PIP.get();
-            if pip.hwnd != 0 && GetForegroundWindow() as isize == pip.hwnd {
+            if pip.hwnd != 0
+                && GetForegroundWindow() as isize == pip.hwnd
+                && owner_is_current(pip.pid, native::window_owner(pip.hwnd))
+            {
                 if k.vkCode == VK_F as u32 {
                     return 1; // swallow F -> no fullscreen while in PiP
                 }
@@ -353,12 +370,18 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         if code >= 0 {
             if wparam as u32 == WM_LBUTTONDOWN {
                 let m = &*(lparam as *const MSLLHOOKSTRUCT);
-                let h = PIP.get().hwnd;
-                if h != 0 && GetAncestor(WindowFromPoint(m.pt), GA_ROOT) as isize == h {
+                let pip = PIP.get();
+                let h = pip.hwnd;
+                if h != 0
+                    && owner_is_current(pip.pid, native::window_owner(h))
+                    && GetAncestor(WindowFromPoint(m.pt), GA_ROOT) as isize == h
+                {
                     let mut c = CLICK.get();
                     let burst = m.time.wrapping_sub(c.time) <= GetDoubleClickTime()
-                        && (m.pt.x - c.x).abs() <= GetSystemMetrics(SM_CXDOUBLECLK)
-                        && (m.pt.y - c.y).abs() <= GetSystemMetrics(SM_CYDOUBLECLK);
+                        && pointer_delta(m.pt.x, c.x).abs()
+                            <= i64::from(GetSystemMetrics(SM_CXDOUBLECLK))
+                        && pointer_delta(m.pt.y, c.y).abs()
+                            <= i64::from(GetSystemMetrics(SM_CYDOUBLECLK));
                     if burst {
                         c.swallow_next_up = true;
                         CLICK.set(c);
@@ -393,8 +416,10 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 if d.state != DragState::Idle {
                     let m = &*(lparam as *const MSLLHOOKSTRUCT);
                     if d.state == DragState::Armed
-                        && ((m.pt.x - d.origin.0).abs() > GetSystemMetrics(SM_CXDRAG)
-                            || (m.pt.y - d.origin.1).abs() > GetSystemMetrics(SM_CYDRAG))
+                        && (pointer_delta(m.pt.x, d.origin.0).abs()
+                            > i64::from(GetSystemMetrics(SM_CXDRAG))
+                            || pointer_delta(m.pt.y, d.origin.1).abs()
+                                > i64::from(GetSystemMetrics(SM_CYDRAG)))
                     {
                         d.state = DragState::Active;
                     }
@@ -429,7 +454,10 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 if c.swallow_next_up {
                     c.swallow_next_up = false;
                     CLICK.set(c);
-                    return 1; // keep the input stream paired: drop the up of a dropped down
+                    let pip = PIP.get();
+                    if pip.hwnd != 0 && owner_is_current(pip.pid, native::window_owner(pip.hwnd)) {
+                        return 1; // keep the input stream paired: drop the up of a dropped down
+                    }
                 }
             }
         }
@@ -442,10 +470,16 @@ mod internal_tests {
     use super::*;
 
     #[test]
-    fn drag_owner_requires_nonzero_matching_pid() {
-        assert!(drag_owner_is_current(42, 42));
-        assert!(!drag_owner_is_current(42, 99));
-        assert!(!drag_owner_is_current(0, 0));
+    fn cached_owner_requires_nonzero_matching_pid() {
+        assert!(owner_is_current(42, 42));
+        assert!(!owner_is_current(42, 99));
+        assert!(!owner_is_current(0, 0));
+    }
+
+    #[test]
+    fn pointer_delta_spans_the_full_i32_domain() {
+        assert_eq!(pointer_delta(i32::MIN, i32::MAX), -4_294_967_295);
+        assert_eq!(pointer_delta(i32::MAX, i32::MIN), 4_294_967_295);
     }
 
     #[test]

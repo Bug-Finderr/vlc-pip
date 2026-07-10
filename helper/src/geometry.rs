@@ -77,20 +77,22 @@ pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
 
 /// New window rect for a live resize drag. The dominant relative delta drives the scale
 /// (edges have one axis by construction); the other dimension follows start's aspect,
-/// including at the clamps. i64 products: screen coords can make i32 overflow.
-pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) -> Rect {
+/// including at the clamps. i64 intermediates accept the full i32 pointer-delta range.
+pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) -> Rect {
     let (w0, h0) = (start.right - start.left, start.bottom - start.top);
     if w0 < 1 || h0 < 1 {
         return *start; // garbage measurement: no-op
     }
+    let limit = i64::from(u32::MAX); // largest difference between two i32 coordinates
+    let (dx, dy) = (dx.clamp(-limit, limit), dy.clamp(-limit, limit));
     let dw = match zone.0 {
-        -1 => -i64::from(dx),
-        1 => i64::from(dx),
+        -1 => -dx,
+        1 => dx,
         _ => 0,
     };
     let dh = match zone.1 {
-        -1 => -i64::from(dy),
-        1 => i64::from(dy),
+        -1 => -dy,
+        1 => dy,
         _ => 0,
     };
     let width_driven = dw.abs() * i64::from(h0) >= dh.abs() * i64::from(w0);
@@ -101,7 +103,9 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
     let raw_w = if width_driven {
         i64::from(w0) + dw
     } else {
-        (i64::from(h0) + dh) * i64::from(w0) / i64::from(h0)
+        // Algebraically identical to `(h0 + dh) * w0 / h0`, but the reachable
+        // full pointer delta times w0 fits i64 while the undistributed sum may not.
+        i64::from(w0) + dh * i64::from(w0) / i64::from(h0)
     };
     let w = raw_w.clamp(i64::from(min_w), i64::from(max_w)) as i32;
     let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
@@ -127,6 +131,18 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i32, dy: i32, work: &Rect) 
         right,
         bottom,
     }
+}
+
+/// Translate a move drag without letting a full-width pointer delta wrap screen
+/// coordinates. None means the target cannot be represented by Win32's i32 rect.
+pub fn plan_move(start: &Rect, dx: i64, dy: i64) -> Option<Rect> {
+    let shift = |n: i32, delta: i64| i64::from(n).checked_add(delta)?.try_into().ok();
+    Some(Rect {
+        left: shift(start.left, dx)?,
+        top: shift(start.top, dy)?,
+        right: shift(start.right, dx)?,
+        bottom: shift(start.bottom, dy)?,
+    })
 }
 
 /// Window-relative region that keeps the minimal look live through a resize drag: the

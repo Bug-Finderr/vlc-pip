@@ -47,8 +47,12 @@ pub fn save(s: &PipState, path: &Path) -> std::io::Result<()> {
     std::fs::write(path, write_state(s))
 }
 
-pub fn try_delete(path: &Path) {
-    let _ = std::fs::remove_file(path); // transient lock: next caller retries
+pub fn try_delete(path: &Path) -> bool {
+    // Already absent is success; every other failure leaves the caller's retry state live.
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 // One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
