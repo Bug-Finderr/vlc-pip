@@ -9,12 +9,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, KBDLLHOOKSTRUCT,
-    MSG, MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_SYSKEYDOWN, WM_TIMER,
+    CallNextHookEx, GetAncestor, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW, UnhookWindowsHookEx,
+    WindowFromPoint, GA_ROOT, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, SM_CXDOUBLECLK,
+    SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_TIMER,
 };
 
 use crate::state::PipState;
@@ -153,10 +152,6 @@ pub fn run(argv: &[String]) -> i32 {
             }
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
             on_drag_msg(&msg, &mut tracker);
-        }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
         }
     }
 

@@ -184,7 +184,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 1. Named mutex `"VlcPipDaemon"` → second instance exits 0 before touching any file.
 2. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`. Neither failure is fatal. LL hooks are NOT installed here - they follow the session (see above).
 3. Refresh hook cache once and sync hooks (a daemon restarted while already in PiP must be guarded from the first message); beat once.
-4. Pump: `WM_HOTKEY` → Toggle + refresh cache + sync hooks. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter` act; `stop` → `PostQuitMessage(0)`), refresh cache, sync hooks, keep the fullscreen controller strip veiled while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
+4. Pump: `WM_HOTKEY` → Toggle + refresh cache + sync hooks. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter` act; `stop` → `PostQuitMessage(0)`), refresh cache, sync hooks, keep the fullscreen controller strip veiled while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler.
 5. Cleanup on loop exit: unhook if installed, unregister hotkey, delete the alive file.
 
 ---
