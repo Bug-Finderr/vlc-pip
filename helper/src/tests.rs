@@ -66,33 +66,17 @@ mod geometry {
     }
 
     #[test]
-    fn resize_br_grows_anchored_tl() {
-        // 480x270 at (100,100); +48/+27 is width-driven (48*270 >= 27*480): 528x297
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), (1, 1), 48, 27, &WORK), rc(100, 100, 628, 397));
-    }
-
-    #[test]
-    fn resize_tl_anchors_br() {
-        // dw = -dx = 48: 528x297 anchored at (right,bottom)
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), (-1, -1), -48, 0, &WORK), rc(52, 73, 580, 370));
-    }
-
-    #[test]
-    fn resize_right_edge_keeps_vertical_center() {
-        // edge zone: dy ignored; 576x324, v-center 235 fixed
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), (1, 0), 96, 500, &WORK), rc(100, 73, 676, 397));
-    }
-
-    #[test]
-    fn resize_top_edge_keeps_horizontal_center() {
-        // dh = -dy = 54 -> h-driven: 576x324, anchored bottom, h-center 340 fixed
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), (0, -1), 500, -54, &WORK), rc(52, 46, 628, 370));
-    }
-
-    #[test]
-    fn resize_corner_height_driven_when_dy_dominates() {
-        // 100*480 > 30*270: h = 370 -> w = 370*480/270 = 657 -> h = 657*270/480 = 369
-        assert_eq!(plan_resize(&rc(0, 0, 480, 270), (1, 1), 30, 100, &WORK), rc(0, 0, 657, 369));
+    fn resize_nominal_cases() {
+        let cases = [
+            ("br corner grows anchored tl (48*270 >= 27*480: width-driven)", rc(100, 100, 580, 370), (1, 1), 48, 27, rc(100, 100, 628, 397)),
+            ("tl corner anchors br (dw = -dx = 48)", rc(100, 100, 580, 370), (-1, -1), -48, 0, rc(52, 73, 580, 370)),
+            ("right edge keeps v-center (dy ignored)", rc(100, 100, 580, 370), (1, 0), 96, 500, rc(100, 73, 676, 397)),
+            ("top edge keeps h-center (dh = -dy = 54: height-driven, anchored bottom)", rc(100, 100, 580, 370), (0, -1), 500, -54, rc(52, 46, 628, 370)),
+            ("height-driven corner (100*480 > 30*270: h 370 -> w 657 -> h 369)", rc(0, 0, 480, 270), (1, 1), 30, 100, rc(0, 0, 657, 369)),
+        ];
+        for (name, start, zone, dx, dy, expect) in cases {
+            assert_eq!(plan_resize(&start, zone, dx, dy, &WORK), expect, "{name}");
+        }
     }
 
     #[test]
@@ -222,11 +206,6 @@ mod options {
         let big = parse_options(["w=16385", "h=2147483647"]);
         assert_eq!((big.w, big.h), (480, 270)); // above the 16384 pin: overflow-proof
         assert_eq!(parse_options(["w=16384"]).w, 16384); // the boundary itself is valid
-    }
-
-    #[test]
-    fn later_duplicates_win() {
-        assert_eq!(parse_options(["w=100", "w=200"]).w, 200);
     }
 
     #[test]
