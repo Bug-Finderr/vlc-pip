@@ -1,6 +1,6 @@
 # Architecture
 
-VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a tiny Rust daemon (GUI subsystem, zero runtime dependencies, `windows-sys` only) that reshapes VLC's **own** top-level window via Win32. No mirroring, no second player: it is the genuine hardware-decoding window, so PiP adds zero latency and every VLC shortcut keeps working.
+VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a tiny Rust daemon (GUI subsystem, zero runtime dependencies, `windows-sys` only) that reshapes VLC's **own** top-level window via Win32. No mirroring, no second player: it is the genuine hardware-decoding window, so PiP adds zero latency and VLC's shortcuts keep working (only the fullscreen inputs are deliberately blocked while in PiP).
 
 ## Toggle flow
 
@@ -16,10 +16,10 @@ sequenceDiagram
     L->>R: write "toggle" (pure Lua I/O, no console flash)
     D->>R: consume on next 150 ms tick
     D->>V: Enter: save rect+styles to vlc-pip.state,<br>strip caption/frame, topmost, park in corner
-    D->>V: Exit: restore saved styles + exact rect,<br>clear topmost, delete state file
+    D->>V: Exit: restore saved styles + exact rect,<br>restore saved topmost, delete state file
 ```
 
-A **valid** `%TEMP%\vlc-pip.state` is the single source of truth for "in PiP" - menu and hotkey both call the same `toggle`, so they can never desync. The state records the owner PID; a recycled window handle (VLC died, another app got the HWND) reads as stale and is deleted on sight.
+A **valid** `%TEMP%\vlc-pip.state` is the single source of truth for "in PiP" - menu and hotkey both call the same `toggle`, so they can never desync. The state records the owner PID; a recycled window handle (VLC died, another app got the HWND) reads as stale - never trusted as in-PiP, handed to the close-in-PiP heal or deleted (SPEC 6.1).
 
 ## Daemon internals
 
@@ -28,7 +28,7 @@ flowchart LR
     subgraph D["daemon (single instance via named mutex, raw GetMessage pump)"]
         T["WM_TIMER 150 ms<br>heartbeat ~3 s, consume request,<br>refresh hook cache, converge region"]
         H["WM_HOTKEY<br>Ctrl+Alt+P = toggle"]
-        K["WH_KEYBOARD_LL<br>swallow F while in PiP + VLC focused"]
+        K["WH_KEYBOARD_LL<br>swallow F (+ bare Esc, fs-origin)<br>while in PiP + VLC focused"]
         M["WH_MOUSE_LL<br>rate-limit clicks over the PiP,<br>arm + track drag gestures"]
         G["WM_APP drag (coalesced)<br>pump computes rect, applies async,<br>release: persist size + corner"]
     end
@@ -44,7 +44,7 @@ Key mechanisms, each earned by a real bug (details in [SPEC.md](SPEC.md) §7-8):
 - **Hooks exist only while a PiP session is live.** Outside a session every guard no-ops, so the daemon installs the LL hooks when a session appears and removes them when it ends - an idle daemon has zero presence in the system input path.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
 - **The heartbeat file** (`vlc-pip-daemon.alive`, the epoch, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
-- **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape as any enter - VLC's internal fullscreen state simply stays on for the whole PiP session (clearing it first cost the user ~1s of dead screen, and Qt only restores its windowed geometry from an untouched fullscreen window). The daemon veils VLC's fullscreen controller strip with an empty window region - unrenderable no matter how often VLC re-shows it on hover or refocus, unveiled when the session ends - and the keyboard hook swallows Esc alongside F, so input cannot trip Qt's state underneath the PiP. Exit restores the saved fullscreen style and rect verbatim: the user came from fullscreen and gets fullscreen back, internally consistent. When playback ends or stops, VLC leaves fullscreen by itself - the daemon detects Qt's re-layout and dissolves the session into a plain windowed VLC, exactly where stock VLC would land ([SPEC.md](SPEC.md) §7).
+- **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape - VLC's internal fullscreen state simply stays on for the whole session (clearing it first cost ~1s of dead screen, and Qt only restores its windowed geometry from an untouched fullscreen window). The daemon veils the fullscreen controller strip with an empty window region (unrenderable no matter how often VLC re-shows it, unveiled when the session ends) and the keyboard hook swallows bare Esc alongside F. Exit restores the saved fullscreen style and rect verbatim; when playback ends, VLC leaves fullscreen by itself and the daemon dissolves the session into a plain windowed VLC ([SPEC.md](SPEC.md) §7).
 - **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms a gesture (interior = free move, outer 16px band of the visible rect = aspect-locked resize); the hook only stores the latest cursor position and posts one coalesced `WM_APP` message with a generation counter (a rapid release-and-repress can't mix stale deltas), and the pump computes and applies the rect - finalizing on release from its own computed rect, never `GetWindowRect` after the async `SetWindowPos` - and persists size + nearest corner to `config.txt`. Full contract: [SPEC.md](SPEC.md) §12.
 - **Close-in-PiP heal (v2.1).** VLC closed while in PiP saves the PiP geometry as its own; the daemon keeps the stale state as a pending-restore record and re-applies the pre-PiP rect once a new player window appears, deleting the state only when the rect sticks ([SPEC.md](SPEC.md) §12).
 

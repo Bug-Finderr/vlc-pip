@@ -27,10 +27,7 @@ Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
 
 ## 2. Core design decision
 
-**Reshape VLC's own top-level window via Win32.** A small external helper:
-- removes the title bar + sizing border (`SetWindowLongPtrW(GWL_STYLE)` clearing `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE`, followed by `SetWindowPos(..., SWP_FRAMECHANGED)`),
-- sets it always-on-top (`HWND_TOPMOST`) and parks it in a work-area corner,
-- restores saved styles + rect on exit.
+**Reshape VLC's own top-level window via Win32.** A small external helper strips the frame, sets it always-on-top, parks it in a work-area corner, and restores saved styles + rect on exit - exact sequences in §7.
 
 VLC's Lua extension API **cannot** do any of this (no window-geometry API). So the Lua extension only acts as a trigger; all Win32 work happens in the compiled helper.
 
@@ -38,19 +35,8 @@ VLC's Lua extension API **cannot** do any of this (no window-geometry API). So t
 
 ## 3. Hard constraints & verified facts (read before coding)
 
-### VLC Lua extensions
-- Lua extensions have **no window-management API**. `os.execute`/`io.popen` work but flash a console (cmd.exe) - the menu must **never spawn a process** on the normal path.
-- `capabilities = {"trigger"}` → VLC calls **`trigger()` on every click**, no activation/checkmark state. ← USE THIS (gotcha #1).
-- **The extension probe runs the chunk top level** to read `descriptor()`. Any top-level error (e.g. `os.getenv(x) .. "..."`) makes the extension silently vanish from the menu. Env lookups stay lazy inside functions.
-- **Only `.lua` belongs in the extensions folder** - a stray `.exe` there breaks the extension scan.
-
-### Win32 reshape
+- Lua extensions have **no window-management API** and can only act as a trigger; process spawns flash a console (cmd.exe), so the menu must never spawn one on the normal path. The extension probe runs the chunk top level - any top-level error silently drops the extension from the menu (gotchas #1-4 in §8 record the details).
 - After `SetWindowLongPtrW(GWL_STYLE, ...)` you **must** `SetWindowPos(..., SWP_FRAMECHANGED)` or the frame change won't apply.
-- Save and restore both `GWL_STYLE` and `GWL_EXSTYLE`, plus the window rect.
-- VLC 3.x embedded video is a `WS_CHILD` window (class prefix `"VLC video main"`) inside the Qt main window; resizing the parent re-fits the child **asynchronously** (see §8 debounce).
-
-### Daemon message loop
-- Raw Win32 thread message pump: `GetMessageW` loop; `RegisterHotKey` and `SetTimer` with NULL hwnd deliver `WM_HOTKEY`/`WM_TIMER` to the thread queue (no window needed).
 - **No file I/O inside LL hook callbacks**: exceeding `LowLevelHooksTimeout` makes Windows SILENTLY remove the hook - the fullscreen-block guarantee dies with no error. Hooks read a cache refreshed on the pump thread; hook callbacks dispatch on that same thread, so no synchronization is needed.
 - The exe is **GUI subsystem** (`#![windows_subsystem = "windows"]`): no console ever; stdout is invisible when Explorer-launched, so all machine-readable output goes through files (§6).
 
@@ -58,18 +44,7 @@ VLC's Lua extension API **cannot** do any of this (no window-geometry API). So t
 
 ## 4. Architecture
 
-```mermaid
-flowchart TD
-    MENU["VLC View menu<br>pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle'<br>pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
-    HK["Ctrl+Alt+P global hotkey<br>WM_HOTKEY"] --> D
-    REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon<br>Rust, GUI subsystem, login-started<br>raw Win32 message pump"]
-    D -- "WM_TIMER 150 ms: heartbeat ~3 s,<br>consume request, refresh hook cache,<br>converge minimal-look region" --> D
-    D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
-    D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
-    WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.state in TEMP"]
-```
-
-Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
+Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle. Diagrams: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
@@ -85,7 +60,7 @@ Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
 
 Single binary crate, no lib split. `windows-sys 0.61` is the only dependency; file formats are hand-rolled (§8 gotcha R2).
 
-Modes (argv[1], ASCII-lowercased). Options parsed from the remaining args (used by `daemon`); `w=`/`h=` accept only positive values (like `c=` normalization: a 0/negative size would park an invisible topmost window the converger can never fix):
+Modes (argv[1], ASCII-lowercased). Options parsed from the remaining args (used by `daemon`); `w=`/`h=` are pinned to 1..=16384 (§6.1: 0/negative parks an invisible topmost window; huge values overflow target+chrome):
 - `exit` - restore; no region loop. Exit 0/1.
 - `status` - write status JSON to `%TEMP%\vlc-pip-status.json`. Always exit 0.
 - `daemon` - run the message loop (single instance via named mutex `"VlcPipDaemon"`; a second instance exits 0 silently, touching no files). Exit 0.
@@ -105,11 +80,11 @@ shell:startup\VLC PiP Daemon.lnk  ->  pip-helper.exe daemon  (login auto-start, 
 ## 6. Runtime file contracts (all in `%TEMP%`, truncate-write, UTF-8 no BOM)
 
 ### 6.1 `vlc-pip.state` - the PiP state; its VALID existence IS "in PiP"
-Written by Enter only: one newline-terminated line of exactly 13 whitespace-separated tokens. The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
+Written by Enter (drag release rewrites `corner` and, after a resize, `target_w`/`target_h` - §12): one newline-terminated line of exactly 13 whitespace-separated tokens. The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
 ```
 66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
-Types: `hwnd`/`style`/`ex_style` pointer-sized signed integers (isize in memory, SPEC R4); `x y w h target_w target_h margin` i32 (`target_w`/`target_h` must be in 1..=16384 - anything else reads as no-state, and the bound keeps target+chrome from i32 overflow); `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter; `pid` is the owner process.
+Types: `hwnd`/`style`/`ex_style` pointer-sized signed integers (isize in memory, SPEC R4); `x y w h target_w target_h margin` i32 (`target_w`/`target_h` must be in 1..=16384 - anything else reads as no-state, and the bound keeps target+chrome from i32 overflow); `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter, except `corner`/`target_w`/`target_h`, which drag release may rewrite (§12); `pid` is the owner process.
 - **Any** parse failure (missing trailing newline, wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. The trailing newline is the torn-write sentinel: a truncated write loses it, so a partial line (which could carry a numeric prefix of `pid`) can never parse.
 - **Stale detection (`owns_state`)**: state is live iff `pid != 0` AND `GetWindowThreadProcessId(hwnd) == pid` (a destroyed or recycled HWND yields 0 or a foreign owner - Windows recycles HWNDs, so handle validity alone would pass on a foreign window). Stale state is deleted by Exit, overwritten by Enter, and otherwise handed to the reopen heal (§12), whose terminal branches delete it; `in_pip`/`status` never touch it. Delete failures are swallowed: the next caller retries.
 
@@ -154,8 +129,8 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 5. Delete state iff `ok || !IsWindow(h)` - a failed restore on a still-live window keeps the state so the next toggle retries.
 
 ### Fullscreen-origin PiP (v2.1.1)
-Entering PiP from a fullscreen VLC is the same immediate reshape as any other enter - the PiP appears at the keypress. **VLC's internal fullscreen state stays ON for the whole PiP session.** Clearing it first (post Esc, wait for Qt's windowed restore) cost the user ~0.5-1s of dead screen; the reverse order desyncs Qt, which restores its windowed geometry only from an UNTOUCHED fullscreen window - after an external reshape, Esc left a captionless window at the PiP rect with the menus grown back (verified live). A fullscreen-origin PiP is recognized by its saved pre-PiP style: `WS_CAPTION` fully absent (an iconic VLC is restored before the snapshot, as always).
-- **While such a PiP lives**: VLC's fullscreen controller strip - a separate topmost window (class prefix `Qt5QWindowToolSaveBits`) - is **veiled**: an empty window region makes it paint nothing no matter how often VLC shows it. VLC re-shows the strip on any hover or refocus of a vout it believes fullscreen, faster than any tick could re-hide - hiding alone flashed the strip for up to one tick (live-reported). The veil region survives VLC's show/hide cycles (probed live; alpha-0 does NOT - Qt re-applies its configured opacity on show - and the region also leaves VLC's opacity setting untouched). enter() veils BEFORE the reshape lands (the strip is likely on screen at toggle time); the daemon re-veils every tick, which also catches a recreated strip window. Every path that ends the session **unveils** - exit, dissolve, heal cleanup, stale-record deletion or overwrite, enter's own rollback - after which the strip renders again (immediately if VLC left it shown, else on its next hover cycle). The keyboard hook swallows **Esc** (in addition to F) while VLC is focused: either key would make Qt leave fullscreen underneath the reshape.
+Entering PiP from a fullscreen VLC is the same immediate reshape as any other enter - the PiP appears at the keypress. **VLC's internal fullscreen state stays ON for the whole PiP session.** Clearing it first (post Esc, wait for Qt's windowed restore) cost the user ~0.5-1s of dead screen; the reverse order desyncs Qt, which restores its windowed geometry only from an UNTOUCHED fullscreen window - after an external reshape, Esc left a captionless window at the PiP rect with the menus grown back (verified live). A fullscreen-origin PiP is recognized by its saved pre-PiP style: the full `WS_CAPTION` mask not present (an iconic VLC is restored before the snapshot, as always).
+- **While such a PiP lives**: VLC's fullscreen controller strip - a separate topmost window (class prefix `Qt5QWindowToolSaveBits`) - is **veiled**: an empty window region makes it paint nothing no matter how often VLC shows it. VLC re-shows the strip on any hover or refocus of a vout it believes fullscreen, faster than any tick could re-hide - hiding alone flashed the strip for up to one tick (live-reported). The veil region survives VLC's show/hide cycles (probed live; alpha-0 does NOT - Qt re-applies its configured opacity on show - and the region also leaves VLC's opacity setting untouched). enter() veils BEFORE the reshape lands (the strip is likely on screen at toggle time); the daemon re-veils every tick, which also catches a recreated strip window. Every path that ends the session **unveils** - exit, dissolve, heal cleanup, stale-record deletion or overwrite, enter's own rollback - after which the strip renders again (immediately if VLC left it shown, else on its next hover cycle). The keyboard hook swallows **bare Esc** (no Ctrl/Alt/Win held - a modified Esc is an OS shortcut and must pass) in addition to F while VLC is focused: either key would make Qt leave fullscreen underneath the reshape.
 - **Exit restores the saved fullscreen style + rect verbatim** - the ordinary exit path, no special casing. The user came from fullscreen and gets fullscreen back, and VLC's internal state matches its window again; leaving fullscreen afterwards is VLC's own untouched restore, so the original windowed rect survives the whole trip.
 - **Dissolve on media end / stop**: VLC leaves fullscreen internally BY ITSELF when playback ends or is stopped - no input involved - and its re-layout balloons the window to Qt's idea of windowed geometry within ~a tick of the vout dying (verified live). The tick watches for that signature on fullscreen-origin sessions (vout gone AND the rect moved off the last rect seen with live video; runs regardless of `min`): the PiP session then dissolves - frame styles back at Qt's chosen rect, state deleted. Stock VLC lands windowed after fullscreen playback ends too, and the saved fullscreen rect must never be restored onto an internally windowed VLC. A toggle after the dissolve is a fresh windowed-origin enter.
 - **Heal**: a fullscreen-origin record (§12) is deleted, never applied - its rect is the fullscreen rect, and Qt, believing fullscreen throughout, persisted the true windowed geometry itself.
@@ -171,7 +146,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 6. Child at target: verify the region **box** against the child-relative rect (a live-clipped resize drag leaves an approximate region) and set it on mismatch: `CreateRectRgn` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
 
 ### Fullscreen prevention (prevent, don't auto-exit; poll-and-snap-back flickers)
-- **Keys** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd` - for vk == F always, and for vk == Esc when the PiP is fullscreen-origin (see above). Key-ups pass.
+- **Keys** (`WH_KEYBOARD_LL`): swallow iff `code >= 0` AND (WM_KEYDOWN or WM_SYSKEYDOWN) AND hook cache says in-PiP AND `GetForegroundWindow() == cached hwnd` - for vk == F always, and for bare vk == Esc (no Ctrl/Alt/Win held) when the PiP is fullscreen-origin (see above). Key-ups pass.
 - **Clicks** (`WH_MOUSE_LL`) - the rate-limit, exact bookkeeping (last ALLOWED down time+point, swallow_next_up flag):
   - On `WM_LBUTTONDOWN` over the PiP (root ancestor of `WindowFromPoint` == cached hwnd): `burst = (evt.time - last_allowed_time <= GetDoubleClickTime()) && |dx| <= SM_CXDOUBLECLK && |dy| <= SM_CYDOUBLECLK`. Burst → set swallow_next_up, swallow. Else record this down as the new ALLOWED reference and pass.
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
@@ -182,7 +157,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 
 ### Daemon loop
 1. Named mutex `"VlcPipDaemon"` → second instance exits 0 before touching any file.
-2. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`. Neither failure is fatal. LL hooks are NOT installed here - they follow the session (see above).
+2. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)` - NULL-hwnd, so `WM_HOTKEY`/`WM_TIMER` arrive on the thread queue, no window needed. Neither failure is fatal. LL hooks are NOT installed here - they follow the session (see above).
 3. Refresh hook cache once and sync hooks (a daemon restarted while already in PiP must be guarded from the first message); beat once.
 4. Pump: `WM_HOTKEY` → Toggle + refresh cache + sync hooks. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter` act; `stop` → `PostQuitMessage(0)`), refresh cache, sync hooks, keep the fullscreen controller strip veiled while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler.
 5. Cleanup on loop exit: unhook if installed, unregister hotkey, delete the alive file.
