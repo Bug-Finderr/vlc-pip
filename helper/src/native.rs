@@ -131,7 +131,7 @@ pub fn owns_state(s: &PipState) -> bool {
 }
 
 // Read-only: a stale record may be a pending reopen-heal whose lifecycle belongs to maintain_region.
-pub fn in_pip() -> bool {
+fn in_pip() -> bool {
     state::load(&state::state_path()).is_some_and(|s| owns_state(&s))
 }
 

@@ -4,7 +4,7 @@ use crate::geometry::Corner;
 
 // A VALID file on disk == "in PiP"; x..ex_style restore the window, target_w..min are the options in
 // effect at Enter, pid guards against HWND recycling.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct PipState {
     pub hwnd: isize,
     pub x: i32,

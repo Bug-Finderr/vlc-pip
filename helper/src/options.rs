@@ -10,19 +10,12 @@ pub struct PipOptions {
     pub min: bool,
 }
 
-impl Default for PipOptions {
-    fn default() -> Self {
-        Self { w: 480, h: 270, corner: Corner::Br, margin: 16, min: true }
-    }
-}
-
 pub fn parse_options<'a>(args: impl IntoIterator<Item = &'a str>) -> PipOptions {
-    let mut o = PipOptions::default();
+    let mut o = PipOptions { w: 480, h: 270, corner: Corner::Br, margin: 16, min: true };
     // pinned to 1..=16384: 0/negative parks an invisible topmost window; huge values overflow target+chrome
     let pos = |v: &str| v.trim().parse::<i32>().ok().filter(|&n| crate::geometry::target_ok(n));
     for a in args {
-        let Some(i) = a.find('=') else { continue };
-        let (k, v) = (&a[..i], &a[i + 1..]);
+        let Some((k, v)) = a.split_once('=') else { continue };
         match k {
             "w" => o.w = pos(v).unwrap_or(o.w),
             "h" => o.h = pos(v).unwrap_or(o.h),
@@ -53,8 +46,6 @@ pub fn effective(argv: &[String]) -> PipOptions {
 /// Written on drag release. Failure swallowed: the gesture still holds via the state file.
 pub fn save_config(w: i32, h: i32, corner: Corner) {
     let Some(p) = config_path() else { return };
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
+    let _ = p.parent().map(std::fs::create_dir_all);
     let _ = std::fs::write(p, format!("w={w} h={h} c={}", corner.as_str()));
 }
