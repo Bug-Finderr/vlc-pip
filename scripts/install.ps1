@@ -36,7 +36,6 @@ $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut("$startup\VLC PiP Daemon.lnk")
 $lnk.TargetPath = "$pipDir\pip-helper.exe"
 $lnk.Arguments = "daemon"
-$lnk.WorkingDirectory = $pipDir
 $lnk.Save()
 
 Start-Process "$pipDir\pip-helper.exe" daemon
