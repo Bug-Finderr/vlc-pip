@@ -34,6 +34,26 @@ function SameRect($left, $right) {
     $left.x -eq $right.x -and $left.y -eq $right.y -and
         $left.w -eq $right.w -and $left.h -eq $right.h
 }
+function WaitForStableStatus([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 150) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $previous = $null
+    while ($sw.ElapsedMilliseconds -lt $capMs) {
+        $status = Status
+        if (& $cond $status) {
+            if ($previous -and (SameRect $status $previous)) {
+                return [pscustomobject]@{ Matched = $true; Status = $status }
+            }
+            $previous = $status
+        }
+        else { $previous = $null }
+        Start-Sleep -Milliseconds $stepMs
+    }
+    $status = Status
+    [pscustomobject]@{
+        Matched = [bool]((& $cond $status) -and $previous -and (SameRect $status $previous))
+        Status = $status
+    }
+}
 function ReadHeartbeat {
     try {
         $raw = (Get-Content $heartbeatPath -Raw).Trim()
@@ -75,12 +95,16 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int max);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT rect);
+[DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
 [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
 [DllImport("gdi32.dll")] public static extern int GetRgnBox(IntPtr rgn, out RECT box);
 [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
 [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
 public delegate bool EnumProc(IntPtr h, IntPtr l);
 private const int NULLREGION = 1;
+private const int WS_CAPTION = 0x00C00000;
+private const int WS_EX_TOPMOST = 0x00000008;
 public struct RECT { public int Left, Top, Right, Bottom; }
 public struct POINT { public int X, Y; }
 public sealed class ScreenPoint {
@@ -103,6 +127,13 @@ public static bool CursorNear(int x, int y, int tolerance) {
     return GetCursorPos(out point)
         && Math.Abs(point.X - x) <= tolerance
         && Math.Abs(point.Y - y) <= tolerance;
+}
+public static bool PipLanded(IntPtr h, int maxWidth) {
+    RECT rect;
+    return GetWindowRect(h, out rect)
+        && (GetWindowLongW(h, -16) & WS_CAPTION) != WS_CAPTION
+        && (GetWindowLongW(h, -20) & WS_EX_TOPMOST) != 0
+        && rect.Right - rect.Left < maxWidth;
 }
 // VLC's vout event thread processes POSTED keys regardless of focus - keybd_event would
 // need VLC foreground, and injected focus-clicks from a background session are flaky
@@ -292,17 +323,9 @@ try {
 
     # screen:// = live playing video, so the video child window and minimal-look region exist
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
-    # $before anchors exact-rect checks: wait for two identical startup samples.
-    $prevR = $null
-    for ($i = 0; $i -lt 20; $i++) {
-        $cur = Status
-        if ($cur.found -and $prevR -and $cur.x -eq $prevR.x -and $cur.y -eq $prevR.y -and $cur.w -eq $prevR.w -and $cur.h -eq $prevR.h) { break }
-        $prevR = $cur
-        Start-Sleep -Milliseconds 300
-    }
-
-    $before = Status
-    Check "vlc ready (windowed, caption)" ($before.found -and $before.caption)
+    $startup = WaitForStableStatus { param($status) $status.found -and $status.caption } 6000 300
+    $before = $startup.Status
+    Check "vlc ready (windowed, caption)" ($startup.Matched -and $before.found -and $before.caption)
 
     Req "toggle"
     $null = WaitFor { (Status).minimal } 4000 150
@@ -363,27 +386,9 @@ try {
         ((-not $s.inPip) -and $s.topmost -eq $before.topmost -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
     PostKey $s.hwnd 0x46 0x21
-    # Qt can resize through several captionless frames. Record fullscreen only after two
-    # consecutive captionless status samples carry the exact same rect.
-    $fs = $null
-    $previousFs = $null
-    $fsStable = $false
-    $fsWait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($fsWait.ElapsedMilliseconds -lt 2500) {
-        $candidate = Status
-        if ($candidate.found -and -not $candidate.caption) {
-            if ($previousFs -and (SameRect $candidate $previousFs)) {
-                $fs = $candidate
-                $fsStable = $true
-                break
-            }
-            $previousFs = $candidate
-        }
-        else { $previousFs = $null }
-        Start-Sleep -Milliseconds 150
-    }
-    if (-not $fs) { $fs = Status }
-    Check "fullscreen: engaged at a stable rect" $fsStable
+    $fullscreen = WaitForStableStatus { param($status) $status.found -and (-not $status.caption) } 2500 150
+    $fs = $fullscreen.Status
+    Check "fullscreen: engaged at a stable rect" $fullscreen.Matched
 
     # Summon the strip first: the realistic toggle starts with it rendered. Use the
     # fullscreen rect center rather than the primary monitor center.
@@ -392,16 +397,22 @@ try {
     $stripUp = WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Rendered -gt 0 } 2500 60
     Check "controller: rendered before fullscreen PiP enter" $stripUp
 
+    # A status process can take about a second in fullscreen; time the window directly.
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
     Req "toggle"
+    $landedFast = WaitFor {
+        (Test-Path "$env:TEMP\vlc-pip.state") -and
+            [Smoke.Keys]::PipLanded([IntPtr]::new([long]$fs.hwnd), [int]($fs.w / 2))
+    } 500 5
+    $enterMs = $hsw.ElapsedMilliseconds
     $landing = WaitForStatus {
         param($status)
         $status.inPip -and (-not $status.caption) -and $status.topmost -and $status.w -lt [int]($fs.w / 2)
-    } 2000 15
-    $enterMs = $hsw.ElapsedMilliseconds
+    } 2500 60
     $fpip = $landing.Status
     Check "fullscreen enter: immediate (<500ms), pip-sized" `
-        ($landing.Matched -and $enterMs -lt 500 -and $fpip.inPip -and (-not $fpip.caption) -and $fpip.topmost -and $fpip.w -lt [int]($fs.w / 2))
+        ($landedFast -and $enterMs -lt 500 -and $landing.Matched -and $fpip.inPip -and
+            (-not $fpip.caption) -and $fpip.topmost -and $fpip.w -lt [int]($fs.w / 2))
     Check "controller: every matching window veiled in fullscreen PiP" `
         (WaitFor { AllControllersVeiled $fs.hwnd } 750 25)
 
@@ -467,8 +478,14 @@ try {
         ($dissolve.Matched -and $dis.caption -and (-not $dis.inPip) -and
             (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and $dissolvedControllers.Veiled -eq 0)
 
-    # A clean close persists PiP geometry; reopening must heal it before deleting state.
-    $pre = Status
+    # Restart after the stop scenario so the heal target is a stable, valid VLC rect,
+    # not the captioned PiP-size shell left by the fullscreen dissolve.
+    $vlcProc.CloseMainWindow() | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    $healBaseline = WaitForStableStatus { param($status) $status.found -and $status.caption } 6000 300
+    if (-not $healBaseline.Matched) { throw "reopen-heal setup failed: window did not stabilize" }
+    $pre = $healBaseline.Status
     Req "enter"
     $healReady = WaitForStatus {
         param($status)
@@ -476,7 +493,13 @@ try {
     } 3000 150
     if (-not $healReady.Matched) { throw "reopen-heal precondition failed: PiP state was not persisted" }
     $vlcProc.CloseMainWindow() | Out-Null
-    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
+    if (-not $vlcProc.WaitForExit(8000)) {
+        Stop-Process -Id $vlcProc.Id -Force -Confirm:$false
+        throw "reopen-heal precondition failed: VLC did not close cleanly"
+    }
+    if (-not (Test-Path "$env:TEMP\vlc-pip.state")) {
+        throw "reopen-heal precondition failed: state was deleted before recorded VLC exited"
+    }
     Start-Sleep 1
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
     $healDone = WaitForStatus {
