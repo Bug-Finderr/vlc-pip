@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, LRESULT, WPARAM};
@@ -21,9 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
-// Hooks dispatch on the pump thread: whole-struct Cells, no disk I/O in hooks (SPEC 3, R7); the one
-// atomic serves the any-thread panic hook.
-static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
+// Pump-thread hook dispatch: whole-struct Cells, no disk I/O in hooks (SPEC 3, R7).
 
 const WM_APP_DRAG: u32 = WM_APP;
 const WM_APP_DRAGEND: u32 = WM_APP + 1;
@@ -82,10 +79,6 @@ thread_local! {
     static PIP: Cell<Pip> = Cell::new(Pip::default());
 }
 
-pub fn owns_alive_file() -> bool {
-    OWNS_ALIVE_FILE.load(Relaxed)
-}
-
 fn refresh_hook_cache(s: Option<PipState>) {
     // owns_state, not IsWindow: heal records keep stale states alive, and a recycled HWND must never re-arm guards on a foreign window
     PIP.set(s.filter(native::owns_state).map_or(Pip::default(), |s| Pip {
@@ -142,7 +135,6 @@ pub fn run(argv: &[String]) -> i32 {
         let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
         let _ = std::fs::write(&alive, epoch.to_string());
     };
-    OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
     refresh_hook_cache(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
     sync_hooks(&mut hooks);
@@ -189,7 +181,6 @@ pub fn run(argv: &[String]) -> i32 {
         UnregisterHotKey(std::ptr::null_mut(), 1);
     }
     let _ = std::fs::remove_file(&alive);
-    OWNS_ALIVE_FILE.store(false, Relaxed);
     0
 }
 

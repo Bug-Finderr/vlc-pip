@@ -17,8 +17,8 @@ fn main() {
             .unwrap_or_default();
         let msg = info.payload_as_str().unwrap_or("panic");
         let _ = std::fs::write(state::crash_path(), format!("panic at {loc}: {msg}"));
-        if daemon::owns_alive_file() {
-            // a crashed daemon must not leave a fresh heartbeat: pip.lua would treat it as alive for 15s and drop toggles
+        if std::env::args_os().nth(1).is_some_and(|a| a.eq_ignore_ascii_case("daemon")) {
+            // a crashed daemon must not leave a fresh heartbeat (SPEC 6.3)
             let _ = std::fs::remove_file(state::alive_path());
         }
         std::process::exit(3);
