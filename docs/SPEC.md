@@ -170,6 +170,7 @@ Entering PiP from a fullscreen VLC is the same immediate reshape as any other en
 
 ### maintain_region() - minimal look, converging per-tick (daemon timer + one-shot loop)
 Cross-tick state: the previous (window, child) rects held as an Option (None = reset; reset on missing/stale state, no child, and after our own resize), plus the fullscreen-origin dissolve baseline, heal retry counter, and bounded absent-process snapshot wait. A drag clears only the stability debounce, preserving the dissolve and heal fields.
+The function reports terminal dissolve/heal state drops. The daemon then conditionally reloads state and re-syncs its cache/hooks in the same tick; ordinary ticks keep one shared state-file load, while the one-shot converger ignores the signal.
 1. Load state; missing → reset, return. Stale → reset, hand to the reopen heal (§12), return. `min=0` → return.
 2. Find the video child: first visible child (recursive) whose class starts with `"VLC video main"`. None (playback stopped) → reset, clear region if present, return.
 3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash in v1). Always record current rects.
@@ -184,7 +185,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
   - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (v1 bug: swallowing only the 2nd click let the OS pair clicks 1+3 - TRIPLE click fullscreened.)
   - `GetDoubleClickTime`/`GetSystemMetrics` queried live per event; timestamps are u32 ms with wrapping subtraction.
-- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing the full owner-PID guard, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
+- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing the full owner-PID guard, refreshed before the loop, after every hotkey/timer action, and immediately after terminal maintenance). Deletion of stale files stays in the toggle paths + maintain_region.
 - **Hooks are session-scoped.** The pump installs only null hook slots while an owned PiP session is active and unhooks each non-null slot when none is active. Failed installs and unhooks retry at the next sync without duplicate installs. The cache is cleared before unhooking, so a retained hook passes input through. Ending a session resets drag state and only the pending swallowed button-up flag; the last allowed click remains the rate-limit reference across a quick toggle cycle.
 
 ### Daemon loop
@@ -192,7 +193,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 2. Discard pre-launch `stop` request (only `stop`).
 3. Register the hotkey and 150 ms thread timer, retain both success flags, and initialize two null LL-hook slots. Neither registration failure is fatal.
 4. Load state and run the full owner-checked session/hook sync before the first heartbeat (a daemon restarted while already in PiP is guarded from the first message).
-5. Pump: `WM_HOTKEY` → Toggle + immediate session sync. `WM_TIMER` → consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), load state + sync, beat if >3 s, maintain the fullscreen controller veil while a fullscreen-origin PiP is active, maintain_region - in that order. Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. The daemon creates no windows and accepts no text input; it handles its `WM_HOTKEY`/`WM_TIMER`/`WM_APP` thread messages directly, so `TranslateMessage` and `DispatchMessageW` are intentionally absent.
+5. Pump: `WM_HOTKEY` → Toggle + immediate session sync. `WM_TIMER` → consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), load state + sync, maintain the fullscreen controller veil while a fullscreen-origin PiP is active, maintain_region, conditionally reload + sync if maintenance dropped state, then beat if >3 s. Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. The daemon creates no windows and accepts no text input; it handles its `WM_HOTKEY`/`WM_TIMER`/`WM_APP` thread messages directly, so `TranslateMessage` and `DispatchMessageW` are intentionally absent.
 6. Cleanup on loop exit: sync to no session (retrying each installed hook once), unregister the hotkey, delete the alive file, and clear heartbeat ownership. A final failed unhook remains until process exit.
 
 ---
@@ -277,7 +278,7 @@ Written on every drag release (from the pump, never the hook; the `pip` folder i
 
 ### Mechanics
 - The mouse hook arms on an **allowed** button-down over the PiP (cursor origin, window + visible rects, zone) and activates past `SM_CX/CYDRAG`; while active it stores the latest cursor position and posts one **coalesced** `WM_APP` drag message. Idle mouse-move cost is one thread-local read, and the hook still never touches the disk.
-- The pump computes the target rect itself (move = start + delta; resize = aspect plan) and applies it with an async `SetWindowPos`. Every message carries a generation counter, so a rapid release-and-repress can't mix a stale message with re-armed state.
+- The pump computes the target rect itself (move = start + delta; resize = aspect plan) and applies it with an async `SetWindowPos`. Every message carries a generation counter, so a rapid release-and-repress can't mix a stale message with re-armed state; immediately before any Win32 mutation, the pump also verifies that the target HWND's current owner still equals the cached session PID.
 - The minimal look stays live through a resize: each tick re-clips to the start chrome offsets applied to the new size; after release, convergence verifies the region **box** (not just presence) against the actual video child and corrects it.
 - Drag-end finalizes **from the computed rect** - the async `SetWindowPos` may not have landed in VLC yet, so a fresh `GetWindowRect` would read stale.
 - `maintain_region` is skipped while a drag is active; drag ticks and release clear only its stability debounce, preserving the fullscreen dissolve baseline and heal cadence fields. After a resize, convergence re-clips with at most a ±2px correction.

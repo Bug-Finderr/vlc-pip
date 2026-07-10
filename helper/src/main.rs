@@ -88,7 +88,7 @@ fn one_shot(ok: bool, o: &options::PipOptions) -> i32 {
         for _ in 0..6 {
             // debounce needs ~4 ticks: measure, resize, measure, region
             std::thread::sleep(std::time::Duration::from_millis(150));
-            native::maintain_region(&mut tracker, state::load(&state::state_path()));
+            let _ = native::maintain_region(&mut tracker, state::load(&state::state_path()));
         }
     }
     if ok { 0 } else { 1 }

@@ -26,7 +26,7 @@ A **valid** `%TEMP%\vlc-pip.state` is the single source of truth for "in PiP" - 
 ```mermaid
 flowchart LR
     subgraph D["daemon (single instance via named mutex, raw GetMessage pump)"]
-        T["WM_TIMER 150 ms<br>consume request, sync session/hooks,<br>heartbeat ~3 s, converge region"]
+        T["WM_TIMER 150 ms<br>consume request, sync, converge region,<br>resync on drop, heartbeat ~3 s"]
         H["WM_HOTKEY<br>Ctrl+Alt+P = toggle"]
         K["WH_KEYBOARD_LL<br>swallow F while in PiP + VLC focused"]
         M["WH_MOUSE_LL<br>rate-limit clicks over the PiP,<br>arm + track drag gestures"]
@@ -40,7 +40,7 @@ flowchart LR
 Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 
 - **Fullscreen prevention is preventive, not reactive.** A poll-and-snap-back guard flickers; instead the mouse hook swallows every button-down within double-click time/rect of the last *allowed* down, so the OS can never synthesize `WM_LBUTTONDBLCLK` (swallowing only the 2nd click let clicks 1+3 pair - triple-click fullscreened).
-- **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread.
+- **Hooks never touch the disk.** File I/O in a low-level hook risks `LowLevelHooksTimeout`, after which Windows silently removes the hook. Hooks read an HWND cache refreshed on the pump thread, including immediately after maintenance ends a session.
 - **Hooks follow the owned PiP session.** The idle daemon has no LL hooks. Each null slot installs independently while a session is active; failed installs retry without duplicating a live hook. On session end, each non-null slot unhooks independently and failed removals retry, with the cleared cache making any retained hook pass input through.
 - **The pump handles thread messages directly.** It creates no windows and accepts no text input, so its `WM_HOTKEY`, `WM_TIMER`, and coalesced `WM_APP` messages need neither `TranslateMessage` nor `DispatchMessageW`.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.

@@ -216,23 +216,27 @@ pub fn run(argv: &[String]) -> i32 {
             sync_session(&mut hooks, state::load(&state::state_path()));
         } else if msg.message == WM_TIMER {
             poll_request(argv);
-            // one state snapshot per tick, shared by the hook cache and the converger;
-            // it must reflect a request-triggered toggle within this same tick
+            // The normal tick shares one post-request snapshot between session sync and
+            // maintenance. A terminal maintenance change alone triggers a second load.
             let s = state::load(&state::state_path());
             sync_session(&mut hooks, s);
-            if last_beat.elapsed() > Duration::from_secs(3) {
-                beat(&mut last_beat, &hooks);
-            }
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its
                 // controller strip off the screen (SPEC section 7)
                 native::veil_fs_controller(pip.pid);
             }
-            if DRAG.get().state == DragState::Active {
+            let state_dropped = if DRAG.get().state == DragState::Active {
                 tracker.reset_debounce(); // gestures own the window while dragging
+                false
             } else {
-                native::maintain_region(&mut tracker, s);
+                native::maintain_region(&mut tracker, s)
+            };
+            if state_dropped {
+                sync_session(&mut hooks, state::load(&state::state_path()));
+            }
+            if last_beat.elapsed() > Duration::from_secs(3) {
+                beat(&mut last_beat, &hooks);
             }
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
             on_drag_msg(&msg, &mut tracker);
@@ -248,13 +252,17 @@ pub fn run(argv: &[String]) -> i32 {
 
 // The coalesced drag apply. Snapshot the gesture BEFORE any Win32 call: SetWindowPos/
 // SetWindowRgn can pump sent messages, and a hook re-arm mid-call must not be clobbered
-// or half-read. The generation guard drops a queued message from a previous drag (a
-// rapid release-and-repress re-arms the gesture; the stale delta must not apply).
+// or half-read. Generation drops an old gesture's queued message; the fresh owner-PID
+// check prevents a recycled HWND from targeting a foreign window.
 fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let mut d = DRAG.get();
     d.move_pending = false;
     DRAG.set(d);
-    if d.hwnd != PIP.get().hwnd || msg.lParam != d.generation as isize {
+    let pip = PIP.get();
+    if d.hwnd != pip.hwnd
+        || msg.lParam != d.generation as isize
+        || !drag_owner_is_current(pip.pid, native::window_owner(d.hwnd))
+    {
         return;
     }
     let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
@@ -287,6 +295,10 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
         tracker.reset_debounce(); // convergence re-clips from a clean debounce
     }
+}
+
+fn drag_owner_is_current(cached_pid: u32, current_pid: u32) -> bool {
+    cached_pid != 0 && cached_pid == current_pid
 }
 
 fn poll_request(argv: &[String]) {
@@ -428,6 +440,13 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
 #[cfg(test)]
 mod internal_tests {
     use super::*;
+
+    #[test]
+    fn drag_owner_requires_nonzero_matching_pid() {
+        assert!(drag_owner_is_current(42, 42));
+        assert!(!drag_owner_is_current(42, 99));
+        assert!(!drag_owner_is_current(0, 0));
+    }
 
     #[test]
     fn drag_reset_preserves_generation_while_clearing_gesture() {

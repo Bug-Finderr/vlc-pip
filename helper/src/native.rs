@@ -709,17 +709,17 @@ fn dissolve_fs_pip(s: &PipState, path: &Path) {
 /// region; child not at target size -> resize with chrome compensation; child at target
 /// -> clip to the video area. Acts only on STABLE frames (window+child rects unchanged
 /// since the previous tick): VLC re-fits the child asynchronously after our resize, so
-/// a fresh measurement can be stale and yield garbage chrome.
-pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
+/// a fresh measurement can be stale and yield garbage chrome. Returns true only when a
+/// terminal dissolve/heal path drops state, so the daemon can resync its session cache.
+pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) -> bool {
     let path = state::state_path();
     let Some(s) = s else {
         t.prev = None;
-        return;
+        return false;
     };
     if !owns_state(&s) {
         t.prev = None;
-        heal_reopened(&mut t.heal_tries, &mut t.heal_wait, &s, &path);
-        return;
+        return heal_reopened(&mut t.heal_tries, &mut t.heal_wait, &s, &path);
     }
     t.heal_tries = 0; // a live owned PiP ends any interrupted heal cleanly
     t.heal_wait = 0;
@@ -735,14 +735,14 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
         } else if t.fs_prev.is_some_and(|p| p != wr) {
             dissolve_fs_pip(&s, &path);
             *t = RegionTracker::default();
-            return;
+            return true;
         }
     } else {
         t.fs_prev = None;
     }
 
     if !s.min {
-        return;
+        return false;
     }
 
     if child == 0 {
@@ -750,14 +750,14 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
         if has_region(h) {
             unsafe { SetWindowRgn(hw(h), std::ptr::null_mut(), 1) }; // playback stopped: show full mini UI
         }
-        return;
+        return false;
     }
 
     let cr = window_rect(child).unwrap_or_default();
     let stable = t.prev == Some((wr, cr));
     t.prev = Some((wr, cr));
     if !stable {
-        return; // wait until VLC's re-layout settles
+        return false; // wait until VLC's re-layout settles
     }
 
     match geometry::plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || {
@@ -781,6 +781,7 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
             }
         }
     }
+    false
 }
 
 pub(crate) fn heal_snapshot_due(wait: &mut u8) -> bool {
@@ -801,10 +802,11 @@ pub(crate) fn heal_target(s: &PipState) -> Option<geometry::Rect> {
     })
 }
 
-fn finish_heal(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) {
+fn finish_heal(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) -> bool {
     *tries = 0;
     *wait = 0;
     drop_state(s, path);
+    true
 }
 
 /// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
@@ -812,42 +814,38 @@ fn finish_heal(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) {
 /// stale state file is kept as a pending-restore record; when a new player window
 /// appears, apply the saved pre-PiP rect and delete the record only once the rect is
 /// observed to stick - VLC's own startup positioning must not win the race.
-fn heal_reopened(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) {
+fn heal_reopened(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) -> bool {
     if s.w <= 0 || s.h <= 0 || s.pid == 0 {
-        finish_heal(tries, wait, s, path); // garbage record: not healable
-        return;
+        return finish_heal(tries, wait, s, path); // garbage record: not healable
     }
     if fs_origin(s.style) {
         // a fullscreen-origin PiP's record holds the FULLSCREEN rect - never heal a
         // reopened window to it. Qt believed fullscreen the whole session, so it
         // persisted its true windowed geometry itself: nothing to heal.
-        finish_heal(tries, wait, s, path);
-        return;
+        return finish_heal(tries, wait, s, path);
     }
     let Some(target) = heal_target(s) else {
-        finish_heal(tries, wait, s, path);
-        return;
+        return finish_heal(tries, wait, s, path);
     };
     if !heal_snapshot_due(wait) {
-        return;
+        return false;
     }
     let pids = vlc_pids();
     if pids.contains(&s.pid) {
-        finish_heal(tries, wait, s, path); // recorded VLC still runs: not a close-in-PiP
-        return;
+        return finish_heal(tries, wait, s, path); // recorded VLC still runs: not a close-in-PiP
     }
     if pids.is_empty() {
         *wait = 6;
-        return; // VLC not back yet: wait about a second before the next snapshot
+        return false; // VLC not back yet: wait about a second before the next snapshot
     }
     *wait = 0; // VLC is back: check every tick while its player window settles
     let h2 = find_player_for_pids(&pids);
     if h2 == 0 {
-        return;
+        return false;
     }
     unsafe {
         if IsIconic(hw(h2)) != 0 {
-            return; // heal the normal placement once restored - the iconic rect is garbage
+            return false; // heal the normal placement once restored - the iconic rect is garbage
         }
         let tr = RECT {
             left: target.left,
@@ -856,17 +854,14 @@ fn heal_reopened(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) {
             bottom: target.bottom,
         };
         if MonitorFromRect(&tr, MONITOR_DEFAULTTONULL).is_null() {
-            finish_heal(tries, wait, s, path); // monitor layout changed: VLC's placement is saner
-            return;
+            return finish_heal(tries, wait, s, path); // monitor layout changed: VLC's placement is saner
         }
         if window_rect(h2) == Some(target) {
-            finish_heal(tries, wait, s, path); // heal landed and stuck: done
-            return;
+            return finish_heal(tries, wait, s, path); // heal landed and stuck: done
         }
         *tries += 1;
         if *tries > 40 {
-            finish_heal(tries, wait, s, path); // not converging: stop fighting the window
-            return;
+            return finish_heal(tries, wait, s, path); // not converging: stop fighting the window
         }
         SetWindowPos(
             hw(h2),
@@ -878,6 +873,7 @@ fn heal_reopened(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) {
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
+    false
 }
 
 #[cfg(test)]
@@ -891,6 +887,39 @@ mod internal_tests {
             right,
             bottom,
         }
+    }
+
+    fn state(pid: u32) -> PipState {
+        PipState {
+            hwnd: 1,
+            x: 100,
+            y: 200,
+            w: 1000,
+            h: 640,
+            style: WS_CAPTION as isize,
+            ex_style: 0,
+            target_w: 480,
+            target_h: 270,
+            corner: geometry::Corner::Br,
+            margin: 16,
+            min: true,
+            pid,
+        }
+    }
+
+    #[test]
+    fn heal_reports_only_terminal_state_deletion() {
+        let path = std::env::temp_dir().join(format!(
+            "pip-maintenance-signal-test-{}.state",
+            std::process::id()
+        ));
+        std::fs::write(&path, "pending").unwrap();
+        let (mut tries, mut wait) = (9, 6);
+        assert!(heal_reopened(&mut tries, &mut wait, &state(0), &path));
+        assert!(!path.exists());
+
+        let (mut tries, mut wait) = (0, 1);
+        assert!(!heal_reopened(&mut tries, &mut wait, &state(42), &path));
     }
 
     #[test]
