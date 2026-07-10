@@ -145,12 +145,13 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 
 ### enter(h, o) - all steps in this order
 1. Guard: null h or already InPip → false.
-2. `IsIconic(h)` → `ShowWindow(h, SW_RESTORE)` (else the off-screen iconic rect gets saved as the restore state).
-3. Read rect, `GWL_STYLE`, `GWL_EXSTYLE`, owner pid; **save state FIRST** (before any mutation).
-4. With `min=1` and a video child present, measure the client-relative chrome around the child (menu above, controller below - Qt client-area widgets, so the offsets survive the border strip; sanity: per-axis sums within 0..=300, else fall back to step 6's plain path).
-5. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
-6. Corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`. With measured chrome, one `SetWindowPos(h, HWND_TOPMOST, vx-cl, vy-ct, w+cl+cr, h+ct+cb, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` followed immediately by the region `(cl, ct, cl+w, ct+h)` - the PiP lands fully formed, no visible grow-then-clip pass (the converger only verifies). Without chrome (not playing, `min=0`, garbage measurement): plain `SetWindowPos(..., o.w, o.h, ...)` and the converger takes over.
-7. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, delete state, never claim in-PiP (the region is only applied after a successful SetWindowPos).
+2. Reject a nonpositive target before changing the window.
+3. `IsIconic(h)` → `ShowWindow(h, SW_RESTORE)` (else both the chrome measurement and restore rect can be stale/off-screen).
+4. Read the work area and, with `min=1` and a video child present, the client-relative chrome around the child (menu above, controller below - Qt client-area widgets, so the offsets survive the border strip; sanity: per-axis sums within 0..=300, else use the plain path). Precompute the complete landing rect and optional region with checked arithmetic. An unrepresentable coordinate or size returns false before state save or PiP mutation.
+5. Read rect, `GWL_STYLE`, `GWL_EXSTYLE`, owner pid; reject a nonpositive or unrepresentable restore size; **save state before any PiP mutation**.
+6. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
+7. Apply the precomputed corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`. With measured chrome, one `SetWindowPos(h, HWND_TOPMOST, vx-cl, vy-ct, w+cl+cr, h+ct+cb, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` followed immediately by the region `(cl, ct, cl+w, ct+h)` - the PiP lands fully formed, no visible grow-then-clip pass (the converger only verifies). Without chrome (not playing, `min=0`, garbage measurement): plain `SetWindowPos(..., o.w, o.h, ...)` and the converger takes over.
+8. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, delete state, never claim in-PiP (the region is only applied after a successful SetWindowPos).
 
 ### exit() - all steps in this order
 1. Load state; null → false. `owns_state` fails → delete state, false.
@@ -173,7 +174,7 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
 2. Find the video child: first visible child (recursive) whose class starts with `"VLC video main"`. None (playback stopped) → reset, clear region if present, return.
 3. **Two-tick stability debounce**: read window + child rects; act only if both are UNCHANGED since the previous tick (VLC re-fits the child asynchronously after our resize; acting on unsettled rects caused perpetual resize thrash in v1). Always record current rects.
 4. **Chrome sanity clamp**: chrome = window minus child size; if any dimension is negative or > 300 px → stale rects, return.
-5. Child not at target size (tolerance ±2 px): recompute corner for the video, resize window to `target + chrome` positioned so the CHILD lands at the corner (`SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED)` - no SWP_SHOWWINDOW here), drop the stored rects (our own resize), return. Skip if the rect is already correct or target+chrome is non-positive.
+5. Nonpositive targets, invalid rect sizes, or unrepresentable checked arithmetic → return. Otherwise, when the child is not at target size (tolerance ±2 px), recompute the corner for the video, resize the window to `target + chrome` positioned so the CHILD lands at the corner (`SetWindowPos(h, HWND_TOPMOST, tx, ty, tw, th, SWP_FRAMECHANGED)` - no SWP_SHOWWINDOW here), drop the stored rects (our own resize), return.
 6. Child at target: verify the region **box** against the child-relative rect (a live-clipped resize drag leaves an approximate region) and set it on mismatch: `CreateRectRgn` + `SetWindowRgn`; **on failure `DeleteObject` the region - the system owns it only on success**.
 
 ### Fullscreen prevention (prevent, don't auto-exit; poll-and-snap-back flickers)

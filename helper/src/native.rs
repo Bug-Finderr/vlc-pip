@@ -1,24 +1,26 @@
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn,
-    MonitorFromRect, MonitorFromWindow, SetWindowRgn, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL, NULLREGION,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
+    MonitorFromWindow, NULLREGION, SetWindowRgn,
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::UI::HiDpi::{
-    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
-    HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
-    WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
+    EnumChildWindows, EnumWindows, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, HWND_NOTOPMOST,
+    HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible, SW_HIDE, SW_RESTORE, SWP_ASYNCWINDOWPOS,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_CAPTION, WS_EX_TOPMOST,
+    WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -71,7 +73,11 @@ fn vlc_pids() -> Vec<u32> {
         e.dwSize = size_of::<PROCESSENTRY32W>() as u32;
         if Process32FirstW(snap, &mut e) != 0 {
             loop {
-                let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                let len = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
                 if String::from_utf16_lossy(&e.szExeFile[..len]).eq_ignore_ascii_case("vlc.exe") {
                     pids.push(e.th32ProcessID);
                 }
@@ -139,7 +145,12 @@ pub fn work_area(h: isize) -> geometry::Rect {
         mi.cbSize = size_of::<MONITORINFO>() as u32;
         GetMonitorInfoW(MonitorFromWindow(hw(h), MONITOR_DEFAULTTONEAREST), &mut mi);
         let w = mi.rcWork;
-        geometry::Rect { left: w.left, top: w.top, right: w.right, bottom: w.bottom }
+        geometry::Rect {
+            left: w.left,
+            top: w.top,
+            right: w.right,
+            bottom: w.bottom,
+        }
     }
 }
 
@@ -194,12 +205,22 @@ pub fn window_rect(h: isize) -> Option<geometry::Rect> {
         if GetWindowRect(hw(h), &mut r) == 0 {
             return None;
         }
-        Some(geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom })
+        Some(geometry::Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        })
     }
 }
 
 fn styles(h: isize) -> (isize, isize) {
-    unsafe { (GetWindowLongPtrW(hw(h), GWL_STYLE), GetWindowLongPtrW(hw(h), GWL_EXSTYLE)) }
+    unsafe {
+        (
+            GetWindowLongPtrW(hw(h), GWL_STYLE),
+            GetWindowLongPtrW(hw(h), GWL_EXSTYLE),
+        )
+    }
 }
 
 fn find_video_child(top: isize) -> isize {
@@ -267,7 +288,12 @@ pub fn drag_band(h: isize) -> i32 {
 pub fn drag_move(h: isize, r: &geometry::Rect) {
     unsafe {
         SetWindowPos(
-            hw(h), std::ptr::null_mut(), r.left, r.top, 0, 0,
+            hw(h),
+            std::ptr::null_mut(),
+            r.left,
+            r.top,
+            0,
+            0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
         );
     }
@@ -287,7 +313,12 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
             }
         }
         SetWindowPos(
-            hw(h), std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top,
+            hw(h),
+            std::ptr::null_mut(),
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS | SWP_NOSENDCHANGING,
         );
     }
@@ -298,14 +329,19 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
 /// computed rect - the final async SetWindowPos may not have landed in VLC yet.
 pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h: i32) {
     let path = state::state_path();
-    let Some(mut s) = state::load(&path) else { return };
+    let Some(mut s) = state::load(&path) else {
+        return;
+    };
     if !owns_state(&s) {
         return; // VLC died mid-drag: next tick's maintain_region cleans up
     }
     let work = work_area(s.hwnd as isize);
     s.corner = geometry::nearest_corner(fin, &work);
     if resized {
-        let (tw, th) = (fin.right - fin.left - chrome_w, fin.bottom - fin.top - chrome_h);
+        let (tw, th) = (
+            fin.right - fin.left - chrome_w,
+            fin.bottom - fin.top - chrome_h,
+        );
         if tw > 0 && th > 0 {
             s.target_w = tw;
             s.target_h = th;
@@ -330,13 +366,31 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
         if GetClientRect(hw(h), &mut client) == 0 || ClientToScreen(hw(h), &mut origin) == 0 {
             return None;
         }
-        let l = cr.left - origin.x;
-        let t = cr.top - origin.y;
-        let r = (origin.x + client.right) - cr.right;
-        let b = (origin.y + client.bottom) - cr.bottom;
+        let difference = |a: i32, b: i32| {
+            i64::from(a)
+                .checked_sub(i64::from(b))
+                .and_then(|n| n.try_into().ok())
+        };
+        let sum = |a: i32, b: i32| {
+            i64::from(a)
+                .checked_add(i64::from(b))
+                .and_then(|n| n.try_into().ok())
+        };
+        let l = difference(cr.left, origin.x)?;
+        let t = difference(cr.top, origin.y)?;
+        let r = difference(sum(origin.x, client.right)?, cr.right)?;
+        let b = difference(sum(origin.y, client.bottom)?, cr.bottom)?;
+        let chrome_w = sum(l, r)?;
+        let chrome_h = sum(t, b)?;
         // same sanity envelope as plan_region (per-AXIS sums): anything outside is a
         // stale measurement, and a rect the converger would forever Skip must never land
-        if l >= 0 && t >= 0 && r >= 0 && b >= 0 && (0..=MAX_CHROME).contains(&(l + r)) && (0..=MAX_CHROME).contains(&(t + b)) {
+        if l >= 0
+            && t >= 0
+            && r >= 0
+            && b >= 0
+            && (0..=geometry::MAX_CHROME).contains(&chrome_w)
+            && (0..=geometry::MAX_CHROME).contains(&chrome_h)
+        {
             Some((l, t, r, b))
         } else {
             None
@@ -348,20 +402,84 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     if h == 0 || in_pip() {
         return false;
     }
+    if o.w <= 0 || o.h <= 0 {
+        return false;
+    }
+
     // restore FIRST: the off-screen iconic rect must never become the restore state
     if unsafe { IsIconic(hw(h)) } != 0 {
         unsafe { ShowWindow(hw(h), SW_RESTORE) };
     }
-    let r = window_rect(h).unwrap_or_default();
+
+    // With the restored geometry available, validate the complete landing before
+    // writing restoration state or applying any PiP mutation.
+    let Some((vx, vy)) = geometry::compute_corner(&work_area(h), o.w, o.h, o.corner, o.margin)
+    else {
+        return false;
+    };
+    let chrome = if o.min { client_chrome(h) } else { None };
+    let difference = |a: i32, b: i32| {
+        i64::from(a)
+            .checked_sub(i64::from(b))
+            .and_then(|n| n.try_into().ok())
+    };
+    let sum = |a: i32, b: i32| {
+        i64::from(a)
+            .checked_add(i64::from(b))
+            .and_then(|n| n.try_into().ok())
+    };
+    let (x, y, tw, th, clip) = match chrome {
+        Some((cl, ct, cr, cb)) => {
+            let Some(x) = difference(vx, cl) else {
+                return false;
+            };
+            let Some(y) = difference(vy, ct) else {
+                return false;
+            };
+            let Some(chrome_w) = sum(cl, cr) else {
+                return false;
+            };
+            let Some(chrome_h) = sum(ct, cb) else {
+                return false;
+            };
+            let Some(tw) = sum(o.w, chrome_w) else {
+                return false;
+            };
+            let Some(th) = sum(o.h, chrome_h) else {
+                return false;
+            };
+            let Some(right) = sum(cl, o.w) else {
+                return false;
+            };
+            let Some(bottom) = sum(ct, o.h) else {
+                return false;
+            };
+            (x, y, tw, th, Some((cl, ct, right, bottom)))
+        }
+        None => (vx, vy, o.w, o.h, None),
+    };
+
+    let Some(r) = window_rect(h) else {
+        return false;
+    };
+    let Some(rw) = difference(r.right, r.left) else {
+        return false;
+    };
+    let Some(rh) = difference(r.bottom, r.top) else {
+        return false;
+    };
+    if rw <= 0 || rh <= 0 {
+        return false;
+    }
     let (style, ex) = styles(h);
     let pid = window_owner(h);
-    // save state FIRST, so a failed save can never leave a mutated window with no restore data
+    // Save before PiP mutations, so failure cannot leave PiP changes without restore data.
     let s = PipState {
         hwnd: h as i64,
         x: r.left,
         y: r.top,
-        w: r.right - r.left,
-        h: r.bottom - r.top,
+        w: rw,
+        h: rh,
         style: style as i64,
         ex_style: ex as i64,
         target_w: o.w,
@@ -371,12 +489,10 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         min: o.min,
         pid,
     };
-    if state::save(&s, &state::state_path()).is_err() {
-        return false; // nothing mutated yet: fail cleanly, retry next toggle
+    let path = state::state_path();
+    if state::save(&s, &path).is_err() {
+        return false; // no PiP mutation yet: fail cleanly, retry next toggle
     }
-    // chrome measured pre-strip lets enter land in ONE SetWindowPos at the final
-    // chrome-compensated rect with the region already applied (no grow-then-clip flash)
-    let chrome = if o.min { client_chrome(h) } else { None };
     if fs_origin(style as i64) {
         // the user was likely just hovering the fullscreen video, so the strip is on
         // screen RIGHT NOW: hide it before the PiP lands, not a tick later
@@ -385,22 +501,28 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     unsafe {
         // WS_MAXIMIZE too: a zoomed window keeps IsZoomed, and Aero snap would then
         // bounce the PiP back to Qt's normal placement rect
-        SetWindowLongPtrW(hw(h), GWL_STYLE, style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize));
-        let wa = work_area(h);
-        let (vx, vy) = geometry::compute_corner(&wa, o.w, o.h, o.corner, o.margin);
-        let (x, y, tw, th) = match chrome {
-            Some((cl, ct, cr, cb)) => (vx - cl, vy - ct, o.w + cl + cr, o.h + ct + cb),
-            None => (vx, vy, o.w, o.h), // not playing: converger takes over once a child exists
-        };
-        let ok = SetWindowPos(hw(h), HWND_TOPMOST, x, y, tw, th, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
+        SetWindowLongPtrW(
+            hw(h),
+            GWL_STYLE,
+            style & !((WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE) as isize),
+        );
+        let ok = SetWindowPos(
+            hw(h),
+            HWND_TOPMOST,
+            x,
+            y,
+            tw,
+            th,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        ) != 0;
         if ok {
-            if let Some((cl, ct, _, _)) = chrome {
-                set_region(h, cl, ct, cl + o.w, ct + o.h);
+            if let Some((left, top, right, bottom)) = clip {
+                set_region(h, left, top, right, bottom);
             }
         } else {
             // e.g. UIPI vs elevated VLC: don't claim in-PiP
             SetWindowLongPtrW(hw(h), GWL_STYLE, style);
-            state::try_delete(&state::state_path());
+            state::try_delete(&path);
         }
         ok
     }
@@ -415,12 +537,18 @@ fn restore_frame(h: isize, style: isize, ex_style: i64) -> HWND {
         SetWindowLongPtrW(hw(h), GWL_STYLE, style);
         SetWindowLongPtrW(hw(h), GWL_EXSTYLE, ex_style as isize);
     }
-    if ex_style & (WS_EX_TOPMOST as i64) != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST }
+    if ex_style & (WS_EX_TOPMOST as i64) != 0 {
+        HWND_TOPMOST
+    } else {
+        HWND_NOTOPMOST
+    }
 }
 
 pub fn exit_pip() -> bool {
     let path = state::state_path();
-    let Some(s) = state::load(&path) else { return false };
+    let Some(s) = state::load(&path) else {
+        return false;
+    };
     if !owns_state(&s) {
         state::try_delete(&path); // stale: VLC gone or hwnd recycled
         return false;
@@ -428,7 +556,15 @@ pub fn exit_pip() -> bool {
     let h = s.hwnd as isize;
     let after = restore_frame(h, s.style as isize, s.ex_style);
     unsafe {
-        let ok = SetWindowPos(hw(h), after, s.x, s.y, s.w, s.h, SWP_FRAMECHANGED | SWP_SHOWWINDOW) != 0;
+        let ok = SetWindowPos(
+            hw(h),
+            after,
+            s.x,
+            s.y,
+            s.w,
+            s.h,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+        ) != 0;
         if ok || IsWindow(hw(h)) == 0 {
             state::try_delete(&path); // live-window restore failure keeps state so the next toggle retries
         }
@@ -437,7 +573,11 @@ pub fn exit_pip() -> bool {
 }
 
 pub fn toggle(o: &PipOptions) -> bool {
-    if in_pip() { exit_pip() } else { enter(find_player(), o) }
+    if in_pip() {
+        exit_pip()
+    } else {
+        enter(find_player(), o)
+    }
 }
 
 // ---- status -------------------------------------------------------------------------
@@ -482,9 +622,21 @@ pub struct RegionTracker {
 /// rect must never be restored onto an internally windowed VLC.
 fn dissolve_fs_pip(s: &PipState, path: &Path) {
     let h = s.hwnd as isize;
-    let after = restore_frame(h, s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize, s.ex_style);
+    let after = restore_frame(
+        h,
+        s.style as isize | (WS_CAPTION | WS_THICKFRAME) as isize,
+        s.ex_style,
+    );
     unsafe {
-        SetWindowPos(hw(h), after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+        SetWindowPos(
+            hw(h),
+            after,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+        );
     }
     state::try_delete(path);
 }
@@ -543,13 +695,20 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
         return; // wait until VLC's re-layout settles
     }
 
-    match plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || work_area(h)) {
-        RegionPlan::Skip => {}
-        RegionPlan::Resize { x, y, w, h: th } => {
+    match geometry::plan_region(&wr, &cr, s.target_w, s.target_h, s.corner, s.margin, || {
+        work_area(h)
+    }) {
+        geometry::RegionPlan::Skip => {}
+        geometry::RegionPlan::Resize { x, y, w, h: th } => {
             unsafe { SetWindowPos(hw(h), HWND_TOPMOST, x, y, w, th, SWP_FRAMECHANGED) };
             t.prev = None; // our own resize invalidates the measurement
         }
-        RegionPlan::Clip { left, top, right, bottom } => {
+        geometry::RegionPlan::Clip {
+            left,
+            top,
+            right,
+            bottom,
+        } => {
             // verify the box, not just presence: a live-clipped resize drag leaves an
             // approximate region that convergence must confirm or correct
             if region_box(h) != Some((left, top, right, bottom)) {
@@ -593,8 +752,18 @@ fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
         if IsIconic(hw(h2)) != 0 {
             return; // heal the normal placement once restored - the iconic rect is garbage
         }
-        let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
-        let tr = RECT { left: target.left, top: target.top, right: target.right, bottom: target.bottom };
+        let target = geometry::Rect {
+            left: s.x,
+            top: s.y,
+            right: s.x + s.w,
+            bottom: s.y + s.h,
+        };
+        let tr = RECT {
+            left: target.left,
+            top: target.top,
+            right: target.right,
+            bottom: target.bottom,
+        };
         if MonitorFromRect(&tr, MONITOR_DEFAULTTONULL).is_null() {
             state::try_delete(path); // monitor layout changed: VLC's own placement is saner
             return;
@@ -610,52 +779,14 @@ fn heal_reopened(tries: &mut u32, s: &PipState, path: &Path) {
             state::try_delete(path); // not converging: stop fighting the window
             return;
         }
-        SetWindowPos(hw(h2), std::ptr::null_mut(), s.x, s.y, s.w, s.h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            hw(h2),
+            std::ptr::null_mut(),
+            s.x,
+            s.y,
+            s.w,
+            s.h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RegionPlan {
-    Skip,
-    Resize { x: i32, y: i32, w: i32, h: i32 },
-    Clip { left: i32, top: i32, right: i32, bottom: i32 },
-}
-
-// Real chrome (menu + controller + borders) is well under this. enter's measurement and
-// the converger MUST share the bound: a chrome enter accepts but plan_region skips
-// would land a rect the converger fights forever.
-const MAX_CHROME: i32 = 300;
-
-// Pure planning math for the minimal-look convergence: resize grows by chrome so the
-// VIDEO is exactly target WxH with the child landing at the corner; clip trims to the
-// child area. `work` is lazy - only the resize branch needs its two user32 calls.
-pub(crate) fn plan_region(
-    wr: &geometry::Rect, cr: &geometry::Rect, target_w: i32, target_h: i32,
-    corner: geometry::Corner, margin: i32, work: impl FnOnce() -> geometry::Rect,
-) -> RegionPlan {
-    let rel_l = cr.left - wr.left;
-    let rel_t = cr.top - wr.top;
-    let cw = cr.right - cr.left;
-    let ch = cr.bottom - cr.top;
-    let chrome_w = (wr.right - wr.left) - cw;
-    let chrome_h = (wr.bottom - wr.top) - ch;
-    // negative or huge delta = stale rects from VLC's async re-layout
-    if !(0..=MAX_CHROME).contains(&chrome_w) || !(0..=MAX_CHROME).contains(&chrome_h) {
-        return RegionPlan::Skip;
-    }
-    if (cw - target_w).abs() > 2 || (ch - target_h).abs() > 2 {
-        let wa = work();
-        let (vx, vy) = geometry::compute_corner(&wa, target_w, target_h, corner, margin);
-        let (tw, th, tx, ty) = (target_w + chrome_w, target_h + chrome_h, vx - rel_l, vy - rel_t);
-        if tw <= 0 || th <= 0 {
-            return RegionPlan::Skip; // hostile/garbage state values: do nothing
-        }
-        if wr.left == tx && wr.top == ty && wr.right - wr.left == tw && wr.bottom - wr.top == th {
-            // already at the computed rect but the child never re-fit: re-issuing the
-            // no-op resize would reset the debounce every tick and loop forever
-            return RegionPlan::Skip;
-        }
-        return RegionPlan::Resize { x: tx, y: ty, w: tw, h: th };
-    }
-    RegionPlan::Clip { left: rel_l, top: rel_t, right: rel_l + cw, bottom: rel_t + ch }
 }

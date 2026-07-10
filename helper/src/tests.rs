@@ -9,8 +9,29 @@ mod geometry {
     fn compute_corner_places_window_inside_work_area() {
         use Corner::*;
         for (corner, ex, ey) in [(Br, 1424, 754), (Bl, 16, 754), (Tr, 1424, 16), (Tl, 16, 16)] {
-            assert_eq!(compute_corner(&WORK, 480, 270, corner, 16), (ex, ey), "corner {corner:?}");
+            assert_eq!(
+                compute_corner(&WORK, 480, 270, corner, 16),
+                Some((ex, ey)),
+                "corner {corner:?}"
+            );
         }
+    }
+
+    #[test]
+    fn compute_corner_rejects_nonpositive_size() {
+        assert_eq!(compute_corner(&WORK, 0, 270, Corner::Br, 16), None);
+        assert_eq!(compute_corner(&WORK, 480, -1, Corner::Br, 16), None);
+    }
+
+    #[test]
+    fn compute_corner_rejects_unrepresentable_coordinate() {
+        let work = Rect {
+            left: 1,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        assert_eq!(compute_corner(&work, 1, 1, Corner::Tl, i32::MAX), None);
     }
 
     #[test]
@@ -23,8 +44,18 @@ mod geometry {
 
     #[test]
     fn nearest_corner_quadrants() {
-        let work = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
-        let win = |l: i32, t: i32| Rect { left: l, top: t, right: l + 480, bottom: t + 270 };
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let win = |l: i32, t: i32| Rect {
+            left: l,
+            top: t,
+            right: l + 480,
+            bottom: t + 270,
+        };
         assert_eq!(nearest_corner(&win(10, 10), &work), Corner::Tl);
         assert_eq!(nearest_corner(&win(1400, 10), &work), Corner::Tr);
         assert_eq!(nearest_corner(&win(10, 700), &work), Corner::Bl);
@@ -33,18 +64,39 @@ mod geometry {
 
     #[test]
     fn nearest_corner_center_tie_is_br() {
-        let work = Rect { left: 0, top: 0, right: 1000, bottom: 1000 };
-        let win = Rect { left: 400, top: 400, right: 600, bottom: 600 };
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1000,
+            bottom: 1000,
+        };
+        let win = Rect {
+            left: 400,
+            top: 400,
+            right: 600,
+            bottom: 600,
+        };
         assert_eq!(nearest_corner(&win, &work), Corner::Br);
     }
 
     #[test]
     fn classify_zone_all_nine() {
-        let vis = Rect { left: 100, top: 100, right: 580, bottom: 370 };
+        let vis = Rect {
+            left: 100,
+            top: 100,
+            right: 580,
+            bottom: 370,
+        };
         let cases = [
-            (300, 200, DragZone::Interior), (105, 200, DragZone::Left), (575, 200, DragZone::Right),
-            (300, 105, DragZone::Top), (300, 365, DragZone::Bottom), (105, 105, DragZone::TopLeft),
-            (575, 105, DragZone::TopRight), (105, 365, DragZone::BottomLeft), (575, 365, DragZone::BottomRight),
+            (300, 200, DragZone::Interior),
+            (105, 200, DragZone::Left),
+            (575, 200, DragZone::Right),
+            (300, 105, DragZone::Top),
+            (300, 365, DragZone::Bottom),
+            (105, 105, DragZone::TopLeft),
+            (575, 105, DragZone::TopRight),
+            (105, 365, DragZone::BottomLeft),
+            (575, 365, DragZone::BottomRight),
         ];
         for (x, y, z) in cases {
             assert_eq!(classify_zone(x, y, &vis, 16), z, "at ({x},{y})");
@@ -53,113 +105,179 @@ mod geometry {
 
     #[test]
     fn classify_zone_band_boundaries() {
-        let vis = Rect { left: 0, top: 0, right: 480, bottom: 270 };
+        let vis = Rect {
+            left: 0,
+            top: 0,
+            right: 480,
+            bottom: 270,
+        };
         assert_eq!(classify_zone(15, 135, &vis, 16), DragZone::Left); // x < left+band
         assert_eq!(classify_zone(16, 135, &vis, 16), DragZone::Interior);
         assert_eq!(classify_zone(464, 135, &vis, 16), DragZone::Right); // x >= right-band
         assert_eq!(classify_zone(463, 135, &vis, 16), DragZone::Interior);
     }
 
-    const WORK: Rect = Rect { left: 0, top: 0, right: 1920, bottom: 1040 };
+    const WORK: Rect = Rect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1040,
+    };
 
     fn rc(l: i32, t: i32, r: i32, b: i32) -> Rect {
-        Rect { left: l, top: t, right: r, bottom: b }
+        Rect {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
     }
 
     #[test]
     fn resize_br_grows_anchored_tl() {
         // 480x270 at (100,100); +48/+27 is width-driven (48*270 >= 27*480): 528x297
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::BottomRight, 48, 27, &WORK), rc(100, 100, 628, 397));
+        assert_eq!(
+            plan_resize(
+                &rc(100, 100, 580, 370),
+                DragZone::BottomRight,
+                48,
+                27,
+                &WORK
+            ),
+            rc(100, 100, 628, 397)
+        );
     }
 
     #[test]
     fn resize_tl_anchors_br() {
         // dw = -dx = 48: 528x297 anchored at (right,bottom)
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::TopLeft, -48, 0, &WORK), rc(52, 73, 580, 370));
+        assert_eq!(
+            plan_resize(&rc(100, 100, 580, 370), DragZone::TopLeft, -48, 0, &WORK),
+            rc(52, 73, 580, 370)
+        );
     }
 
     #[test]
     fn resize_right_edge_keeps_vertical_center() {
         // edge zone: dy ignored; 576x324, v-center 235 fixed
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::Right, 96, 500, &WORK), rc(100, 73, 676, 397));
+        assert_eq!(
+            plan_resize(&rc(100, 100, 580, 370), DragZone::Right, 96, 500, &WORK),
+            rc(100, 73, 676, 397)
+        );
     }
 
     #[test]
     fn resize_top_edge_keeps_horizontal_center() {
         // dh = -dy = 54 -> h-driven: 576x324, anchored bottom, h-center 340 fixed
-        assert_eq!(plan_resize(&rc(100, 100, 580, 370), DragZone::Top, 500, -54, &WORK), rc(52, 46, 628, 370));
+        assert_eq!(
+            plan_resize(&rc(100, 100, 580, 370), DragZone::Top, 500, -54, &WORK),
+            rc(52, 46, 628, 370)
+        );
     }
 
     #[test]
     fn resize_corner_height_driven_when_dy_dominates() {
         // 100*480 > 30*270: h = 370 -> w = 370*480/270 = 657 -> h = 657*270/480 = 369
-        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 30, 100, &WORK), rc(0, 0, 657, 369));
+        assert_eq!(
+            plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 30, 100, &WORK),
+            rc(0, 0, 657, 369)
+        );
     }
 
     #[test]
     fn resize_clamps_min_256() {
-        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, -400, &WORK), rc(0, 0, 256, 144));
+        assert_eq!(
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                DragZone::BottomRight,
+                -400,
+                -400,
+                &WORK
+            ),
+            rc(0, 0, 256, 144)
+        );
     }
 
     #[test]
     fn resize_clamps_max_80pct_work() {
         // max_w = min(1536, 832*480/270 = 1479) = 1479; h = 1479*270/480 = 831
-        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 5000, 0, &WORK), rc(0, 0, 1479, 831));
+        assert_eq!(
+            plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, 5000, 0, &WORK),
+            rc(0, 0, 1479, 831)
+        );
     }
 
     #[test]
     fn resize_degenerate_start_is_noop() {
-        assert_eq!(plan_resize(&rc(0, 0, 0, 270), DragZone::BottomRight, 50, 50, &WORK), rc(0, 0, 0, 270));
+        assert_eq!(
+            plan_resize(&rc(0, 0, 0, 270), DragZone::BottomRight, 50, 50, &WORK),
+            rc(0, 0, 0, 270)
+        );
     }
 
     #[test]
     fn resize_tiny_work_area_clamp_does_not_panic() {
         // 80% of 200 < 256: max floors to min - clamp() must not see min > max
         let tiny = rc(0, 0, 200, 200);
-        assert_eq!(plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, 0, &tiny), rc(0, 0, 256, 144));
+        assert_eq!(
+            plan_resize(&rc(0, 0, 480, 270), DragZone::BottomRight, -400, 0, &tiny),
+            rc(0, 0, 256, 144)
+        );
     }
 
     #[test]
     fn resize_clip_preserves_per_side_chrome() {
         // vis inset 10/30/10/5 in a 480x270 window; target grown to 580x370
-        let clip = resize_clip(&rc(100, 100, 580, 370), &rc(110, 130, 570, 365), &rc(100, 100, 680, 470));
+        let clip = resize_clip(
+            &rc(100, 100, 580, 370),
+            &rc(110, 130, 570, 365),
+            &rc(100, 100, 680, 470),
+        );
         assert_eq!(clip, Some(rc(10, 30, 570, 365)));
     }
 
     #[test]
     fn resize_clip_target_below_chrome_is_none() {
         // 200px left chrome + 200px right chrome > 210px target width: inverted box
-        let clip = resize_clip(&rc(0, 0, 480, 270), &rc(200, 100, 280, 170), &rc(0, 0, 210, 110));
+        let clip = resize_clip(
+            &rc(0, 0, 480, 270),
+            &rc(200, 100, 280, 170),
+            &rc(0, 0, 210, 110),
+        );
         assert_eq!(clip, None);
     }
-}
 
-mod native {
-    use crate::geometry::{self, Corner};
-    use crate::native::{fs_origin, plan_region, RegionPlan};
-
-    #[test]
-    fn fs_origin_requires_both_caption_bits_absent() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
-        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
-        assert!(fs_origin(0)); // fullscreen: caption fully absent
-        // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
-        assert!(fs_origin(WS_BORDER as i64));
+    fn rect(l: i32, t: i32, r: i32, b: i32) -> Rect {
+        Rect {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
     }
 
-    fn rect(l: i32, t: i32, r: i32, b: i32) -> geometry::Rect {
-        geometry::Rect { left: l, top: t, right: r, bottom: b }
-    }
-
-    fn work() -> geometry::Rect {
+    fn work() -> Rect {
         // 480x270 br margin 16 => video corner at (1424, 754)
-        geometry::Rect { left: 0, top: 0, right: 1920, bottom: 1040 }
+        Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        }
     }
 
     #[test]
     fn negative_chrome_is_stale_measurement() {
         // child wider than its own window = mid-relayout garbage
-        let plan = plan_region(&rect(0, 0, 480, 270), &rect(0, 0, 481, 270), 480, 270, Corner::Br, 16, work);
+        let plan = plan_region(
+            &rect(0, 0, 480, 270),
+            &rect(0, 0, 481, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
         assert_eq!(plan, RegionPlan::Skip);
     }
 
@@ -168,7 +286,15 @@ mod native {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
         let cr = rect(0, 0, 480, 270);
         let ok = plan_region(&rect(0, 0, 480, 570), &cr, 480, 270, Corner::Br, 16, work);
-        assert_eq!(ok, RegionPlan::Clip { left: 0, top: 0, right: 480, bottom: 270 });
+        assert_eq!(
+            ok,
+            RegionPlan::Clip {
+                left: 0,
+                top: 0,
+                right: 480,
+                bottom: 270
+            }
+        );
         let stale = plan_region(&rect(0, 0, 480, 571), &cr, 480, 270, Corner::Br, 16, work);
         assert_eq!(stale, RegionPlan::Skip);
     }
@@ -176,31 +302,184 @@ mod native {
     #[test]
     fn two_px_tolerance_clips_three_resizes() {
         // 482 wide child (diff 2) counts as converged; 483 (diff 3) does not
-        let at_2 = plan_region(&rect(0, 0, 482, 270), &rect(0, 0, 482, 270), 480, 270, Corner::Br, 16, work);
+        let at_2 = plan_region(
+            &rect(0, 0, 482, 270),
+            &rect(0, 0, 482, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
         assert!(matches!(at_2, RegionPlan::Clip { .. }));
-        let at_3 = plan_region(&rect(0, 0, 483, 270), &rect(0, 0, 483, 270), 480, 270, Corner::Br, 16, work);
+        let at_3 = plan_region(
+            &rect(0, 0, 483, 270),
+            &rect(0, 0, 483, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
         assert!(matches!(at_3, RegionPlan::Resize { .. }));
     }
 
     #[test]
     fn resize_grows_by_chrome_and_lands_child_at_corner() {
         // window 420x360 at (100,100); child 400x225 at rel (10,30) => chrome 20x135
-        let plan = plan_region(&rect(100, 100, 520, 460), &rect(110, 130, 510, 355), 480, 270, Corner::Br, 16, work);
+        let plan = plan_region(
+            &rect(100, 100, 520, 460),
+            &rect(110, 130, 510, 355),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
         // target 480x270 + chrome => 500x405, positioned so the CHILD hits (1424,754)
-        assert_eq!(plan, RegionPlan::Resize { x: 1414, y: 724, w: 500, h: 405 });
+        assert_eq!(
+            plan,
+            RegionPlan::Resize {
+                x: 1414,
+                y: 724,
+                w: 500,
+                h: 405
+            }
+        );
     }
 
     #[test]
     fn clip_is_child_rect_relative_to_window() {
-        let plan = plan_region(&rect(1424, 700, 1904, 1024), &rect(1424, 754, 1904, 1024), 480, 270, Corner::Br, 16, work);
-        assert_eq!(plan, RegionPlan::Clip { left: 0, top: 54, right: 480, bottom: 324 });
+        let plan = plan_region(
+            &rect(1424, 700, 1904, 1024),
+            &rect(1424, 754, 1904, 1024),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(
+            plan,
+            RegionPlan::Clip {
+                left: 0,
+                top: 54,
+                right: 480,
+                bottom: 324
+            }
+        );
     }
 
     #[test]
     fn hostile_negative_target_skips() {
         // a hand-crafted state file with a -500 target must not produce a resize
-        let plan = plan_region(&rect(0, 0, 480, 300), &rect(0, 20, 480, 290), -500, 270, Corner::Br, 16, work);
+        let plan = plan_region(
+            &rect(0, 0, 480, 300),
+            &rect(0, 20, 480, 290),
+            -500,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
         assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn nonpositive_target_skips_even_when_chrome_makes_window_positive() {
+        let plan = plan_region(
+            &rect(0, 0, 780, 270),
+            &rect(0, 0, 480, 270),
+            -1,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn extreme_rect_difference_skips() {
+        let plan = plan_region(
+            &rect(i32::MIN, 0, i32::MAX, 270),
+            &rect(0, 0, 480, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn target_plus_chrome_overflow_skips() {
+        let plan = plan_region(
+            &rect(0, 0, 481, 270),
+            &rect(0, 0, 480, 270),
+            i32::MAX,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn coordinate_offset_overflow_skips() {
+        let plan = plan_region(
+            &rect(0, 0, 780, 270),
+            &rect(300, 0, 780, 270),
+            476,
+            270,
+            Corner::Tl,
+            0,
+            || rect(i32::MIN, 0, i32::MAX, 1040),
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn clip_bound_overflow_skips() {
+        let plan = plan_region(
+            &rect(-500, 0, 280, 270),
+            &rect(i32::MAX - 600, 0, i32::MAX - 120, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
+    fn nonpositive_rect_size_skips() {
+        let plan = plan_region(
+            &rect(100, 0, 99, 270),
+            &rect(100, 0, 99, 270),
+            480,
+            270,
+            Corner::Br,
+            16,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+}
+
+mod native {
+    use crate::native::fs_origin;
+
+    #[test]
+    fn fs_origin_requires_both_caption_bits_absent() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
+        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
+        assert!(fs_origin(0)); // fullscreen: caption fully absent
+        // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
+        assert!(fs_origin(WS_BORDER as i64));
     }
 }
 
@@ -211,13 +490,19 @@ mod options {
     #[test]
     fn defaults() {
         let o = parse_options([]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, Corner::Br, 16, true));
+        assert_eq!(
+            (o.w, o.h, o.corner, o.margin, o.min),
+            (480, 270, Corner::Br, 16, true)
+        );
     }
 
     #[test]
     fn parses_all_keys() {
         let o = parse_options(["w=640", "h=360", "c=tr", "m=24", "min=0"]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (640, 360, Corner::Tr, 24, false));
+        assert_eq!(
+            (o.w, o.h, o.corner, o.margin, o.min),
+            (640, 360, Corner::Tr, 24, false)
+        );
     }
 
     #[test]
@@ -262,7 +547,10 @@ mod options {
     #[test]
     fn merge_empty_config_is_v2_behavior() {
         let o = merge("", &[]);
-        assert_eq!((o.w, o.h, o.corner, o.margin, o.min), (480, 270, Corner::Br, 16, true));
+        assert_eq!(
+            (o.w, o.h, o.corner, o.margin, o.min),
+            (480, 270, Corner::Br, 16, true)
+        );
     }
 
     #[test]
@@ -325,13 +613,33 @@ mod state {
     }
 
     #[test]
+    fn invalid_geometry_fields_preserve_restore_metadata() {
+        let raw = "66112 100 200 1000 640 349110272 256 -1 270 br 2147483647 1 12345\n";
+        let s = parse_state(raw).unwrap();
+        assert_eq!(
+            (s.x, s.y, s.w, s.h, s.style, s.ex_style),
+            (100, 200, 1000, 640, 349110272, 256)
+        );
+        assert_eq!((s.target_w, s.target_h, s.margin), (-1, 270, i32::MAX));
+        assert_eq!(write_state(&s), raw);
+    }
+
+    #[test]
     fn corrupt_input_reads_as_none() {
         let torn_pid = &FULL[..FULL.len() - 3]; // "...123", no newline: torn write
         let short = FULL.replace(" 12345\n", "\n"); // 12 tokens
         let extra = FULL.replace("12345\n", "12345 7\n"); // 14 tokens
         let bad_num = FULL.replace("349110272", "wide");
         let bad_min = FULL.replace(" 1 12345", " yes 12345");
-        for bad in ["", "not a state\n", torn_pid, &short, &extra, &bad_num, &bad_min] {
+        for bad in [
+            "",
+            "not a state\n",
+            torn_pid,
+            &short,
+            &extra,
+            &bad_num,
+            &bad_min,
+        ] {
             assert!(parse_state(bad).is_none(), "should reject: {bad:?}");
         }
     }
@@ -363,8 +671,15 @@ mod state {
     fn status_json_shapes() {
         assert_eq!(status_json(None), r#"{"found":false}"#);
         let s = StatusInfo {
-            hwnd: 66112, x: 1424, y: 754, w: 480, h: 270,
-            caption: false, topmost: true, in_pip: true, minimal: true,
+            hwnd: 66112,
+            x: 1424,
+            y: 754,
+            w: 480,
+            h: 270,
+            caption: false,
+            topmost: true,
+            in_pip: true,
+            minimal: true,
         };
         assert_eq!(
             status_json(Some(&s)),
