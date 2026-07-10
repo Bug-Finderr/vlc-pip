@@ -17,8 +17,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST,
     HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE,
-    WS_CAPTION, WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
+    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_CAPTION,
+    WS_EX_TOPMOST, WS_MAXIMIZE, WS_THICKFRAME,
 };
 use windows_sys::core::BOOL;
 
@@ -156,9 +156,6 @@ fn for_each_fs_controller(pid: u32, f: impl Fn(HWND)) {
 /// Empty region: the only veil that survives VLC's show/hide cycles (SPEC 7); re-run per tick to catch a recreated strip.
 pub fn veil_fs_controller(pid: u32) {
     for_each_fs_controller(pid, |w| unsafe {
-        if IsWindowVisible(w) != 0 {
-            ShowWindow(w, SW_HIDE);
-        }
         let probe = CreateRectRgn(0, 0, 0, 0);
         let veiled = GetWindowRgn(w, probe) == NULLREGION;
         DeleteObject(probe);
