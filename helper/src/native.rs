@@ -800,6 +800,10 @@ fn finish_heal(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) -> boo
     dropped
 }
 
+fn reopen_replacement_ready(recorded_pid: u32, pids: &[u32]) -> bool {
+    !pids.is_empty() && !pids.contains(&recorded_pid)
+}
+
 /// VLC that closes while in PiP persists the PiP geometry as its own (Qt saves on exit),
 /// so its next launch opens full-size at the PiP origin, overflowing the screen. The
 /// stale state file is kept as a pending-restore record; when a new player window
@@ -822,12 +826,9 @@ fn heal_reopened(tries: &mut u32, wait: &mut u8, s: &PipState, path: &Path) -> b
         return false;
     }
     let pids = vlc_pids();
-    if pids.contains(&s.pid) {
-        return finish_heal(tries, wait, s, path); // recorded VLC still runs: not a close-in-PiP
-    }
-    if pids.is_empty() {
+    if !reopen_replacement_ready(s.pid, &pids) {
         *wait = 6;
-        return false; // VLC not back yet: wait about a second before the next snapshot
+        return false; // wait until the recorded process is gone and another VLC is ready
     }
     *wait = 0; // VLC is back: check every tick while its player window settles
     let h2 = find_player_for_pids(&pids);
@@ -915,6 +916,14 @@ mod internal_tests {
         std::fs::write(&path, "pending").unwrap();
         assert!(heal_reopened(&mut tries, &mut wait, &state(0), &path));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn reopen_heal_waits_for_the_recorded_process_to_exit() {
+        assert!(!reopen_replacement_ready(42, &[]));
+        assert!(!reopen_replacement_ready(42, &[42]));
+        assert!(!reopen_replacement_ready(42, &[7, 42]));
+        assert!(reopen_replacement_ready(42, &[7]));
     }
 
     #[test]
