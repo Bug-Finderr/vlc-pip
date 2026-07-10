@@ -8,11 +8,13 @@ No mirroring, no second player: the genuine hardware-decoding VLC window is resh
 
 ## Install
 
-Download the [latest release](https://github.com/Bug-Finderr/vlc-pip/releases) zip and follow the steps on the release page, or build from source (needs the Rust MSVC toolchain):
+Download and extract the [latest release](https://github.com/Bug-Finderr/vlc-pip/releases), then run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 ```
+
+The release installs its bundled helper. A source checkout uses the same command but builds the helper and requires the Rust MSVC toolchain.
 
 Restart VLC afterwards. Uninstall the same way with `scripts\uninstall.ps1`.
 
