@@ -255,7 +255,7 @@ fn set_region(h: isize, r: &geometry::Rect) {
 
 // ---- drag gesture primitives (hook arms, pump applies) --------------------------------
 
-// The region clips hit-testing too: gesture surface = region box in screen coords, one coherent snapshot for had_rgn.
+// The region clips hit-testing too: gesture surface = region box in screen coords, one coherent snapshot.
 pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
     let wr = window_rect(h)?;
     let vis = region_box(h).map_or(wr, |b| geometry::Rect {

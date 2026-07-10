@@ -30,15 +30,7 @@ enum DragState {
     #[default]
     Idle,
     Armed,
-    Moving,
-    Resizing,
-}
-
-impl DragState {
-    /// A gesture that owns the window (past the arm threshold, button still down).
-    fn active(self) -> bool {
-        matches!(self, Self::Moving | Self::Resizing)
-    }
+    Active,
 }
 
 // The pump validates the generation from lParam: a hook-side reset or rapid re-arm can never apply a stale delta.
@@ -51,7 +43,6 @@ struct Drag {
     origin: (i32, i32),
     start: geometry::Rect,
     vis: geometry::Rect,
-    had_rgn: bool,
     latest: (i32, i32),
     move_pending: bool,
 }
@@ -155,7 +146,7 @@ pub fn run(argv: &[String]) -> i32 {
                 // VLC still believes it is fullscreen under this PiP: keep its strip unrenderable (SPEC 7)
                 native::veil_fs_controller(pip.pid);
             }
-            if DRAG.get().state.active() {
+            if DRAG.get().state == DragState::Active {
                 tracker.reset_debounce(); // gestures own the window while dragging
             } else {
                 native::maintain_region(&mut tracker, s);
@@ -185,7 +176,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         return;
     }
     let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
-    let resizing = msg.wParam == DragState::Resizing as usize;
+    let resizing = d.zone != (0, 0);
     let target = if resizing {
         geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
     } else {
@@ -198,7 +189,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     };
     if resizing {
         // clip to where the video will sit (chrome measured at drag start); convergence verifies after release
-        let clip = d.had_rgn.then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
+        let clip = (d.vis != d.start).then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
     } else {
         native::drag_move(d.hwnd, &target);
@@ -273,7 +264,6 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     if let Some((vis, wr)) = native::gesture_rects(h) {
                         d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
                         d.vis = vis;
-                        d.had_rgn = vis != wr; // visible == window means no region to preserve
                         d.start = wr;
                         d.origin = (m.pt.x, m.pt.y);
                         d.hwnd = h;
@@ -290,17 +280,13 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         && ((m.pt.x - d.origin.0).abs() > GetSystemMetrics(SM_CXDRAG)
                             || (m.pt.y - d.origin.1).abs() > GetSystemMetrics(SM_CYDRAG))
                     {
-                        d.state = if d.zone == (0, 0) {
-                            DragState::Moving
-                        } else {
-                            DragState::Resizing
-                        };
+                        d.state = DragState::Active;
                     }
-                    if d.state.active() {
+                    if d.state == DragState::Active {
                         d.latest = (m.pt.x, m.pt.y);
                         if !d.move_pending {
                             d.move_pending = true;
-                            PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAG, d.state as usize, d.generation as isize);
+                            PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAG, 0, d.generation as isize);
                         }
                     }
                     DRAG.set(d);
@@ -310,8 +296,8 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let st = d.state;
                 d.state = DragState::Idle;
                 DRAG.set(d);
-                if st.active() {
-                    PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, st as usize, d.generation as isize);
+                if st == DragState::Active {
+                    PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, 0, d.generation as isize);
                 }
                 let mut c = CLICK.get();
                 if c.swallow_next_up {
