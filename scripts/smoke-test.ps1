@@ -102,27 +102,28 @@ function SendCtrlAltP {
     [Smoke.Keys]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)      # Alt up
     [Smoke.Keys]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero)      # Ctrl up
 }
+# MOVE|ABSOLUTE|VIRTUALDESK, normalized over the virtual desktop: a VLC restored onto a second monitor stays reachable
+function MoveAbs($px, $py) {
+    $vx = [Smoke.Keys]::GetSystemMetrics(76); $vy = [Smoke.Keys]::GetSystemMetrics(77)
+    $vw = [Smoke.Keys]::GetSystemMetrics(78); $vh = [Smoke.Keys]::GetSystemMetrics(79)
+    [Smoke.Keys]::mouse_event(0xC001, [uint32](($px - $vx) * 65535 / ($vw - 1)), [uint32](($py - $vy) * 65535 / ($vh - 1)), 0, [UIntPtr]::Zero)
+}
 function DragFrom($x1, $y1, $x2, $y2) {
     # SetCursorPos generates no input events (WH_MOUSE_LL never sees it): inject mouse_event MOVEs
-    $sw = [Smoke.Keys]::GetSystemMetrics(0); $sh = [Smoke.Keys]::GetSystemMetrics(1)
     [Smoke.Keys]::SetCursorPos($x1, $y1) | Out-Null
     Start-Sleep -Milliseconds 150
     [Smoke.Keys]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)   # LEFTDOWN
     Start-Sleep -Milliseconds 80
     for ($i = 1; $i -le 10; $i++) {
-        $px = $x1 + [int](($x2 - $x1) * $i / 10); $py = $y1 + [int](($y2 - $y1) * $i / 10)
-        # MOVE|ABSOLUTE (0x8001), coords normalized to 0..65535 over the primary screen
-        [Smoke.Keys]::mouse_event(0x8001, [uint32]($px * 65535 / ($sw - 1)), [uint32]($py * 65535 / ($sh - 1)), 0, [UIntPtr]::Zero)
+        MoveAbs ($x1 + [int](($x2 - $x1) * $i / 10)) ($y1 + [int](($y2 - $y1) * $i / 10))
         Start-Sleep -Milliseconds 25
     }
     [Smoke.Keys]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)   # LEFTUP
     Start-Sleep -Milliseconds 400                             # drag-end write lands
 }
 function HoverWiggle($cx, $cy) {
-    $sw = [Smoke.Keys]::GetSystemMetrics(0); $sh = [Smoke.Keys]::GetSystemMetrics(1)
     for ($i = 0; $i -lt 8; $i++) {
-        $px = $cx - 40 + $i * 10; $py = $cy - 15 + ($i % 3) * 10
-        [Smoke.Keys]::mouse_event(0x8001, [uint32]($px * 65535 / ($sw - 1)), [uint32]($py * 65535 / ($sh - 1)), 0, [UIntPtr]::Zero)
+        MoveAbs ($cx - 40 + $i * 10) ($cy - 15 + ($i % 3) * 10)
         Start-Sleep -Milliseconds 60
     }
 }
@@ -198,8 +199,8 @@ try {
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $after = Status
-    Check "exit: exact windowed restore (caption, rect, topmost/region/state cleared)" `
-        ($after.caption -and (-not $after.topmost) -and (-not $after.inPip) -and (-not $after.minimal) -and $after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
+    Check "exit: exact windowed restore (caption, rect, topmost restored, region/state cleared)" `
+        ($after.caption -and $after.topmost -eq $before.topmost -and (-not $after.inPip) -and (-not $after.minimal) -and $after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
 
     Req "toggle"
     $null = WaitFor { (Status).inPip } 3000 150
@@ -210,8 +211,7 @@ try {
 
     # global hotkey enters, request-file exits: both paths share one state
     SendCtrlAltP
-    $null = WaitFor { (Status).inPip } 3000 150
-    Check "hotkey enters pip" ((Status).inPip)
+    Check "hotkey enters pip" (WaitFor { (Status).inPip } 3000 150)
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $s = Status
@@ -226,8 +226,8 @@ try {
     Check "fullscreen: engaged" (-not $fs.caption)
 
     # summon the strip first: the realistic toggle happens with it on screen, and enter() must veil before the reshape
-    $mw = [Smoke.Keys]::GetSystemMetrics(0); $mh = [Smoke.Keys]::GetSystemMetrics(1)
-    HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
+    $fcx = $fs.x + [int]($fs.w / 2); $fcy = $fs.y + [int]($fs.h / 2)   # fullscreen rect center: correct on any monitor
+    HoverWiggle $fcx $fcy
     $stripUp = [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd))
 
     # the enter is one immediate reshape - no handoff wait
@@ -247,7 +247,7 @@ try {
     Check "strip: never renders through hover" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
 
     # unfocus/refocus makes VLC re-show the strip faster than any tick could re-hide
-    ClickAt ([int]($mw / 2)) ([int]($mh / 2)) 1
+    ClickAt $fcx $fcy 1
     ClickAt ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2)) 1
     Check "strip: never renders on unfocus/refocus" (-not [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)))
 
@@ -257,7 +257,7 @@ try {
     Check "fullscreen exit: fullscreen restored" ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.w -eq $fs.w -and $fout.h -eq $fs.h)
 
     # exit must also unveil: a veil leak would permanently kill VLC's own controller
-    HoverWiggle ([int]($mw / 2)) ([int]($mh / 2))
+    HoverWiggle $fcx $fcy
     $stripBack = WaitFor { [Smoke.Keys]::FscRendered([IntPtr]::new([long]$fs.hwnd)) } 2500 60
     Check "strip: renders again after exit" $stripBack
 
