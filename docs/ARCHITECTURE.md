@@ -1,6 +1,6 @@
 # Architecture
 
-VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a tiny Rust daemon (GUI subsystem, zero runtime dependencies, `windows-sys` only) that reshapes VLC's **own** top-level window via Win32. No mirroring, no second player: it is the genuine hardware-decoding window, so PiP adds zero latency and every VLC shortcut keeps working.
+VLC's Lua extension API has no window-management surface, so the extension is only a trigger. All real work happens in `pip-helper.exe` - a tiny Rust GUI-subsystem daemon with no extra runtime dependency (`windows-sys` is its only crate dependency). It reshapes VLC's **own** top-level window via Win32, adding no mirror, second player, or video latency.
 
 ## Toggle flow
 
@@ -16,10 +16,10 @@ sequenceDiagram
     L->>R: write "toggle" (pure Lua I/O, no console flash)
     D->>R: consume on next 150 ms tick
     D->>V: Enter: save rect+styles to vlc-pip.state,<br>strip caption/frame, topmost, park in corner
-    D->>V: Exit: restore saved styles + exact rect,<br>clear topmost, delete state file
+    D->>V: Exit: restore saved styles, topmost state,<br>and exact rect; delete state on success
 ```
 
-A **valid** `%TEMP%\vlc-pip.state` is the single source of truth for "in PiP" - menu and hotkey both call the same `toggle`, so they can never desync. The state records the owner PID; a recycled window handle (VLC died, another app got the HWND) reads as stale and is deleted on sight.
+A valid `%TEMP%\vlc-pip.state` is either an owned live PiP or a stale pending reopen-heal record. `owns_state` checks the recorded HWND and PID to decide whether PiP is active, so a recycled handle cannot activate hooks or input guards. Enter creates the record; drag release can update its target size and corner. Menu and hotkey both call the same toggle path, while a pending record remains available for reopen heal.
 
 ## Daemon internals
 
@@ -34,7 +34,7 @@ flowchart LR
     end
     M --> G
     T --> FILES["runtime files in TEMP"]
-    K & M -.->|read pump-thread cache,<br>never the disk| CACHE["cached HWND"]
+    K & M -.->|read pump-thread cache,<br>never the disk| CACHE["cached HWND + PID"]
 ```
 
 Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
@@ -45,7 +45,7 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 - **The pump handles thread messages directly.** It creates no windows and accepts no text input, so its `WM_HOTKEY`, `WM_TIMER`, and coalesced `WM_APP` messages need neither `TranslateMessage` nor `DispatchMessageW`.
 - **Minimal look** (menu/controls hidden, like Ctrl+H) clips the window to VLC's video child via `SetWindowRgn`, growing the window by the chrome delta so the visible video is exactly the target size. VLC re-fits the child asynchronously, so the converger acts only on measurements stable across two ticks, with a 0-300px chrome sanity clamp.
 - **The heartbeat file** (`vlc-pip-daemon.alive`, epoch + arming flags, rewritten ~3 s) is how `pip.lua` decides liveness - a force-killed daemon can't delete a marker file, so existence alone is not liveness.
-- **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape as any enter - VLC's internal fullscreen state simply stays on for the whole PiP session (clearing it first cost the user ~1s of dead screen, and Qt only restores its windowed geometry from an untouched fullscreen window). The daemon hides VLC's fullscreen controller strip each tick and the keyboard hook swallows Esc alongside F, so input cannot trip Qt's state underneath the PiP. Exit restores the saved fullscreen style and rect verbatim: the user came from fullscreen and gets fullscreen back, internally consistent. When playback ends or stops, VLC leaves fullscreen by itself - the daemon detects Qt's re-layout and dissolves the session into a plain windowed VLC, exactly where stock VLC would land ([SPEC.md](SPEC.md) §7).
+- **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape as any enter - VLC's internal fullscreen state stays on for the whole PiP session because Qt only restores its windowed geometry from an untouched fullscreen window. Entry hides a currently visible controller strip once and applies an empty-region veil; ticks only repair that persistent veil if VLC recreates or reshapes a controller. The keyboard hook swallows Esc alongside F. Exit restores the saved fullscreen style, topmost state, and rect. When playback ends or stops, the daemon detects Qt's own windowed re-layout and dissolves the session there ([SPEC.md](SPEC.md) §7).
 - **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms a gesture (interior `(0, 0)` = free move; each `-1|0|1` axis selects a low edge, interior, or high edge for aspect-locked resize); the hook stores the latest cursor position and posts one coalesced `WM_APP` message with a generation counter. The pump widens pointer deltas, revalidates HWND ownership, rejects unrepresentable move rects, computes and applies the target - finalizing on release from its own computed rect, never `GetWindowRect` after the async `SetWindowPos` - and persists size + nearest corner to `config.txt`. Full contract: [SPEC.md](SPEC.md) §12.
 - **Close-in-PiP heal (v2.1).** VLC closed while in PiP saves the PiP geometry as its own; the daemon keeps the stale state as a pending-restore record and re-applies the pre-PiP rect once a new player window appears, deleting the state only when the rect sticks ([SPEC.md](SPEC.md) §12).
 
@@ -68,4 +68,4 @@ cargo test --manifest-path helper\Cargo.toml          # pure-logic unit tests
 powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # end-to-end against live VLC
 ```
 
-The smoke test is the acceptance gate: it drives enter/exit through the request file and the real hotkey, spam-clicks the PiP, and asserts exact rect restore. [SPEC.md](SPEC.md) is the full behavioral contract, including the v1-earned gotchas that must not regress.
+The smoke gate verifies daemon identity and the live geometry, topmost restore, input guards, gestures, fullscreen veil, and reopen-heal paths. Its non-primary-monitor absolute-input probe runs only on multi-monitor hosts. [SPEC.md](SPEC.md) is the full contract and acceptance checklist.

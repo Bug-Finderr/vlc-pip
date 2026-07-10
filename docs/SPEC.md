@@ -1,17 +1,17 @@
-# VLC Picture-in-Picture for Windows - Build Spec (v2, Rust)
+# VLC Picture-in-Picture for Windows - Build Spec
 
-A spec for a **Picture-in-Picture** on Windows that turns the *real* VLC player window into a borderless, always-on-top, corner-parked mini window, toggled from VLC's own View menu and a global hotkey, then restores VLC exactly. v1 (C#/.NET NativeAOT, tag `v1.0.0`) shipped this behavior; v2 is the Rust rewrite - a fraction of v1's size - with **identical observable behavior**. v2.1 adds drag gestures (move, aspect-locked resize) and size/corner persistence - §12. This document is the behavioral contract (extracted from the working v1 code) plus the Rust implementation constraints.
+This is the behavioral contract for a Windows **Picture-in-Picture** that reshapes the real VLC window into a borderless, always-on-top mini player and restores it exactly. Drag gestures and size/corner persistence are specified in §12.
 
-Target: VLC 3.0.x (3.0.23 verified), Windows 11 x64, single monitor primary use.
+Target: VLC 3.0.x on Windows 10/11 x64. VLC 3.0.23 and Windows 11 are verified; primary use is single-monitor.
 
-**The acceptance gate is language-agnostic:** `scripts/smoke-test.ps1` end-to-end checks plus the unit suite gate every change; observable behavior below is the contract. File formats are internal to this repo since v2.1.2 (§6.1 - the v1 byte-compat era ended when the C# consumer retired) but are still pinned here because the scripts and pip.lua consume them.
+`scripts/smoke-test.ps1` plus the unit suite gate every change. Runtime formats are internal since v2.1.2 but remain pinned because the helper, scripts, and `pip.lua` consume them.
 
 ---
 
 ## 1. Goal & non-goals
 
 **Goal**
-- Toggle the current VLC window into a small, borderless, always-on-top window in a screen corner ("PiP"), and toggle back to the exact original size/position/border and clear always-on-top (z-order is never saved; Exit restores with HWND_NOTOPMOST, or HWND_TOPMOST if the user had VLC's own always-on-top).
+- Toggle the current VLC window into a small, borderless, always-on-top window in a screen corner ("PiP"), then restore its exact size, position, border, and original topmost state.
 - Trigger from **VLC's View menu** and a **global hotkey** (Ctrl+Alt+P), consistently.
 - **Zero added video latency / quality loss** (it's the real decoding window, not a mirror).
 - **No terminal/console flashes** on toggle.
@@ -66,16 +66,16 @@ flowchart TD
     D -- "WM_TIMER 150 ms: consume request,<br>sync session/hooks, heartbeat ~3 s,<br>converge minimal-look region" --> D
     D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
     D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
-    WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.state in TEMP"]
+    WIN <-- "owned record = live PiP<br>unowned record = pending heal" --> STATE["vlc-pip.state in TEMP"]
 ```
 
-Toggle = InPip ? Exit : Enter. Menu and hotkey BOTH call the same Toggle.
+Toggle = `owns_state` ? Exit : Enter. Menu and hotkey both call the same path.
 
 ---
 
 ## 5. Components
 
-### 5.1 `pip.lua` (the VLC extension - behavior unchanged from v1)
+### 5.1 `pip.lua` (VLC extension)
 - `descriptor()` returns `capabilities = { "trigger" }`, title "PiP Mode".
 - `trigger()` → ensure daemon alive (heartbeat check, §6.3), write `"toggle"` to the request file; errors go to `vlc.msg.err`.
 - Fallback only: if the daemon is dead, `os.execute('start "" "<exe>" daemon')` (the sole case that may flash; normally never fires because of login auto-start).
@@ -95,7 +95,7 @@ Modes (argv[1], ASCII-lowercased; default `toggle` when absent). Options parsed 
 - Every mode first calls `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`.
 - A panic anywhere → hook writes `%TEMP%\vlc-pip-crash.txt` (message + file:line) and the process exits 3.
 
-### 5.3 Install layout (unchanged from v1)
+### 5.3 Install layout
 ```
 %APPDATA%\vlc\lua\extensions\pip.lua                         (extension)
 %APPDATA%\vlc\pip\pip-helper.exe                             (helper, OUT of extensions)
@@ -106,14 +106,14 @@ shell:startup\VLC PiP Daemon.lnk  ->  pip-helper.exe daemon  (login auto-start, 
 
 ## 6. Runtime file contracts (all in `%TEMP%`, truncate-write, UTF-8 no BOM)
 
-### 6.1 `vlc-pip.state` - the PiP state; its VALID existence IS "in PiP"
-Written by Enter only: one newline-terminated line of exactly 13 whitespace-separated tokens (v2.1.2 replaced v1's byte-compatible JSON - the retired C# was the format's only other consumer). The fields, in order `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
+### 6.1 `vlc-pip.state` - live session or pending reopen heal
+Created by Enter and updated on drag release: one newline-terminated line of exactly 13 whitespace-separated tokens. The fields, in order, are `hwnd x y w h style ex_style target_w target_h corner margin min pid`:
 ```
 66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
 Wire types: `hwnd`/`style`/`ex_style` signed i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. The three native-width values are held as `isize` internally: reads parse signed i64 then checked-convert, and writes cast back to i64, preserving this x64 wire format. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
 - **Any** parse failure (missing trailing newline, wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. The trailing newline is the torn-write sentinel: a truncated write loses it, so a partial line (which could carry a numeric prefix of `pid`) can never parse.
-- **Stale detection (`owns_state`)**: state is live iff `pid != 0` AND `GetWindowThreadProcessId(hwnd) == pid` (a destroyed or recycled HWND yields 0 or a foreign owner - Windows recycles HWNDs, so handle validity alone would pass on a foreign window). Stale state is deleted by Exit, overwritten by Enter, and otherwise handed to the reopen heal (§12), whose terminal branches delete it; `in_pip`/`status` never touch it. Every terminal cleanup or successful overwrite clears the recorded controller veil only when the saved style is fullscreen-origin. Delete failures are swallowed: the next caller retries.
+- **Ownership (`owns_state`)**: a valid record is a live PiP iff `pid != 0` and `GetWindowThreadProcessId(hwnd) == pid`. A destroyed or recycled HWND yields 0 or a foreign owner, so handle validity alone is insufficient. An unowned valid record is pending reopen heal (§12); explicit Exit drops it and Enter overwrites it, while `in_pip`/`status` leave it untouched. Terminal cleanup and successful overwrite clear the recorded controller veil only for fullscreen-origin state. Delete failures are retried by the next caller.
 
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
 Bare word, trimmed on read: `toggle` | `enter` | `exit` | `stop` (case-sensitive). Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored. On daemon start, a pre-existing request is discarded **only if it is `stop`** (a `pip-helper stop` with no daemon alive leaves one that would kill the fresh daemon on its first tick; a queued user toggle survives).
@@ -227,11 +227,10 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 9. Build / install / uninstall
 
-- **Build:** `cargo build --release` in `helper/` (rustc 1.96+, MSVC toolchain located automatically - no vswhere/PATH tricks needed, unlike v1's NativeAOT). Artifact: `helper/target/release/pip-helper.exe`.
-  Profile: `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- **Install:** `scripts/install.ps1` - builds, restores an in-PiP window with the old exe (upgrades must not strand a stripped window), stops a running daemon (process-gated: request `stop`, 5 s poll, force-kill fallback), removes a stale request file, copies exe + pip.lua, creates the Startup shortcut, starts the daemon, waits up to 5 s for the alive file.
-- **Test:** `cargo test` in `helper/` (pure logic: state file, geometry, options, request), then `scripts/smoke-test.ps1` (end-to-end against live VLC; requires install first and VLC closed).
-- **Uninstall:** `scripts/uninstall.ps1` - restores a PiP'd VLC FIRST (one-shot `exit`), then stops the daemon, then deletes the three install paths and the five `%TEMP%\vlc-pip*` files.
+- **Build:** a source checkout is identified by `helper/Cargo.toml`; `scripts/install.ps1` always builds it with the Rust 1.96+ MSVC toolchain and uses `helper/target/release/pip-helper.exe`. A prebuilt package has no source manifest and must contain `pip-helper.exe` at its root. A stray root executable never shadows source. The release profile is `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
+- **Install/upgrade:** validate any current 13-token state record before mutation. An owned record is restored with the installed old helper; a pending-heal record is preserved. Corrupt state or state without the installed helper aborts. Only daemon processes whose resolved path equals the installed executable are stopped. The v2.1.1 `vlc-pip.json` file is deleted as obsolete cleanup, never parsed or migrated. After copying the helper and Lua extension, startup succeeds only when the launched process still owns the installed path and writes a fresh, exact-format heartbeat with its PID.
+- **Test:** `cargo test --manifest-path helper/Cargo.toml`, then `scripts/smoke-test.ps1` after installation with VLC closed.
+- **Uninstall:** restore an owned PiP first, stop only exact-path installed daemons, then remove installed/runtime files. Refuse to uninstall while reopen heal is pending, or when state is corrupt or cannot be restored; never discard unresolved current state.
 
 ---
 
@@ -245,7 +244,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 11. Acceptance test checklist
 
-Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS (enter/exit geometry + styles, topmost, minimal-look region, double/triple/spam-click immunity, hotkey + request-file interleaving without desync, exact rect restore, drag-move, edge drag-resize with the minimal look held, config.txt persistence + re-enter at persisted size, band-click/wheel no-ops, instant fullscreen-origin enter/exit with the controller strip hidden, close-in-PiP reopen heal).
+Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS. The live test verifies the heartbeat's freshness, PID, installed-executable identity, hotkey, and timer; enter/exit geometry, styles, exact topmost state, and exact rect restore; minimal look; click guards; hotkey/request interleaving; drag, resize, wheel, and persistence behavior; every matching fullscreen controller veiled during PiP and unveiled after exit; fullscreen stop dissolve; and close-in-PiP reopen heal. It also validates virtual-desktop bounds. Absolute input on a non-primary monitor is probed only when multiple monitors exist; this branch is configured but untested on the current one-monitor host.
 
 Manual (once per release):
 - [ ] View → "PiP Mode" appears after a VLC restart; repeated menu clicks alternate enter/exit.
