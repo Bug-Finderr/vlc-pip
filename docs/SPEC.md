@@ -131,7 +131,7 @@ Exactly (key order, lowercase booleans): `{"found":false}` or
 ```
 {"found":true,"hwnd":N,"x":N,"y":N,"w":N,"h":N,"caption":B,"topmost":B,"inPip":B,"minimal":B}
 ```
-`caption` = `(style & WS_CAPTION) == WS_CAPTION` (BOTH bits of 0x00C00000); `topmost` = `exstyle & WS_EX_TOPMOST != 0`; `minimal` = window has a nonempty region (`GetWindowRgn` + `GetRgnBox` probe; every region this program sets is nonempty). The smoke test drives everything through this file.
+`caption` = `(style & WS_CAPTION) == WS_CAPTION` (BOTH bits of 0x00C00000); `topmost` = `exstyle & WS_EX_TOPMOST != 0`; `minimal` = the main VLC window has a nonempty region (`GetWindowRgn` + `GetRgnBox`; every region set on that window is nonempty). The smoke test drives everything through this file.
 
 ### 6.5 `vlc-pip-crash.txt` - panic message + location, best-effort write from the panic hook; process exits 3. The only diagnostics channel.
 
@@ -228,7 +228,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 ## 9. Build / install / uninstall
 
 - **Build:** a source checkout is identified by `helper/Cargo.toml`; `scripts/install.ps1` always builds it with the Rust 1.96+ MSVC toolchain and uses `helper/target/release/pip-helper.exe`. A prebuilt package has no source manifest and must contain `pip-helper.exe` at its root. A stray root executable never shadows source. The release profile is `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
-- **Install/upgrade:** validate any current 13-token state record before mutation. An owned record is restored with the installed old helper; a pending-heal record is preserved. Corrupt state or state without the installed helper aborts. Only daemon processes whose resolved path equals the installed executable are stopped. The v2.1.1 `vlc-pip.json` file is deleted as obsolete cleanup, never parsed or migrated. After copying the helper and Lua extension, startup succeeds only when the launched process still owns the installed path and writes a fresh, exact-format heartbeat with its PID.
+- **Install/upgrade:** before mutation, the script validates only the current state's trailing newline, exact 13-token envelope, and unsigned 32-bit PID. A malformed envelope or PID aborts. A record with a live PID is passed to the installed old helper for full loading and restore; install continues only after that helper removes the state. A dead-PID record is preserved for pending heal. Any state without the installed helper aborts. Only daemon processes whose resolved path equals the installed executable are stopped. The v2.1.1 `vlc-pip.json` file is deleted as obsolete cleanup, never parsed or migrated. After copying the helper and Lua extension, startup succeeds only when the launched process still owns the installed path and writes a fresh, exact-format heartbeat with its PID.
 - **Test:** `cargo test --manifest-path helper/Cargo.toml`, then `scripts/smoke-test.ps1` after installation with VLC closed.
 - **Uninstall:** restore an owned PiP first, stop only exact-path installed daemons, then remove installed/runtime files. Refuse to uninstall while reopen heal is pending, or when state is corrupt or cannot be restored; never discard unresolved current state.
 
