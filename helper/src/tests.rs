@@ -242,6 +242,18 @@ mod geometry {
     }
 
     #[test]
+    fn resize_high_edge_overflow_is_noop() {
+        let start = rc(i32::MAX - 480, 0, i32::MAX, 270);
+        assert_eq!(plan_resize(&start, (1, 0), 1000, 0, &WORK), start);
+    }
+
+    #[test]
+    fn resize_low_edge_overflow_is_noop() {
+        let start = rc(i32::MIN, 0, i32::MIN + 480, 270);
+        assert_eq!(plan_resize(&start, (-1, 0), -1000, 0, &WORK), start);
+    }
+
+    #[test]
     fn move_translation_preserves_normal_behavior() {
         assert_eq!(
             plan_move(&rc(100, 100, 580, 370), 20, -30),

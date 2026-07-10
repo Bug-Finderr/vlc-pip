@@ -77,7 +77,8 @@ pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
 
 /// New window rect for a live resize drag. The dominant relative delta drives the scale
 /// (edges have one axis by construction); the other dimension follows start's aspect,
-/// including at the clamps. i64 intermediates accept the full i32 pointer-delta range.
+/// including at the clamps. i64 intermediates accept the full i32 pointer-delta range;
+/// an anchored result outside Win32's i32 coordinate range is a no-op.
 pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) -> Rect {
     let (w0, h0) = (start.right - start.left, start.bottom - start.top);
     if w0 < 1 || h0 < 1 {
@@ -110,20 +111,34 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) 
     let w = raw_w.clamp(i64::from(min_w), i64::from(max_w)) as i32;
     let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
     let (left, right) = match zone.0 {
-        -1 => (start.right - w, start.right),
-        1 => (start.left, start.left + w),
+        -1 => (
+            i64::from(start.right) - i64::from(w),
+            i64::from(start.right),
+        ),
+        1 => (i64::from(start.left), i64::from(start.left) + i64::from(w)),
         _ => {
-            let l = start.left + (w0 - w) / 2;
-            (l, l + w)
+            let l = i64::from(start.left) + i64::from(w0 - w) / 2;
+            (l, l + i64::from(w))
         }
     };
     let (top, bottom) = match zone.1 {
-        -1 => (start.bottom - h, start.bottom),
-        1 => (start.top, start.top + h),
+        -1 => (
+            i64::from(start.bottom) - i64::from(h),
+            i64::from(start.bottom),
+        ),
+        1 => (i64::from(start.top), i64::from(start.top) + i64::from(h)),
         _ => {
-            let t = start.top + (h0 - h) / 2;
-            (t, t + h)
+            let t = i64::from(start.top) + i64::from(h0 - h) / 2;
+            (t, t + i64::from(h))
         }
+    };
+    let (Ok(left), Ok(top), Ok(right), Ok(bottom)) = (
+        i32::try_from(left),
+        i32::try_from(top),
+        i32::try_from(right),
+        i32::try_from(bottom),
+    ) else {
+        return *start;
     };
     Rect {
         left,
