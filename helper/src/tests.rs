@@ -282,6 +282,20 @@ mod geometry {
     }
 
     #[test]
+    fn child_outside_window_skips() {
+        let plan = plan_region(
+            &rect(0, 0, 2, 1),
+            &rect(-1, 0, 0, 1),
+            1,
+            1,
+            Corner::Br,
+            0,
+            work,
+        );
+        assert_eq!(plan, RegionPlan::Skip);
+    }
+
+    #[test]
     fn chrome_clamp_boundary_300_ok_301_stale() {
         // child at target, chrome_h exactly 300 -> clip; 301 -> stale
         let cr = rect(0, 0, 480, 270);

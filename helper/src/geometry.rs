@@ -232,6 +232,15 @@ pub(crate) fn plan_region(
     let Some(rel_t) = difference(cr.top, wr.top) else {
         return RegionPlan::Skip;
     };
+    let Some(rel_r) = difference(wr.right, cr.right) else {
+        return RegionPlan::Skip;
+    };
+    let Some(rel_b) = difference(wr.bottom, cr.bottom) else {
+        return RegionPlan::Skip;
+    };
+    if rel_l < 0 || rel_t < 0 || rel_r < 0 || rel_b < 0 {
+        return RegionPlan::Skip;
+    }
     let Some(cw) = difference(cr.right, cr.left) else {
         return RegionPlan::Skip;
     };
