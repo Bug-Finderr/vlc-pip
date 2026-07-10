@@ -181,10 +181,6 @@ fn from_win(r: &RECT) -> geometry::Rect {
     geometry::Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
-fn to_win(r: &geometry::Rect) -> RECT {
-    RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
-}
-
 fn window_rect(h: isize) -> Option<geometry::Rect> {
     unsafe {
         let mut r: RECT = std::mem::zeroed();
@@ -219,11 +215,6 @@ fn find_video_child(top: isize) -> isize {
         true
     });
     found
-}
-
-// Every region this program sets has a nonempty box, so presence == nonempty box.
-fn has_region(h: isize) -> bool {
-    region_box(h).is_some()
 }
 
 fn region_box(h: isize) -> Option<geometry::Rect> {
@@ -283,7 +274,7 @@ pub fn drag_resize(h: isize, r: &geometry::Rect, clip: Option<&geometry::Rect>) 
         match clip {
             Some(c) => set_region(h, c),
             None => {
-                if has_region(h) {
+                if region_box(h).is_some() {
                     SetWindowRgn(hw(h), std::ptr::null_mut(), 1);
                 }
             }
@@ -458,7 +449,7 @@ pub fn status() -> String {
         style & (WS_CAPTION as isize) == (WS_CAPTION as isize), // BOTH caption bits
         ex & (WS_EX_TOPMOST as isize) != 0,
         in_pip(),
-        has_region(h),
+        region_box(h).is_some(),
     )
 }
 
@@ -529,7 +520,7 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) {
 
     if child == 0 {
         t.prev = None;
-        if has_region(h) {
+        if region_box(h).is_some() {
             unsafe { SetWindowRgn(hw(h), std::ptr::null_mut(), 1) }; // playback stopped: show full mini UI
         }
         return;
@@ -590,12 +581,12 @@ fn heal_reopened(t: &mut RegionTracker, s: &PipState, path: &Path) {
     if unsafe { IsIconic(hw(h2)) } != 0 {
         return; // heal the normal placement once restored - the iconic rect is garbage
     }
-    let target = geometry::Rect { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
-    if unsafe { MonitorFromRect(&to_win(&target), MONITOR_DEFAULTTONULL) }.is_null() {
+    let target = RECT { left: s.x, top: s.y, right: s.x + s.w, bottom: s.y + s.h };
+    if unsafe { MonitorFromRect(&target, MONITOR_DEFAULTTONULL) }.is_null() {
         state::try_delete(path); // monitor layout changed: VLC's own placement is saner
         return;
     }
-    if window_rect(h2) == Some(target) {
+    if window_rect(h2) == Some(from_win(&target)) {
         t.heal_tries = 0;
         state::try_delete(path);
         return;

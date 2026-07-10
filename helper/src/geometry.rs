@@ -126,9 +126,6 @@ pub(crate) enum RegionPlan {
     Clip(Rect),
 }
 
-// enter's chrome bound and the converger's MUST match, else enter can land a rect the converger fights forever
-pub(crate) const MAX_CHROME: i32 = 300;
-
 /// Pinned at every parse boundary: keeps target + chrome away from i32 overflow, which release builds silently wrap (SPEC 6.1).
 pub(crate) fn target_ok(n: i32) -> bool {
     (1..=16_384).contains(&n)
@@ -136,7 +133,7 @@ pub(crate) fn target_ok(n: i32) -> bool {
 
 /// Per-axis chrome sums: negative or huge = stale rects from VLC's async re-layout.
 pub(crate) fn chrome_ok(w: i32, h: i32) -> bool {
-    (0..=MAX_CHROME).contains(&w) && (0..=MAX_CHROME).contains(&h)
+    (0..=300).contains(&w) && (0..=300).contains(&h)
 }
 
 // Resize grows by chrome so the VIDEO is exactly target WxH at the corner; `work` is lazy - only the resize branch needs it.
