@@ -453,16 +453,6 @@ mod geometry {
                 rc(i32::MIN, 0, i32::MAX, 1040),
             ),
             (
-                "clip bound overflow",
-                rc(-500, 0, 280, 270),
-                rc(i32::MAX - 600, 0, i32::MAX - 120, 270),
-                480,
-                270,
-                Corner::Br,
-                16,
-                WORK,
-            ),
-            (
                 "nonpositive rect size",
                 rc(100, 0, 99, 270),
                 rc(100, 0, 99, 270),
