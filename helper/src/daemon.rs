@@ -10,12 +10,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW,
+    CallNextHookEx, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW,
     SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_TIMER,
-    WindowFromPoint,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_TIMER, WindowFromPoint,
 };
 
 use crate::state::PipState;
@@ -35,17 +34,16 @@ static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 const WM_APP_DRAG: u32 = WM_APP;
 const WM_APP_DRAGEND: u32 = WM_APP + 1;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum DragState {
     #[default]
     Idle,
     Armed,
-    Moving,
-    Resizing,
+    Active,
 }
 
-// The drag gesture. The pump reads the mode from wParam and validates the generation
-// from lParam, so a hook-side reset or rapid re-arm can never apply a stale delta.
+// The pump validates the generation from lParam, so a hook-side reset or rapid re-arm
+// can never apply a stale delta.
 #[derive(Clone, Copy, Default)]
 struct Drag {
     state: DragState,
@@ -55,9 +53,17 @@ struct Drag {
     origin: (i32, i32),
     start: geometry::Rect,
     vis: geometry::Rect,
-    had_rgn: bool,
     latest: (i32, i32),
     move_pending: bool,
+}
+
+impl Drag {
+    fn reset(self) -> Self {
+        Self {
+            generation: self.generation,
+            ..Self::default()
+        }
+    }
 }
 
 /// The last ALLOWED button-down (time in u32 hook ms, wraps) for the click rate limit.
@@ -90,16 +96,60 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn refresh_state(s: Option<PipState>) {
+fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
-    let s = s.filter(native::owns_state);
-    PIP.set(Pip {
-        hwnd: s.map_or(0, |s| s.hwnd),
-        fs: s.is_some_and(|s| native::fs_origin(s.style)),
-        pid: s.map_or(0, |s| s.pid),
-    });
+    let previous = PIP.get();
+    let pip = s
+        .filter(native::owns_state)
+        .map_or(Pip::default(), |s| Pip {
+            hwnd: s.hwnd,
+            fs: native::fs_origin(s.style),
+            pid: s.pid,
+        });
+    PIP.set(pip);
+
+    if previous.hwnd != 0 && (previous.hwnd != pip.hwnd || previous.pid != pip.pid) {
+        DRAG.set(DRAG.get().reset());
+        CLICK.set(Click {
+            swallow_next_up: false,
+            ..CLICK.get()
+        });
+    }
+
+    if pip.hwnd != 0 {
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            if hooks.0.is_null() {
+                hooks.0 = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0);
+            }
+            if hooks.1.is_null() {
+                hooks.1 = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+            }
+        }
+    } else {
+        if !hooks.0.is_null() && unsafe { UnhookWindowsHookEx(hooks.0) } != 0 {
+            hooks.0 = std::ptr::null_mut();
+        }
+        if !hooks.1.is_null() && unsafe { UnhookWindowsHookEx(hooks.1) } != 0 {
+            hooks.1 = std::ptr::null_mut();
+        }
+    }
+}
+
+pub(crate) fn heartbeat_line(
+    epoch: u64,
+    pid: u32,
+    hotkey: bool,
+    timer: bool,
+    kb: bool,
+    mouse: bool,
+) -> String {
+    format!(
+        "{epoch} pid={pid} hotkey={} timer={} kb={} mouse={}",
+        hotkey as u8, timer as u8, kb as u8, mouse as u8
+    )
 }
 
 pub fn run(argv: &[String]) -> i32 {
@@ -119,8 +169,7 @@ pub fn run(argv: &[String]) -> i32 {
         let _ = std::fs::remove_file(&rp);
     }
 
-    let (hot, timer, kb, mouse) = unsafe {
-        let module = GetModuleHandleW(std::ptr::null());
+    let (hot, timer) = unsafe {
         (
             RegisterHotKey(
                 std::ptr::null_mut(),
@@ -129,59 +178,58 @@ pub fn run(argv: &[String]) -> i32 {
                 VK_P as u32,
             ) != 0,
             SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0),
-            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0),
         )
     };
+    let mut hooks: (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
 
     // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
-    // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
-    // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
-    let alive = state::temp_path("vlc-pip-daemon.alive");
-    let beat = |last: &mut Instant| {
+    // (pip.lua) check the leading epoch-seconds for freshness. kb/mouse report the
+    // current session hook slots. Write failures never kill the pump.
+    let alive = state::alive_path();
+    let beat = |last: &mut Instant, hooks: &(HHOOK, HHOOK)| {
         *last = Instant::now();
         let epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let _ = std::fs::write(
             &alive,
-            format!(
-                "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
+            heartbeat_line(
+                epoch,
                 std::process::id(),
-                hot as i32,
-                timer as i32,
-                (!kb.is_null()) as i32,
-                (!mouse.is_null()) as i32,
+                hot,
+                timer,
+                !hooks.0.is_null(),
+                !hooks.1.is_null(),
             ),
         );
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
-    beat(&mut last_beat);
-    refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
+    sync_session(&mut hooks, state::load(&state::state_path()));
+    beat(&mut last_beat, &hooks);
 
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            refresh_state(state::load(&state::state_path()));
+            sync_session(&mut hooks, state::load(&state::state_path()));
         } else if msg.message == WM_TIMER {
-            if last_beat.elapsed() > Duration::from_secs(3) {
-                beat(&mut last_beat);
-            }
             poll_request(argv);
             // one state snapshot per tick, shared by the hook cache and the converger;
             // it must reflect a request-triggered toggle within this same tick
             let s = state::load(&state::state_path());
-            refresh_state(s);
+            sync_session(&mut hooks, s);
+            if last_beat.elapsed() > Duration::from_secs(3) {
+                beat(&mut last_beat, &hooks);
+            }
             let pip = PIP.get();
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its
                 // controller strip off the screen (SPEC section 7)
                 native::veil_fs_controller(pip.pid);
             }
-            if DRAG.get().state >= DragState::Moving {
+            if DRAG.get().state == DragState::Active {
                 tracker.reset_debounce(); // gestures own the window while dragging
             } else {
                 native::maintain_region(&mut tracker, s);
@@ -189,17 +237,10 @@ pub fn run(argv: &[String]) -> i32 {
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
             on_drag_msg(&msg, &mut tracker);
         }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
     }
 
-    unsafe {
-        UnhookWindowsHookEx(kb);
-        UnhookWindowsHookEx(mouse);
-        UnregisterHotKey(std::ptr::null_mut(), 1);
-    }
+    sync_session(&mut hooks, None);
+    unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     OWNS_ALIVE_FILE.store(false, Relaxed);
     0
@@ -217,7 +258,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         return;
     }
     let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
-    let resizing = msg.wParam == DragState::Resizing as usize;
+    let resizing = d.zone != (0, 0);
     let target = if resizing {
         geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
     } else {
@@ -231,8 +272,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     if resizing {
         // live minimal look: clip to where the video will sit, using the per-side chrome
         // measured at drag start; convergence verifies the exact box after release
-        let clip = d
-            .had_rgn
+        let clip = (d.vis != d.start)
             .then(|| geometry::resize_clip(&d.start, &d.vis, &target))
             .flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
@@ -328,7 +368,6 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         d.zone =
                             geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
                         d.vis = vis;
-                        d.had_rgn = vis != wr; // visible == window means no region to preserve
                         d.start = wr;
                         d.origin = (m.pt.x, m.pt.y);
                         d.hwnd = h;
@@ -345,20 +384,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         && ((m.pt.x - d.origin.0).abs() > GetSystemMetrics(SM_CXDRAG)
                             || (m.pt.y - d.origin.1).abs() > GetSystemMetrics(SM_CYDRAG))
                     {
-                        d.state = if d.zone == geometry::DragZone::Interior {
-                            DragState::Moving
-                        } else {
-                            DragState::Resizing
-                        };
+                        d.state = DragState::Active;
                     }
-                    if d.state >= DragState::Moving {
+                    if d.state == DragState::Active {
                         d.latest = (m.pt.x, m.pt.y);
                         if !d.move_pending {
                             d.move_pending = true;
                             PostThreadMessageW(
                                 GetCurrentThreadId(),
                                 WM_APP_DRAG,
-                                d.state as usize,
+                                0,
                                 d.generation as isize,
                             );
                         }
@@ -370,11 +405,11 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let st = d.state;
                 d.state = DragState::Idle;
                 DRAG.set(d);
-                if st >= DragState::Moving {
+                if st == DragState::Active {
                     PostThreadMessageW(
                         GetCurrentThreadId(),
                         WM_APP_DRAGEND,
-                        st as usize,
+                        0,
                         d.generation as isize,
                     );
                 }
@@ -387,5 +422,28 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+}
+
+#[cfg(test)]
+mod internal_tests {
+    use super::*;
+
+    #[test]
+    fn drag_reset_preserves_generation_while_clearing_gesture() {
+        let d = Drag {
+            state: DragState::Active,
+            generation: u32::MAX,
+            hwnd: 42,
+            move_pending: true,
+            ..Drag::default()
+        };
+
+        let reset = d.reset();
+
+        assert_eq!(reset.generation, u32::MAX);
+        assert!(reset.state == DragState::Idle);
+        assert_eq!(reset.hwnd, 0);
+        assert!(!reset.move_pending);
     }
 }

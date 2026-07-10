@@ -63,7 +63,7 @@ flowchart TD
     MENU["VLC View menu<br>pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle'<br>pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
     HK["Ctrl+Alt+P global hotkey<br>WM_HOTKEY"] --> D
     REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon<br>Rust, GUI subsystem, login-started<br>raw Win32 message pump"]
-    D -- "WM_TIMER 150 ms: heartbeat ~3 s,<br>consume request, refresh hook cache,<br>converge minimal-look region" --> D
+    D -- "WM_TIMER 150 ms: consume request,<br>sync session/hooks, heartbeat ~3 s,<br>converge minimal-look region" --> D
     D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
     D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
     WIN <-- "valid file = in PiP<br>single source of truth" --> STATE["vlc-pip.state in TEMP"]
@@ -123,7 +123,7 @@ Single line, no newline, rewritten on start and then every >3000 ms (checked eac
 ```
 {unix_seconds_utc} pid={pid} hotkey={0|1} timer={0|1} kb={0|1} mouse={0|1}
 ```
-Flags = did RegisterHotKey/SetTimer/each SetWindowsHookExW succeed (their failure is NOT fatal - it is only reported here). Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
+`hotkey`/`timer` = whether registration succeeded at daemon start; `kb`/`mouse` = whether each session hook slot is currently non-null (`0 0` is normal while idle). Hook failures are nonfatal: a failed install retries at the next session sync, and a failed unhook keeps its slot for another retry. Write failures are swallowed and retried next beat: NEVER let the heartbeat kill the pump. Deleted on clean daemon exit AND by the crash handler when the daemon panics (else pip.lua would treat the dead daemon as alive for up to 15 s and drop menu toggles).
 **Consumer contract (pip.lua)**: reads the leading number with Lua `read("*n")`; alive iff the parse yields nil (mid-truncate read = daemon IS alive, never respawn) OR `abs(os.time() - ts) < 15`. So the line MUST start with the epoch number.
 
 ### 6.4 `vlc-pip-status.json` - `status` mode output (stdout is unreliable for a GUI exe)
@@ -184,15 +184,16 @@ Cross-tick state: the previous (window, child) rects held as an Option (None = r
   - On `WM_LBUTTONUP` with swallow_next_up set: clear the flag, swallow (keeps the input stream paired).
   - The reference point is the last **ALLOWED** down - so EVERY down inside the window/rect of the last allowed down is swallowed, and no two clicks the OS actually delivers can pair into `WM_LBUTTONDBLCLK`. (v1 bug: swallowing only the 2nd click let the OS pair clicks 1+3 - TRIPLE click fullscreened.)
   - `GetDoubleClickTime`/`GetSystemMetrics` queried live per event; timestamps are u32 ms with wrapping subtraction.
-- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing `IsWindow`, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
+- Hooks never touch the disk: they read a **pump-thread cache** (the hwnd of a loaded state passing the full owner-PID guard, refreshed before the loop and after every hotkey/timer action). Deletion of stale files stays in the toggle paths + maintain_region.
+- **Hooks are session-scoped.** The pump installs only null hook slots while an owned PiP session is active and unhooks each non-null slot when none is active. Failed installs and unhooks retry at the next sync without duplicate installs. The cache is cleared before unhooking, so a retained hook passes input through. Ending a session resets drag state and only the pending swallowed button-up flag; the last allowed click remains the rate-limit reference across a quick toggle cycle.
 
 ### Daemon loop
 1. Named mutex `"VlcPipDaemon"` → second instance exits 0 before touching any file.
 2. Discard pre-launch `stop` request (only `stop`).
-3. `RegisterHotKey(null, 1, MOD_CONTROL|MOD_ALT|MOD_NOREPEAT, 'P')`; `SetTimer(null, 0, 150, null)`; install both LL hooks. Failures recorded in heartbeat flags only.
-4. Beat once; refresh hook cache once (a daemon restarted while already in PiP must be guarded from the first message).
-5. Pump: `WM_HOTKEY` → Toggle + refresh cache. `WM_TIMER` → beat if >3 s, consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), refresh cache, maintain the fullscreen controller veil while a fullscreen-origin PiP is active, maintain_region - in that order (the cache must reflect a request-triggered toggle within the same tick). Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. `TranslateMessage`/`DispatchMessageW` always run.
-6. Cleanup on loop exit: unhook both, unregister hotkey, delete the alive file.
+3. Register the hotkey and 150 ms thread timer, retain both success flags, and initialize two null LL-hook slots. Neither registration failure is fatal.
+4. Load state and run the full owner-checked session/hook sync before the first heartbeat (a daemon restarted while already in PiP is guarded from the first message).
+5. Pump: `WM_HOTKEY` → Toggle + immediate session sync. `WM_TIMER` → consume request (`toggle`/`enter`/`exit` act; `stop` → `PostQuitMessage(0)`), load state + sync, beat if >3 s, maintain the fullscreen controller veil while a fullscreen-origin PiP is active, maintain_region - in that order. Transient file-I/O errors are swallowed (retry next tick); anything else propagates to the crash handler. The daemon creates no windows and accepts no text input; it handles its `WM_HOTKEY`/`WM_TIMER`/`WM_APP` thread messages directly, so `TranslateMessage` and `DispatchMessageW` are intentionally absent.
+6. Cleanup on loop exit: sync to no session (retrying each installed hook once), unregister the hotkey, delete the alive file, and clear heartbeat ownership. A final failed unhook remains until process exit.
 
 ---
 
@@ -262,7 +263,7 @@ New in v2.1; everything above is unchanged. No modifier keys and nothing new is 
 
 ### Gesture contract
 - **Interior drag = free move.** Press inside the visible PiP, drag past the system drag threshold, release: the window follows live and stays where dropped. Free placement survives the region converger (`plan_region` only repositions during a size correction).
-- **Band drag = aspect-locked resize.** A drag starting in the outer 16px band (DPI-scaled: 16 x dpi/96) of the **visible** rect - the region box, not the window rect - resizes live from that edge or corner, opposite side anchored; pure edges keep the perpendicular center fixed. Corners win where bands overlap. Aspect is the window's at drag start; width clamps to 256px min, capped so neither dimension exceeds 80% of the work area.
+- **Band drag = aspect-locked resize.** A drag starting in the outer 16px band (DPI-scaled: 16 x dpi/96) of the **visible** rect - the region box, not the window rect - resizes live from that edge or corner, opposite side anchored; pure edges keep the perpendicular center fixed. The zone is a per-axis `(sx, sy)` pair (`-1` low edge, `0` interior, `1` high edge), so corners combine the independent axes and the low edge wins if opposite bands overlap. Aspect is the window's at drag start; width clamps to 256px min, capped so neither dimension exceeds 80% of the work area.
 - **Release** derives `corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `target_w/h` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. The next enter and any convergence-driven re-park use them.
 - **Wheel: never touched.** Plain wheel = VLC volume - Windows ships "scroll inactive windows" on, so this already works over the unfocused PiP - and Ctrl+wheel = subtitle scale. The hook intercepts no wheel message.
 - Fullscreen guards unchanged: burst-swallowed downs never arm a drag.

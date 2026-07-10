@@ -17,14 +17,11 @@ fn main() {
             .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
             .unwrap_or_default();
         let msg = info.payload_as_str().unwrap_or("panic");
-        let _ = std::fs::write(
-            state::temp_path("vlc-pip-crash.txt"),
-            format!("panic at {loc}: {msg}"),
-        );
+        let _ = std::fs::write(state::crash_path(), format!("panic at {loc}: {msg}"));
         if daemon::owns_alive_file() {
             // a crashed daemon must not leave a fresh heartbeat: pip.lua would treat it as
             // alive for up to 15s and drop menu toggles (v1 deleted it in its finally block)
-            let _ = std::fs::remove_file(state::temp_path("vlc-pip-daemon.alive"));
+            let _ = std::fs::remove_file(state::alive_path());
         }
         std::process::exit(3);
     }));

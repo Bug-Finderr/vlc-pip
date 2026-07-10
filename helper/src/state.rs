@@ -23,12 +23,20 @@ pub struct PipState {
 }
 
 /// %TEMP%\{name} for every IPC file.
-pub fn temp_path(name: &str) -> PathBuf {
+fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
 pub fn state_path() -> PathBuf {
     temp_path("vlc-pip.state")
+}
+
+pub fn alive_path() -> PathBuf {
+    temp_path("vlc-pip-daemon.alive")
+}
+
+pub fn crash_path() -> PathBuf {
+    temp_path("vlc-pip-crash.txt")
 }
 
 pub fn load(path: &Path) -> Option<PipState> {

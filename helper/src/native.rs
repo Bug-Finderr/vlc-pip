@@ -313,7 +313,7 @@ fn set_region(h: isize, left: i32, top: i32, right: i32, bottom: i32) {
 
 // The minimal-look region clips painting AND hit-testing, so the gesture surface is the
 // region box (offset to screen coords by the window origin), not the window rect. One
-// call returns (visible, window) so had_rgn compares a coherent snapshot.
+// call returns (visible, window) so region presence comes from one coherent snapshot.
 pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
     let wr = window_rect(h)?;
     let vis = region_box(h).map_or(wr, |(l, t, r, b)| geometry::Rect {
