@@ -96,7 +96,7 @@ fn refresh_state(s: Option<PipState>) {
     // on a foreign window
     let s = s.filter(native::owns_state);
     PIP.set(Pip {
-        hwnd: s.map_or(0, |s| s.hwnd as isize),
+        hwnd: s.map_or(0, |s| s.hwnd),
         fs: s.is_some_and(|s| native::fs_origin(s.style)),
         pid: s.map_or(0, |s| s.pid),
     });
@@ -179,10 +179,10 @@ pub fn run(argv: &[String]) -> i32 {
             if pip.fs {
                 // VLC still believes it is fullscreen under this PiP: keep its
                 // controller strip off the screen (SPEC section 7)
-                native::hide_fs_controller(pip.pid);
+                native::veil_fs_controller(pip.pid);
             }
             if DRAG.get().state >= DragState::Moving {
-                tracker = native::RegionTracker::default(); // gestures own the window while dragging
+                tracker.reset_debounce(); // gestures own the window while dragging
             } else {
                 native::maintain_region(&mut tracker, s);
             }
@@ -245,7 +245,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
         let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
-        *tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
+        tracker.reset_debounce(); // convergence re-clips from a clean debounce
     }
 }
 

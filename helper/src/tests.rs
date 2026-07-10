@@ -485,15 +485,64 @@ mod geometry {
 }
 
 mod native {
-    use crate::native::fs_origin;
+    use crate::geometry::{Corner, Rect};
+    use crate::native::{fs_origin, heal_snapshot_due, heal_target};
+    use crate::state::PipState;
+
+    fn state() -> PipState {
+        PipState {
+            hwnd: 1,
+            x: 100,
+            y: 200,
+            w: 1000,
+            h: 640,
+            style: 1,
+            ex_style: 2,
+            target_w: 480,
+            target_h: 270,
+            corner: Corner::Br,
+            margin: 16,
+            min: true,
+            pid: 3,
+        }
+    }
 
     #[test]
     fn fs_origin_requires_both_caption_bits_absent() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
-        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as i64)); // ordinary windowed VLC
+        assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as isize)); // ordinary windowed VLC
         assert!(fs_origin(0)); // fullscreen: caption fully absent
         // WS_CAPTION is two bits (WS_BORDER|WS_DLGFRAME): one bit alone is NOT a caption
-        assert!(fs_origin(WS_BORDER as i64));
+        assert!(fs_origin(WS_BORDER as isize));
+    }
+
+    #[test]
+    fn absent_vlc_snapshot_wait_is_bounded_to_six_ticks() {
+        let mut wait = 6;
+        for expected in [false, false, false, false, false, false, true] {
+            assert_eq!(heal_snapshot_due(&mut wait), expected);
+            assert!(wait <= 6);
+        }
+    }
+
+    #[test]
+    fn heal_target_rejects_unrepresentable_edges() {
+        let mut s = state();
+        assert_eq!(
+            heal_target(&s),
+            Some(Rect {
+                left: 100,
+                top: 200,
+                right: 1100,
+                bottom: 840,
+            })
+        );
+
+        s.x = i32::MAX;
+        assert_eq!(heal_target(&s), None);
+        s.x = 100;
+        s.y = i32::MAX;
+        assert_eq!(heal_target(&s), None);
     }
 }
 
@@ -616,6 +665,7 @@ mod state {
     #[test]
     fn full_sample_round_trips_byte_identical() {
         let s = parse_state(FULL).unwrap();
+        let _: (isize, isize, isize) = (s.hwnd, s.style, s.ex_style);
         assert_eq!(s.hwnd, 66112);
         assert_eq!((s.x, s.y, s.w, s.h), (100, 200, 1000, 640));
         assert_eq!((s.style, s.ex_style), (349110272, 256));
@@ -628,13 +678,26 @@ mod state {
 
     #[test]
     fn invalid_geometry_fields_preserve_restore_metadata() {
-        let raw = "66112 100 200 1000 640 349110272 256 -1 270 br 2147483647 1 12345\n";
+        let raw =
+            "66112 100 200 1000 640 349110272 256 -2147483648 2147483647 br 2147483647 1 12345\n";
         let s = parse_state(raw).unwrap();
         assert_eq!(
             (s.x, s.y, s.w, s.h, s.style, s.ex_style),
             (100, 200, 1000, 640, 349110272, 256)
         );
-        assert_eq!((s.target_w, s.target_h, s.margin), (-1, 270, i32::MAX));
+        assert_eq!(
+            (s.target_w, s.target_h, s.margin),
+            (i32::MIN, i32::MAX, i32::MAX)
+        );
+        assert_eq!(write_state(&s), raw);
+    }
+
+    #[test]
+    fn native_fields_round_trip_signed_i64_wire_values() {
+        let raw = "-1 100 200 1000 640 -2 -3 480 270 br 16 1 12345\n";
+        let s = parse_state(raw).unwrap();
+        let _: (isize, isize, isize) = (s.hwnd, s.style, s.ex_style);
+        assert_eq!((s.hwnd, s.style, s.ex_style), (-1, -2, -3));
         assert_eq!(write_state(&s), raw);
     }
 

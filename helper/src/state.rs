@@ -7,13 +7,13 @@ use crate::geometry::Corner;
 // against HWND recycling. A VALID file on disk == "in PiP".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub style: i64,
-    pub ex_style: i64,
+    pub style: isize,
+    pub ex_style: isize,
     pub target_w: i32,
     pub target_h: i32,
     pub corner: Corner,
@@ -71,13 +71,13 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         return None;
     };
     Some(PipState {
-        hwnd: hwnd.parse().ok()?,
+        hwnd: hwnd.parse::<i64>().ok()?.try_into().ok()?,
         x: x.parse().ok()?,
         y: y.parse().ok()?,
         w: w.parse().ok()?,
         h: h.parse().ok()?,
-        style: style.parse().ok()?,
-        ex_style: ex_style.parse().ok()?,
+        style: style.parse::<i64>().ok()?.try_into().ok()?,
+        ex_style: ex_style.parse::<i64>().ok()?.try_into().ok()?,
         target_w: target_w.parse().ok()?,
         target_h: target_h.parse().ok()?,
         corner: Corner::parse(corner),
@@ -94,13 +94,13 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
 pub(crate) fn write_state(s: &PipState) -> String {
     format!(
         "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
-        s.hwnd,
+        s.hwnd as i64,
         s.x,
         s.y,
         s.w,
         s.h,
-        s.style,
-        s.ex_style,
+        s.style as i64,
+        s.ex_style as i64,
         s.target_w,
         s.target_h,
         s.corner.as_str(),
