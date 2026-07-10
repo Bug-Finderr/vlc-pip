@@ -314,7 +314,7 @@ try {
     $cx = $pip.x + [int]($pip.w / 2); $cy = $pip.y + [int]($pip.h / 2)
     ClickAt $cx $cy 5; $afterSpam = Status
     Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
-        ($afterSpam.x -eq $pip.x -and $afterSpam.w -eq $pip.w -and $afterSpam.h -eq $pip.h -and $afterSpam.inPip)
+        ((SameRect $afterSpam $pip) -and $afterSpam.inPip)
 
     DragFrom $cx $cy ($cx - 220) ($cy - 160)
     $moved = Status
@@ -325,7 +325,7 @@ try {
 
     ClickAt ($moved.x + $moved.w - 8) ($moved.y + [int]($moved.h / 2)) 1
     $bandClick = Status
-    Check "band click: no resize, no move" ($bandClick.x -eq $moved.x -and $bandClick.w -eq $moved.w -and $bandClick.inPip)
+    Check "band click: no resize, no move" ((SameRect $bandClick $moved) -and $bandClick.inPip)
 
     # right edge at mid-height: horizontal chrome is 0 so window right == visible right,
     # while the top/bottom strips are region-clipped chrome (corner drags are manual)
@@ -441,28 +441,51 @@ try {
     # and balloons the window - the daemon must dissolve the session into a plain
     # windowed VLC (frame back, state dropped), never restore the fullscreen shell
     PostKey $fw.hwnd 0x46 0x21
-    $null = WaitFor { -not (Status).caption } 2500 150
+    $stopFullscreen = WaitForStatus {
+        param($status)
+        $status.found -and (-not $status.caption) -and (-not $status.inPip) -and (SameRect $status $fs)
+    } 2500 150
+    if (-not $stopFullscreen.Matched) { throw "stop precondition failed: fullscreen did not stabilize" }
     Req "toggle"
-    $null = WaitFor { (Status).inPip } 2000 150
-    $fsp = Status
+    $stopReady = WaitForStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and
+            (Test-Path "$env:TEMP\vlc-pip.state") -and (AllControllersVeiled $status.hwnd)
+    } 2000 150
+    if (-not $stopReady.Matched) { throw "stop precondition failed: fullscreen PiP state or controller veil missing" }
+    $fsp = $stopReady.Status
     PostKey $fsp.hwnd 0x53 0x1F                                  # S = VLC stop
-    $null = WaitFor { $d = Status; $d.caption -and -not (Test-Path "$env:TEMP\vlc-pip.state") } 3000 150
-    $dis = Status
-    Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.state"))
+    $dissolve = WaitForStatus {
+        param($status)
+        $status.caption -and (-not $status.inPip) -and
+            (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and
+            ([Smoke.Keys]::FscState([IntPtr]::new([long]$status.hwnd))).Veiled -eq 0
+    } 3000 150
+    $dis = $dissolve.Status
+    $dissolvedControllers = [Smoke.Keys]::FscState([IntPtr]::new([long]$dis.hwnd))
+    Check "stop in fullscreen pip: session dissolves windowed" `
+        ($dissolve.Matched -and $dis.caption -and (-not $dis.inPip) -and
+            (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and $dissolvedControllers.Veiled -eq 0)
 
     # A clean close persists PiP geometry; reopening must heal it before deleting state.
     $pre = Status
     Req "enter"
-    $null = WaitFor { (Status).inPip } 3000 150
+    $healReady = WaitForStatus {
+        param($status)
+        $status.inPip -and (Test-Path "$env:TEMP\vlc-pip.state")
+    } 3000 150
+    if (-not $healReady.Matched) { throw "reopen-heal precondition failed: PiP state was not persisted" }
     $vlcProc.CloseMainWindow() | Out-Null
     if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
     Start-Sleep 1
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
-    $healDone = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip.state") } 12000 300   # startup + apply + stick + delete
-    Start-Sleep -Milliseconds 400
-    $healed = Status
+    $healDone = WaitForStatus {
+        param($status)
+        (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and (SameRect $status $pre)
+    } 12000 300   # startup + apply + stick + delete
+    $healed = $healDone.Status
     Check "reopen heal: state cleared, window at pre-pip position" `
-        ($healDone -and [math]::Abs($healed.x - $pre.x) -le 16 -and [math]::Abs($healed.y - $pre.y) -le 16)
+        ($healDone.Matched -and (SameRect $healed $pre) -and (-not (Test-Path "$env:TEMP\vlc-pip.state")))
     # Clean-close this instance so VLC persists the healed geometry (the finally
     # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
     $vlcProc.CloseMainWindow() | Out-Null
