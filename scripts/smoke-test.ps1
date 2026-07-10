@@ -1,7 +1,7 @@
-# End-to-end smoke test against live VLC. Run AFTER scripts\install.ps1 (daemon must be running).
-# One check per behavioral contract; waits poll for their condition instead of sleeping a
-# guessed duration - faster, and a late condition fails the check instead of flaking it.
+# Run after install.ps1 with no VLC instance open.
 $ErrorActionPreference = "Stop"
+. "$PSScriptRoot\common.ps1"
+
 $exe = "$env:APPDATA\vlc\pip\pip-helper.exe"
 $heartbeatPath = "$env:TEMP\vlc-pip-daemon.alive"
 
@@ -12,7 +12,6 @@ function Status {
     Get-Content "$env:TEMP\vlc-pip-status.json" -Raw | ConvertFrom-Json
 }
 function Req($cmd) { Set-Content "$env:TEMP\vlc-pip-request.txt" $cmd }
-# poll until the condition holds (true) or the cap passes (returns the final evaluation)
 function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $capMs) {
@@ -52,22 +51,10 @@ function ReadHeartbeat {
     }
     catch { $null }
 }
-function SamePath($left, $right) {
-    try {
-        [string]::Equals(
-            (Resolve-Path -LiteralPath $left).Path,
-            (Resolve-Path -LiteralPath $right).Path,
-            [StringComparison]::OrdinalIgnoreCase
-        )
-    }
-    catch { $false }
-}
 $fail = @()
 function Check($name, $cond) {
     if ($cond) { Write-Host "PASS $name" }
     else {
-        # the status file still holds the snapshot the check asserted on: dump it so a
-        # FAIL is self-diagnosing without re-running the whole live session
         Write-Host "FAIL $name"
         try { Write-Host "  status: $(Get-Content "$env:TEMP\vlc-pip-status.json" -Raw)" } catch {}
         $script:fail += $name
@@ -176,7 +163,7 @@ function ClickAt($x, $y, $times) {
     # last ALLOWED down, or the guard swallows it (and a drag would never arm)
     Start-Sleep -Milliseconds ($doubleClickMs + 100)
 }
-# post a key to VLC's vout (focus-independent); scan code matters for VLC's translation
+# The scan code matters to VLC's key translation.
 function PostKey([long]$top, [int]$vk, [int]$scan) {
     $t = [Smoke.Keys]::VoutChild([IntPtr]::new($top))
     if ($t -eq [IntPtr]::Zero) { $t = [IntPtr]::new($top) }
@@ -274,7 +261,7 @@ $heartbeatReady = WaitFor {
 $heartbeat = $script:heartbeat
 Check "daemon heartbeat: valid and fresh" $heartbeatReady
 $daemon = if ($heartbeat) { Get-Process -Id ([int]$heartbeat.Pid) -ErrorAction SilentlyContinue } else { $null }
-$daemonIdentity = $daemon -and $daemon.Path -and (SamePath $daemon.Path $exe)
+$daemonIdentity = $daemon -and $daemon.Path -and (Test-SamePath $daemon.Path $exe)
 Check "daemon heartbeat: pid owns installed helper" `
     $daemonIdentity
 # Idle session hooks may be absent; the global hotkey and timer are mandatory daemon arms.
@@ -295,7 +282,6 @@ if (-not (Test-Path $vlcPath)) { throw "vlc.exe not found" }
 if (Get-Process vlc -ErrorAction SilentlyContinue) {
     throw "Close VLC first: this test resizes, clicks, and kills the VLC instance it targets"
 }
-# v2.1: gestures persist to config.txt - park it so the run starts from defaults
 $cfg = "$env:APPDATA\vlc\pip\config.txt"
 $cfgBak = "$cfg.smoke-bak"
 $vlcProc = $null
@@ -324,15 +310,12 @@ try {
     Check "enter: pip formed (borderless, topmost, video 480w, region, state)" `
         ((-not $pip.caption) -and $pip.topmost -and $pip.w -eq 480 -and $pip.inPip -and $pip.minimal)
 
-    # fullscreen prevention: a 5-click burst subsumes double and triple click - every
-    # down after the first ALLOWED one must be swallowed, so no OS double-click can
-    # ever synthesize (v1 bugs: dblclick fullscreened; clicks 1+3 paired on triple)
+    # Five clicks cover adjacent and nonadjacent double/triple-click pairing.
     $cx = $pip.x + [int]($pip.w / 2); $cy = $pip.y + [int]($pip.h / 2)
     ClickAt $cx $cy 5; $afterSpam = Status
     Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
         ($afterSpam.x -eq $pip.x -and $afterSpam.w -eq $pip.w -and $afterSpam.h -eq $pip.h -and $afterSpam.inPip)
 
-    # v2.1 gestures: interior drag = free move; band drag = aspect-locked resize; wheel untouched
     DragFrom $cx $cy ($cx - 220) ($cy - 160)
     $moved = Status
     Check "drag-move: at delta, size held, still pip" `
@@ -364,7 +347,6 @@ try {
     Check "exit: exact windowed restore (caption, rect, topmost, region/state)" `
         ($after.caption -and $after.topmost -eq $before.topmost -and (-not $after.inPip) -and (-not $after.minimal) -and $after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
 
-    # persistence: re-enter picks the gestured size from config.txt
     Req "toggle"
     $null = WaitFor { (Status).inPip } 3000 150
     $re = Status
@@ -372,7 +354,6 @@ try {
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
 
-    # global hotkey enters, request-file exits: both paths share one state
     SendCtrlAltP
     Check "hotkey enters pip" (WaitFor { (Status).inPip } 3000 150)
     Req "toggle"
@@ -381,7 +362,6 @@ try {
     Check "interleave hotkey+request: no desync, exact rect" `
         ((-not $s.inPip) -and $s.topmost -eq $before.topmost -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
-    # F posted to the vout = VLC's fullscreen hotkey, focus-independent (SPEC section 7).
     PostKey $s.hwnd 0x46 0x21
     # Qt can resize through several captionless frames. Record fullscreen only after two
     # consecutive captionless status samples carry the exact same rect.
@@ -412,7 +392,6 @@ try {
     $stripUp = WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Rendered -gt 0 } 2500 60
     Check "controller: rendered before fullscreen PiP enter" $stripUp
 
-    # the enter is one immediate reshape - no handoff wait
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
     Req "toggle"
     $landing = WaitForStatus {
@@ -432,7 +411,6 @@ try {
     Check "controller: every matching window remains veiled through hover" `
         (WaitFor { AllControllersVeiled $fs.hwnd } 1000 50)
 
-    # exit returns the user to fullscreen - where they came from, internally consistent
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $fout = Status
@@ -443,7 +421,6 @@ try {
     Check "controller: no empty-region veil survives exit" `
         (WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Veiled -eq 0 } 2500 60)
 
-    # both toggles are instant: two rapid presses = a full round trip, no half-states
     Req "toggle"
     $null = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip-request.txt") } 1500 25    # first consumed
     Req "toggle"
@@ -473,11 +450,7 @@ try {
     $dis = Status
     Check "stop in fullscreen pip: session dissolves windowed" ($dis.caption -and -not $dis.inPip -and -not (Test-Path "$env:TEMP\vlc-pip.state"))
 
-    # v2.1 heal: a CLEAN close while in PiP makes Qt persist the PiP geometry as VLC's own
-    # (a kill persists nothing and would pass even without the heal - verified), so the
-    # reopened window would sit full-size at the PiP origin; the daemon heals it back to
-    # the pre-PiP rect and deletes the state once the rect sticks. The state-file check
-    # polls Test-Path so nothing races the heal's own delete.
+    # A clean close persists PiP geometry; reopening must heal it before deleting state.
     $pre = Status
     Req "enter"
     $null = WaitFor { (Status).inPip } 3000 150
@@ -490,7 +463,7 @@ try {
     $healed = Status
     Check "reopen heal: state cleared, window at pre-pip position" `
         ($healDone -and [math]::Abs($healed.x - $pre.x) -le 16 -and [math]::Abs($healed.y - $pre.y) -le 16)
-    # clean-close this instance too so VLC persists the HEALED geometry (the finally
+    # Clean-close this instance so VLC persists the healed geometry (the finally
     # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
     $vlcProc.CloseMainWindow() | Out-Null
     $vlcProc.WaitForExit(8000) | Out-Null
