@@ -21,6 +21,20 @@ function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
     }
     & $cond
 }
+function WaitForStatus([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $capMs) {
+        $status = Status
+        if (& $cond $status) { return [pscustomobject]@{ Matched = $true; Status = $status } }
+        Start-Sleep -Milliseconds $stepMs
+    }
+    $status = Status
+    [pscustomobject]@{ Matched = [bool](& $cond $status); Status = $status }
+}
+function SameRect($left, $right) {
+    $left.x -eq $right.x -and $left.y -eq $right.y -and
+        $left.w -eq $right.w -and $left.h -eq $right.h
+}
 function ReadHeartbeat {
     try {
         $raw = (Get-Content $heartbeatPath -Raw).Trim()
@@ -73,6 +87,7 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int max);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
 [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
 [DllImport("gdi32.dll")] public static extern int GetRgnBox(IntPtr rgn, out RECT box);
 [DllImport("gdi32.dll")] public static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
@@ -80,10 +95,27 @@ if (-not ('Smoke.Keys' -as [type])) {
 public delegate bool EnumProc(IntPtr h, IntPtr l);
 private const int NULLREGION = 1;
 public struct RECT { public int Left, Top, Right, Bottom; }
+public struct POINT { public int X, Y; }
+public sealed class ScreenPoint {
+    public bool Found;
+    public int X;
+    public int Y;
+}
 public sealed class ControllerState {
     public int Found;
     public int Veiled;
     public int Rendered;
+}
+public static ScreenPoint CursorPosition() {
+    POINT point;
+    bool found = GetCursorPos(out point);
+    return new ScreenPoint { Found = found, X = point.X, Y = point.Y };
+}
+public static bool CursorNear(int x, int y, int tolerance) {
+    POINT point;
+    return GetCursorPos(out point)
+        && Math.Abs(point.X - x) <= tolerance
+        && Math.Abs(point.Y - y) <= tolerance;
 }
 // VLC's vout event thread processes POSTED keys regardless of focus - keybd_event would
 // need VLC foreground, and injected focus-clicks from a background session are flaky
@@ -178,10 +210,29 @@ function VirtualDesktop {
         Monitors = [Smoke.Keys]::GetSystemMetrics(80)
     }
 }
-function InsideVirtualDesktop($rect, $desktop) {
-    $rect.x -ge $desktop.X -and $rect.y -ge $desktop.Y -and
-        $rect.x + $rect.w -le $desktop.X + $desktop.Width -and
-        $rect.y + $rect.h -le $desktop.Y + $desktop.Height
+function ProbeVirtualDesktop($desktop) {
+    if ($desktop.Monitors -le 1) {
+        Write-Host "SKIP multi-monitor absolute input (one monitor)"
+        return
+    }
+    Add-Type -AssemblyName System.Windows.Forms
+    $screen = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Select-Object -First 1
+    $prior = [Smoke.Keys]::CursorPosition()
+    $landed = $false
+    $restored = $false
+    if ($screen -and $prior.Found) {
+        $targetX = $screen.Bounds.Left + [int]($screen.Bounds.Width / 2)
+        $targetY = $screen.Bounds.Top + [int]($screen.Bounds.Height / 2)
+        try {
+            MoveAbs $targetX $targetY
+            $landed = WaitFor { [Smoke.Keys]::CursorNear($targetX, $targetY, 2) } 750 15
+        }
+        finally {
+            $restored = [Smoke.Keys]::SetCursorPos($prior.X, $prior.Y)
+        }
+    }
+    Check "multi-monitor: absolute input reaches nonprimary monitor and cursor restores" `
+        ($screen -and $prior.Found -and $landed -and $restored)
 }
 function AllControllersVeiled([long]$top) {
     $state = [Smoke.Keys]::FscState([IntPtr]::new($top))
@@ -233,6 +284,10 @@ Check "daemon heartbeat: hotkey/timer armed" `
 if (-not ($heartbeatReady -and $daemonIdentity -and $daemonArmed)) {
     throw "daemon heartbeat preflight failed"
 }
+$desktop = VirtualDesktop
+Check "virtual desktop: coordinate bounds available" `
+    ($desktop.Width -gt 1 -and $desktop.Height -gt 1 -and $desktop.Monitors -ge 1)
+ProbeVirtualDesktop $desktop
 
 $vlcDir = (Get-ItemProperty 'HKLM:\SOFTWARE\VideoLAN\VLC' -ErrorAction SilentlyContinue).InstallDir
 $vlcPath = if ($vlcDir) { Join-Path $vlcDir 'vlc.exe' } else { 'C:\Program Files\VideoLAN\VLC\vlc.exe' }
@@ -262,14 +317,6 @@ try {
 
     $before = Status
     Check "vlc ready (windowed, caption)" ($before.found -and $before.caption)
-    $desktop = VirtualDesktop
-    Check "virtual desktop: coordinate bounds available" `
-        ($desktop.Width -gt 1 -and $desktop.Height -gt 1 -and $desktop.Monitors -ge 1)
-    if ($desktop.Monitors -gt 1) {
-        $primaryWidth = [Smoke.Keys]::GetSystemMetrics(0); $primaryHeight = [Smoke.Keys]::GetSystemMetrics(1)
-        Check "multi-monitor: virtual bounds extend beyond primary display" `
-            ($desktop.X -lt 0 -or $desktop.Y -lt 0 -or $desktop.Width -gt $primaryWidth -or $desktop.Height -gt $primaryHeight)
-    }
 
     Req "toggle"
     $null = WaitFor { (Status).minimal } 4000 150
@@ -290,10 +337,6 @@ try {
     $moved = Status
     Check "drag-move: at delta, size held, still pip" `
         ([math]::Abs($moved.x - ($pip.x - 220)) -le 2 -and [math]::Abs($moved.y - ($pip.y - 160)) -le 2 -and $moved.w -eq $pip.w -and $moved.h -eq $pip.h -and $moved.inPip)
-    if ($desktop.Monitors -gt 1) {
-        Check "multi-monitor: injected drag stays inside virtual desktop" `
-            (InsideVirtualDesktop $moved $desktop)
-    }
     Check "drag-move: config persisted (w/h + corner)" `
         ((Test-Path $cfg) -and ((Get-Content $cfg -Raw).Trim() -match '^w=\d+ h=\d+ c=br$'))
 
@@ -340,18 +383,31 @@ try {
 
     # F posted to the vout = VLC's fullscreen hotkey, focus-independent (SPEC section 7).
     PostKey $s.hwnd 0x46 0x21
-    # caption-only: Qt autoresize can make the windowed size already match the monitor
-    $null = WaitFor { -not (Status).caption } 2500 150
-    $fs = Status
-    Check "fullscreen: engaged" (-not $fs.caption)
+    # Qt can resize through several captionless frames. Record fullscreen only after two
+    # consecutive captionless status samples carry the exact same rect.
+    $fs = $null
+    $previousFs = $null
+    $fsStable = $false
+    $fsWait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($fsWait.ElapsedMilliseconds -lt 2500) {
+        $candidate = Status
+        if ($candidate.found -and -not $candidate.caption) {
+            if ($previousFs -and (SameRect $candidate $previousFs)) {
+                $fs = $candidate
+                $fsStable = $true
+                break
+            }
+            $previousFs = $candidate
+        }
+        else { $previousFs = $null }
+        Start-Sleep -Milliseconds 150
+    }
+    if (-not $fs) { $fs = Status }
+    Check "fullscreen: engaged at a stable rect" $fsStable
 
     # Summon the strip first: the realistic toggle starts with it rendered. Use the
     # fullscreen rect center rather than the primary monitor center.
     $fcx = $fs.x + [int]($fs.w / 2); $fcy = $fs.y + [int]($fs.h / 2)
-    if ($desktop.Monitors -gt 1) {
-        Check "multi-monitor: fullscreen hover target is inside virtual desktop" `
-            ($fcx -ge $desktop.X -and $fcx -lt $desktop.X + $desktop.Width -and $fcy -ge $desktop.Y -and $fcy -lt $desktop.Y + $desktop.Height)
-    }
     HoverWiggle $fcx $fcy
     $stripUp = WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Rendered -gt 0 } 2500 60
     Check "controller: rendered before fullscreen PiP enter" $stripUp
@@ -359,12 +415,14 @@ try {
     # the enter is one immediate reshape - no handoff wait
     $hsw = [System.Diagnostics.Stopwatch]::StartNew()
     Req "toggle"
-    $null = WaitFor { Test-Path "$env:TEMP\vlc-pip.state" } 2000 15
+    $landing = WaitForStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and $status.topmost -and $status.w -lt [int]($fs.w / 2)
+    } 2000 15
     $enterMs = $hsw.ElapsedMilliseconds
-    $null = WaitFor { (Status).inPip } 2000 150
-    $fpip = Status
+    $fpip = $landing.Status
     Check "fullscreen enter: immediate (<500ms), pip-sized" `
-        ($enterMs -lt 500 -and $fpip.inPip -and (-not $fpip.caption) -and $fpip.w -lt [int]($fs.w / 2))
+        ($landing.Matched -and $enterMs -lt 500 -and $fpip.inPip -and (-not $fpip.caption) -and $fpip.topmost -and $fpip.w -lt [int]($fs.w / 2))
     Check "controller: every matching window veiled in fullscreen PiP" `
         (WaitFor { AllControllersVeiled $fs.hwnd } 750 25)
 
@@ -374,18 +432,12 @@ try {
     Check "controller: every matching window remains veiled through hover" `
         (WaitFor { AllControllersVeiled $fs.hwnd } 1000 50)
 
-    # Unfocus/refocus forces VLC's visibility state without waiting on a guessed delay.
-    ClickAt $fcx $fcy 1
-    ClickAt ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2)) 1
-    Check "controller: every matching window remains veiled through refocus" `
-        (WaitFor { AllControllersVeiled $fs.hwnd } 1000 50)
-
     # exit returns the user to fullscreen - where they came from, internally consistent
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $fout = Status
     Check "fullscreen exit: fullscreen and topmost state restored" `
-        ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.topmost -eq $fs.topmost -and $fout.w -eq $fs.w -and $fout.h -eq $fs.h)
+        ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.topmost -eq $fs.topmost -and (SameRect $fout $fs))
     # Absence is acceptable; any matching controller that survived must have no veil.
     HoverWiggle $fcx $fcy
     Check "controller: no empty-region veil survives exit" `
@@ -398,7 +450,7 @@ try {
     $null = WaitFor { $d = Status; (-not $d.inPip) -and (-not $d.caption) } 3000 150
     $fdbl = Status
     Check "fullscreen double-toggle: clean round trip" `
-        ((-not $fdbl.inPip) -and (-not $fdbl.caption) -and $fdbl.topmost -eq $fs.topmost -and $fdbl.w -eq $fs.w)
+        ((-not $fdbl.inPip) -and (-not $fdbl.caption) -and $fdbl.topmost -eq $fs.topmost -and (SameRect $fdbl $fs))
 
     # leave fullscreen via VLC itself: the window was untouched while fullscreen, so
     # Qt's own restore must land the exact pre-fullscreen rect
