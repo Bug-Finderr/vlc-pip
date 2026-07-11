@@ -189,6 +189,14 @@ mod geometry {
     }
 
     #[test]
+    fn resize_height_driven_shrink_rounds_the_whole_ratio() {
+        assert_eq!(
+            plan_resize(&rc(0, 0, 480, 270), (1, 1), 0, -1, &WORK),
+            rc(0, 0, 478, 268)
+        );
+    }
+
+    #[test]
     fn resize_clamps_min_256() {
         assert_eq!(
             plan_resize(&rc(0, 0, 480, 270), (1, 1), -400, -400, &WORK),

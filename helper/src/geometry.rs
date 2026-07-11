@@ -104,9 +104,7 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) 
     let raw_w = if width_driven {
         i64::from(w0) + dw
     } else {
-        // Algebraically identical to `(h0 + dh) * w0 / h0`, but the reachable
-        // full pointer delta times w0 fits i64 while the undistributed sum may not.
-        i64::from(w0) + dh * i64::from(w0) / i64::from(h0)
+        (i64::from(h0) + dh).saturating_mul(i64::from(w0)) / i64::from(h0)
     };
     let w = raw_w.clamp(i64::from(min_w), i64::from(max_w)) as i32;
     let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
