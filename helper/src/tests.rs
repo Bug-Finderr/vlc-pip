@@ -391,7 +391,7 @@ mod geometry {
     fn invalid_region_inputs_skip() {
         let cases = [
             (
-                "negative chrome",
+                "child extends past right",
                 rc(0, 0, 480, 270),
                 rc(0, 0, 481, 270),
                 480,
@@ -401,7 +401,7 @@ mod geometry {
                 WORK,
             ),
             (
-                "child outside window",
+                "child extends past left",
                 rc(0, 0, 2, 1),
                 rc(-1, 0, 0, 1),
                 1,
@@ -415,16 +415,6 @@ mod geometry {
                 rc(0, 0, 480, 300),
                 rc(0, 20, 480, 290),
                 -500,
-                270,
-                Corner::Br,
-                16,
-                WORK,
-            ),
-            (
-                "nonpositive target with positive window",
-                rc(0, 0, 780, 270),
-                rc(0, 0, 480, 270),
-                -1,
                 270,
                 Corner::Br,
                 16,
@@ -505,7 +495,7 @@ mod native {
     }
 
     #[test]
-    fn fs_origin_requires_both_caption_bits_absent() {
+    fn fs_origin_detects_an_incomplete_caption_mask() {
         use windows_sys::Win32::UI::WindowsAndMessaging::{WS_BORDER, WS_CAPTION, WS_THICKFRAME};
         assert!(!fs_origin((WS_CAPTION | WS_THICKFRAME) as isize)); // ordinary windowed VLC
         assert!(fs_origin(0)); // fullscreen: caption fully absent

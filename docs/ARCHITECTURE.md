@@ -64,8 +64,12 @@ CLI modes: `toggle|enter|exit|restore|status|daemon|stop`. `restore` is the inst
 ## Development
 
 ```powershell
-cargo test --manifest-path helper\Cargo.toml          # pure-logic unit tests
-powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # end-to-end against live VLC
+cargo fmt --manifest-path helper\Cargo.toml -- --check
+cargo test --manifest-path helper\Cargo.toml
+cargo clippy --manifest-path helper\Cargo.toml --all-targets -- -D warnings
+cargo build --release --manifest-path helper\Cargo.toml
+powershell -ExecutionPolicy Bypass -File scripts\common.tests.ps1
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1   # install first; live VLC gate
 ```
 
-The smoke gate verifies daemon identity and the live geometry, topmost restore, input guards, gestures, fullscreen veil, and reopen-heal paths. Its non-primary-monitor absolute-input probe runs only on multi-monitor hosts. [SPEC.md](SPEC.md) is the full contract and acceptance checklist.
+CI also parses every PowerShell script and stages the prebuilt package. The smoke gate verifies daemon identity and the live geometry, topmost restore, input guards, gestures, fullscreen veil, and reopen-heal paths. Its non-primary-monitor absolute-input probe runs only on multi-monitor hosts. [SPEC.md](SPEC.md) is the full contract and acceptance checklist.

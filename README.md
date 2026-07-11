@@ -27,7 +27,7 @@ The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal 
 ## Controls
 
 - **Move**: drag anywhere inside the PiP - it stays where you drop it.
-- **Resize**: drag the outer edge or corner band, about 16 px and DPI-scaled - aspect-locked, from 256 px wide up to 80% of the screen's work area.
+- **Resize**: drag the outer edge or corner band, about 16 px and DPI-scaled - aspect-locked, with a 256 px minimum and a nominal 80% work-area cap (the minimum wins on unusually small work areas).
 - Size and nearest corner persist to `%APPDATA%\vlc\pip\config.txt` on release and are reused on the next PiP enter (startup arguments still win; delete the file to reset).
 - **Volume**: the mouse wheel already works over the PiP without focusing it (Windows' "scroll inactive windows" is on by default); Ctrl+wheel scales subtitles.
 
