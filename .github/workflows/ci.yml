@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Format
+        run: cargo fmt --manifest-path helper/Cargo.toml -- --check
+      - name: Unit tests
+        run: cargo test --manifest-path helper/Cargo.toml
+      - name: Clippy
+        run: cargo clippy --manifest-path helper/Cargo.toml --all-targets -- -D warnings
+      - name: Release build
+        run: cargo build --release --manifest-path helper/Cargo.toml
+      - name: PowerShell contracts
+        shell: powershell
+        run: |
+          & scripts\common.tests.ps1
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$parseErrors
+            ) | Out-Null
+            if ($parseErrors) { throw "$($_.Name): $($parseErrors -join '; ')" }
+          }
+      - name: Stage prebuilt package
+        shell: powershell
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP vlc-pip
+          New-Item -ItemType Directory -Path $stage, "$stage\extension", "$stage\scripts", "$stage\docs" | Out-Null
+          Copy-Item helper\target\release\pip-helper.exe "$stage\pip-helper.exe"
+          Copy-Item extension\pip.lua "$stage\extension\pip.lua"
+          Copy-Item scripts\common.ps1, scripts\install.ps1, scripts\uninstall.ps1, scripts\smoke-test.ps1 "$stage\scripts"
+          Copy-Item docs\* "$stage\docs" -Recurse
+          Copy-Item README.md, LICENSE $stage
+
+          $required = @(
+            "pip-helper.exe", "extension\pip.lua", "scripts\common.ps1",
+            "scripts\install.ps1", "scripts\uninstall.ps1", "scripts\smoke-test.ps1",
+            "README.md", "LICENSE", "docs\SPEC.md", "docs\ARCHITECTURE.md"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath "$stage\$path" -PathType Leaf)) { throw "package missing $path" }
+          }
+          if (Get-ChildItem $stage -Recurse -Filter Cargo.toml) { throw "prebuilt package contains source manifest" }
+      - name: Upload prebuilt package
+        uses: actions/upload-artifact@v7
+        with:
+          name: vlc-pip-windows-x64
+          path: ${{ runner.temp }}/vlc-pip
+          if-no-files-found: error

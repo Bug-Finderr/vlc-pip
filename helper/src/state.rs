@@ -4,16 +4,16 @@ use crate::geometry::Corner;
 
 // The PiP state: x..ex_style restore the window; target_w..min are the options in
 // effect at Enter (daemon and one-shot CLI converge on the same geometry); pid guards
-// against HWND recycling. A VALID file on disk == "in PiP".
+// against HWND recycling. A valid file is either an owned PiP or a pending reopen heal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipState {
-    pub hwnd: i64,
+    pub hwnd: isize,
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub style: i64,
-    pub ex_style: i64,
+    pub style: isize,
+    pub ex_style: isize,
     pub target_w: i32,
     pub target_h: i32,
     pub corner: Corner,
@@ -23,7 +23,7 @@ pub struct PipState {
 }
 
 /// %TEMP%\{name} for every IPC file.
-pub fn temp_path(name: &str) -> PathBuf {
+fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
@@ -31,20 +31,32 @@ pub fn state_path() -> PathBuf {
     temp_path("vlc-pip.state")
 }
 
+pub fn alive_path() -> PathBuf {
+    temp_path("vlc-pip-daemon.alive")
+}
+
+pub fn crash_path() -> PathBuf {
+    temp_path("vlc-pip-crash.txt")
+}
+
 pub fn load(path: &Path) -> Option<PipState> {
-    parse_state(&std::fs::read_to_string(path).ok()?) // missing or unreadable = "not in PiP"
+    parse_state(&std::fs::read_to_string(path).ok()?)
 }
 
 pub fn save(s: &PipState, path: &Path) -> std::io::Result<()> {
     std::fs::write(path, write_state(s))
 }
 
-pub fn try_delete(path: &Path) {
-    let _ = std::fs::remove_file(path); // transient lock: next caller retries
+pub fn try_delete(path: &Path) -> bool {
+    // Already absent is success; every other failure leaves the caller's retry state live.
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 // One whitespace-separated line of exactly 13 tokens, newline-terminated; any deviation
-// reads as None = "not in PiP". The trailing newline is the torn-write sentinel: a
+// is not a usable session record. The trailing newline is the torn-write sentinel: a
 // truncated write loses it, so a partial line can never parse (a numeric PREFIX of the
 // last token would otherwise pass and misroute a live PiP into the heal path).
 pub(crate) fn parse_state(s: &str) -> Option<PipState> {
@@ -52,18 +64,32 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
         return None;
     }
     let t: Vec<&str> = s.split_whitespace().collect();
-    let [hwnd, x, y, w, h, style, ex_style, target_w, target_h, corner, margin, min, pid] = t[..]
+    let [
+        hwnd,
+        x,
+        y,
+        w,
+        h,
+        style,
+        ex_style,
+        target_w,
+        target_h,
+        corner,
+        margin,
+        min,
+        pid,
+    ] = t[..]
     else {
         return None;
     };
     Some(PipState {
-        hwnd: hwnd.parse().ok()?,
+        hwnd: hwnd.parse::<i64>().ok()?.try_into().ok()?,
         x: x.parse().ok()?,
         y: y.parse().ok()?,
         w: w.parse().ok()?,
         h: h.parse().ok()?,
-        style: style.parse().ok()?,
-        ex_style: ex_style.parse().ok()?,
+        style: style.parse::<i64>().ok()?.try_into().ok()?,
+        ex_style: ex_style.parse::<i64>().ok()?.try_into().ok()?,
         target_w: target_w.parse().ok()?,
         target_h: target_h.parse().ok()?,
         corner: Corner::parse(corner),
@@ -80,8 +106,19 @@ pub(crate) fn parse_state(s: &str) -> Option<PipState> {
 pub(crate) fn write_state(s: &PipState) -> String {
     format!(
         "{} {} {} {} {} {} {} {} {} {} {} {} {}\n",
-        s.hwnd, s.x, s.y, s.w, s.h, s.style, s.ex_style,
-        s.target_w, s.target_h, s.corner.as_str(), s.margin, s.min as u8, s.pid
+        s.hwnd as i64,
+        s.x,
+        s.y,
+        s.w,
+        s.h,
+        s.style as i64,
+        s.ex_style as i64,
+        s.target_w,
+        s.target_h,
+        s.corner.as_str(),
+        s.margin,
+        s.min as u8,
+        s.pid
     )
 }
 
@@ -99,7 +136,11 @@ pub fn consume_request(path: &Path) -> Option<String> {
     let cmd = std::fs::read_to_string(path).ok()?; // missing or mid-write: retry next poll
     std::fs::remove_file(path).ok()?; // couldn't delete: leave the command for next poll
     let cmd = cmd.trim();
-    if cmd.is_empty() { None } else { Some(cmd.to_string()) }
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    }
 }
 
 // ---- status JSON (write-only; smoke-test.ps1 parses it - shape is frozen) -----------

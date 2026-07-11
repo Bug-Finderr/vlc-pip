@@ -12,7 +12,13 @@ pub struct PipOptions {
 
 impl Default for PipOptions {
     fn default() -> Self {
-        Self { w: 480, h: 270, corner: Corner::Br, margin: 16, min: true }
+        Self {
+            w: 480,
+            h: 270,
+            corner: Corner::Br,
+            margin: 16,
+            min: true,
+        }
     }
 }
 
@@ -56,13 +62,18 @@ pub fn config_path() -> Option<PathBuf> {
 
 /// defaults < config tokens < argv: parse_options' later-duplicates-win does the layering.
 pub fn merge(cfg: &str, argv: &[String]) -> PipOptions {
-    parse_options(cfg.split_whitespace().chain(argv.iter().map(String::as_str)))
+    parse_options(
+        cfg.split_whitespace()
+            .chain(argv.iter().map(String::as_str)),
+    )
 }
 
 /// Options in effect for an enter. Config is re-read per call so the daemon picks up its
 /// own gesture writes (and hand edits) without a restart.
 pub fn effective(argv: &[String]) -> PipOptions {
-    let cfg = config_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    let cfg = config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
     merge(&cfg, argv)
 }
 

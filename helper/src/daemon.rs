@@ -6,46 +6,38 @@ use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM,
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetDoubleClickTime, RegisterHotKey, UnregisterHotKey, MOD_ALT,
-    MOD_CONTROL, MOD_NOREPEAT, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
+    GetAsyncKeyState, GetDoubleClickTime, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey,
+    UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_F, VK_LWIN, VK_MENU, VK_P, VK_RWIN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-    GetSystemMetrics, PostQuitMessage, PostThreadMessageW, SetTimer, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT, MSG,
-    MSLLHOOKSTRUCT, SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_SYSKEYDOWN, WM_TIMER,
+    CallNextHookEx, GA_ROOT, GetAncestor, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PostQuitMessage, PostThreadMessageW,
+    SM_CXDOUBLECLK, SM_CXDRAG, SM_CYDOUBLECLK, SM_CYDRAG, SetTimer, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_HOTKEY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SYSKEYDOWN, WM_TIMER, WindowFromPoint,
 };
 
 use crate::state::PipState;
 use crate::{geometry, native, options, state};
 
-// Everything the hooks touch lives on the pump thread - LL hook callbacks dispatch on
-// the thread that installed them (SPEC R7) - so plain Cells hold all hook state, and
-// reads and writes move WHOLE structs: a queued message can never mix stale fields with
-// fresh ones. Hooks still never touch the disk (LowLevelHooksTimeout would silently
-// remove them); the cells are refreshed by the pump, and stale-file DELETION stays in
-// native. The one atomic is for the panic hook, which can fire on any thread:
-// true while this process owns the heartbeat file, so a daemon crash deletes the
-// heartbeat and pip.lua respawns immediately instead of treating the dead daemon as
-// alive for up to 15s.
+// LL hooks dispatch on the installing pump thread (SPEC R7), so Cells hold hook state.
+// Whole-struct moves prevent mixed snapshots, and hooks avoid disk I/O that could exceed
+// LowLevelHooksTimeout. The only atomic lets the panic hook delete our heartbeat.
 static OWNS_ALIVE_FILE: AtomicBool = AtomicBool::new(false);
 
 const WM_APP_DRAG: u32 = WM_APP;
 const WM_APP_DRAGEND: u32 = WM_APP + 1;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum DragState {
     #[default]
     Idle,
     Armed,
-    Moving,
-    Resizing,
+    Active,
 }
 
-// The drag gesture. The pump reads the mode from wParam and validates the generation
-// from lParam, so a hook-side reset or rapid re-arm can never apply a stale delta.
+// The pump validates the generation from lParam, so a hook-side reset or rapid re-arm
+// can never apply a stale delta.
 #[derive(Clone, Copy, Default)]
 struct Drag {
     state: DragState,
@@ -55,9 +47,17 @@ struct Drag {
     origin: (i32, i32),
     start: geometry::Rect,
     vis: geometry::Rect,
-    had_rgn: bool,
     latest: (i32, i32),
     move_pending: bool,
+}
+
+impl Drag {
+    fn reset(self) -> Self {
+        Self {
+            generation: self.generation,
+            ..Self::default()
+        }
+    }
 }
 
 /// The last ALLOWED button-down (time in u32 hook ms, wraps) for the click rate limit.
@@ -69,15 +69,14 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// The current PiP (hwnd 0 = none). `fs` = fullscreen-origin (saved style has no
-/// caption): the keyboard hook swallows Esc and the tick keeps VLC's strip hidden.
-/// `pid` is the owner verified by owns_state - the tick reuses it rather than
-/// re-deriving it from a handle that may have been recycled since.
+/// Cached owned PiP (hwnd 0 = none). The snapshot repairs a concurrent one-shot exit
+/// after a timer already loaded the old state.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
     fs: bool,
     pid: u32,
+    snapshot: Option<PipState>,
 }
 
 thread_local! {
@@ -90,20 +89,78 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn refresh_state(s: Option<PipState>) {
+fn ended_session(previous: Pip, current: Pip, state_exists: bool) -> Option<PipState> {
+    (current.hwnd == 0 && !state_exists)
+        .then_some(previous.snapshot)
+        .flatten()
+}
+
+fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: bool) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
-    let s = s.filter(native::owns_state);
-    PIP.set(Pip {
-        hwnd: s.map_or(0, |s| s.hwnd as isize),
-        fs: s.is_some_and(|s| native::fs_origin(s.style)),
-        pid: s.map_or(0, |s| s.pid),
-    });
+    let previous = PIP.get();
+    let pip = s
+        .filter(native::owns_state)
+        .map_or(Pip::default(), |s| Pip {
+            hwnd: s.hwnd,
+            fs: native::fs_origin(s.style),
+            pid: s.pid,
+            snapshot: Some(s),
+        });
+    PIP.set(pip);
+
+    if repair_ended
+        && previous.snapshot.is_some()
+        && pip.hwnd == 0
+        && let Some(s) = ended_session(previous, pip, state::state_path().exists())
+    {
+        native::repair_ended_session(&s);
+    }
+
+    if previous.hwnd != 0 && (previous.hwnd != pip.hwnd || previous.pid != pip.pid) {
+        DRAG.set(DRAG.get().reset());
+        CLICK.set(Click {
+            swallow_next_up: false,
+            ..CLICK.get()
+        });
+    }
+
+    if pip.hwnd != 0 {
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            if hooks.0.is_null() {
+                hooks.0 = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0);
+            }
+            if hooks.1.is_null() {
+                hooks.1 = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0);
+            }
+        }
+    } else {
+        if !hooks.0.is_null() && unsafe { UnhookWindowsHookEx(hooks.0) } != 0 {
+            hooks.0 = std::ptr::null_mut();
+        }
+        if !hooks.1.is_null() && unsafe { UnhookWindowsHookEx(hooks.1) } != 0 {
+            hooks.1 = std::ptr::null_mut();
+        }
+    }
+}
+
+pub(crate) fn heartbeat_line(
+    epoch: u64,
+    pid: u32,
+    hotkey: bool,
+    timer: bool,
+    kb: bool,
+    mouse: bool,
+) -> String {
+    format!(
+        "{epoch} pid={pid} hotkey={} timer={} kb={} mouse={}",
+        hotkey as u8, timer as u8, kb as u8, mouse as u8
+    )
 }
 
 pub fn run(argv: &[String]) -> i32 {
-    // single instance; second instance exits 0 before touching any file
     let name: Vec<u16> = "VlcPipDaemon\0".encode_utf16().collect();
     let mutex = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) }; // held for process lifetime
     if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -119,77 +176,80 @@ pub fn run(argv: &[String]) -> i32 {
         let _ = std::fs::remove_file(&rp);
     }
 
-    let (hot, timer, kb, mouse) = unsafe {
-        let module = GetModuleHandleW(std::ptr::null());
+    let (hot, timer) = unsafe {
         (
-            RegisterHotKey(std::ptr::null_mut(), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_P as u32) != 0,
+            RegisterHotKey(
+                std::ptr::null_mut(),
+                1,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_P as u32,
+            ) != 0,
             SetTimer(std::ptr::null_mut(), 0, 150, None) != 0, // WM_TIMER -> thread queue
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), module, 0),
-            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), module, 0),
         )
     };
+    let mut hooks: (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
 
     // Heartbeat, not a marker: a force-killed daemon can't delete the file, so consumers
-    // (pip.lua) check the leading epoch-seconds for freshness. Also carries arming
-    // diagnostics. Write failures are swallowed: NEVER let the heartbeat kill the pump.
-    let alive = state::temp_path("vlc-pip-daemon.alive");
-    let beat = |last: &mut Instant| {
+    // (pip.lua) check the leading epoch-seconds for freshness. kb/mouse report the
+    // current session hook slots. Write failures never kill the pump.
+    let alive = state::alive_path();
+    let beat = |last: &mut Instant, hooks: &(HHOOK, HHOOK)| {
         *last = Instant::now();
-        let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let _ = std::fs::write(&alive, format!(
-            "{epoch} pid={} hotkey={} timer={} kb={} mouse={}",
-            std::process::id(),
-            hot as i32,
-            timer as i32,
-            (!kb.is_null()) as i32,
-            (!mouse.is_null()) as i32,
-        ));
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = std::fs::write(
+            &alive,
+            heartbeat_line(
+                epoch,
+                std::process::id(),
+                hot,
+                timer,
+                !hooks.0.is_null(),
+                !hooks.1.is_null(),
+            ),
+        );
     };
     OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
-    beat(&mut last_beat);
-    refresh_state(state::load(&state::state_path())); // a daemon restarted while already in PiP must be guarded from the first message
+    sync_session(&mut hooks, state::load(&state::state_path()), false);
+    beat(&mut last_beat, &hooks);
 
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            refresh_state(state::load(&state::state_path()));
+            sync_session(&mut hooks, state::load(&state::state_path()), true);
         } else if msg.message == WM_TIMER {
-            if last_beat.elapsed() > Duration::from_secs(3) {
-                beat(&mut last_beat);
-            }
             poll_request(argv);
-            // one state snapshot per tick, shared by the hook cache and the converger;
-            // it must reflect a request-triggered toggle within this same tick
+            // The normal tick shares one post-request snapshot between session sync and
+            // maintenance. A terminal maintenance change alone triggers a second load.
             let s = state::load(&state::state_path());
-            refresh_state(s);
+            sync_session(&mut hooks, s, true);
             let pip = PIP.get();
             if pip.fs {
-                // VLC still believes it is fullscreen under this PiP: keep its
-                // controller strip off the screen (SPEC section 7)
-                native::hide_fs_controller(pip.pid);
+                native::veil_fs_controller(pip.pid);
             }
-            if DRAG.get().state >= DragState::Moving {
-                tracker = native::RegionTracker::default(); // gestures own the window while dragging
+            let state_dropped = if DRAG.get().state == DragState::Active {
+                tracker.reset_debounce(); // gestures own the window while dragging
+                false
             } else {
-                native::maintain_region(&mut tracker, s);
+                native::maintain_region(&mut tracker, s)
+            };
+            if state_dropped {
+                sync_session(&mut hooks, state::load(&state::state_path()), false);
+            }
+            if last_beat.elapsed() > Duration::from_secs(3) {
+                beat(&mut last_beat, &hooks);
             }
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
             on_drag_msg(&msg, &mut tracker);
         }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
     }
 
-    unsafe {
-        UnhookWindowsHookEx(kb);
-        UnhookWindowsHookEx(mouse);
-        UnregisterHotKey(std::ptr::null_mut(), 1);
-    }
+    sync_session(&mut hooks, None, false);
+    unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     OWNS_ALIVE_FILE.store(false, Relaxed);
     0
@@ -197,31 +257,47 @@ pub fn run(argv: &[String]) -> i32 {
 
 // The coalesced drag apply. Snapshot the gesture BEFORE any Win32 call: SetWindowPos/
 // SetWindowRgn can pump sent messages, and a hook re-arm mid-call must not be clobbered
-// or half-read. The generation guard drops a queued message from a previous drag (a
-// rapid release-and-repress re-arms the gesture; the stale delta must not apply).
+// or half-read. Generation drops an old gesture's queued message; the fresh owner-PID
+// check prevents a recycled HWND from targeting a foreign window.
 fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let mut d = DRAG.get();
     d.move_pending = false;
     DRAG.set(d);
-    if d.hwnd != PIP.get().hwnd || msg.lParam != d.generation as isize {
+    let pip = PIP.get();
+    if d.hwnd != pip.hwnd
+        || msg.lParam != d.generation as isize
+        || !owner_is_current(pip.pid, native::window_owner(d.hwnd))
+    {
         return;
     }
-    let (dx, dy) = (d.latest.0 - d.origin.0, d.latest.1 - d.origin.1);
-    let resizing = msg.wParam == DragState::Resizing as usize;
+    let (dx, dy) = (
+        pointer_delta(d.latest.0, d.origin.0),
+        pointer_delta(d.latest.1, d.origin.1),
+    );
+    let resizing = d.zone != (0, 0);
     let target = if resizing {
-        geometry::plan_resize(&d.start, d.zone, dx, dy, &native::work_area(d.hwnd))
+        Some(geometry::plan_resize(
+            &d.start,
+            d.zone,
+            dx,
+            dy,
+            &native::work_area(d.hwnd),
+        ))
     } else {
-        geometry::Rect {
-            left: d.start.left + dx,
-            top: d.start.top + dy,
-            right: d.start.right + dx,
-            bottom: d.start.bottom + dy,
+        geometry::plan_move(&d.start, dx, dy)
+    };
+    let Some(target) = target else {
+        if msg.message == WM_APP_DRAGEND {
+            tracker.reset_debounce();
         }
+        return;
     };
     if resizing {
         // live minimal look: clip to where the video will sit, using the per-side chrome
         // measured at drag start; convergence verifies the exact box after release
-        let clip = d.had_rgn.then(|| geometry::resize_clip(&d.start, &d.vis, &target)).flatten();
+        let clip = (d.vis != d.start)
+            .then(|| geometry::resize_clip(&d.start, &d.vis, &target))
+            .flatten();
         native::drag_resize(d.hwnd, &target, clip.as_ref());
     } else {
         native::drag_move(d.hwnd, &target);
@@ -232,8 +308,16 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
         let chrome_w = (d.start.right - d.start.left) - (d.vis.right - d.vis.left);
         let chrome_h = (d.start.bottom - d.start.top) - (d.vis.bottom - d.vis.top);
         native::finish_drag(&target, resizing, chrome_w, chrome_h);
-        *tracker = native::RegionTracker::default(); // convergence re-clips from a clean debounce
+        tracker.reset_debounce(); // convergence re-clips from a clean debounce
     }
+}
+
+fn owner_is_current(cached_pid: u32, current_pid: u32) -> bool {
+    cached_pid != 0 && cached_pid == current_pid
+}
+
+fn pointer_delta(current: i32, origin: i32) -> i64 {
+    i64::from(current) - i64::from(origin)
 }
 
 fn poll_request(argv: &[String]) {
@@ -257,7 +341,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         if code >= 0 && (wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             let pip = PIP.get();
-            if pip.hwnd != 0 && GetForegroundWindow() as isize == pip.hwnd {
+            if pip.hwnd != 0
+                && GetForegroundWindow() as isize == pip.hwnd
+                && owner_is_current(pip.pid, native::window_owner(pip.hwnd))
+            {
                 if k.vkCode == VK_F as u32 {
                     return 1; // swallow F -> no fullscreen while in PiP
                 }
@@ -288,25 +375,38 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         if code >= 0 {
             if wparam as u32 == WM_LBUTTONDOWN {
                 let m = &*(lparam as *const MSLLHOOKSTRUCT);
-                let h = PIP.get().hwnd;
-                if h != 0 && GetAncestor(WindowFromPoint(m.pt), GA_ROOT) as isize == h {
+                let pip = PIP.get();
+                let h = pip.hwnd;
+                if h != 0
+                    && owner_is_current(pip.pid, native::window_owner(h))
+                    && GetAncestor(WindowFromPoint(m.pt), GA_ROOT) as isize == h
+                {
                     let mut c = CLICK.get();
                     let burst = m.time.wrapping_sub(c.time) <= GetDoubleClickTime()
-                        && (m.pt.x - c.x).abs() <= GetSystemMetrics(SM_CXDOUBLECLK)
-                        && (m.pt.y - c.y).abs() <= GetSystemMetrics(SM_CYDOUBLECLK);
+                        && pointer_delta(m.pt.x, c.x).abs()
+                            <= i64::from(GetSystemMetrics(SM_CXDOUBLECLK))
+                        && pointer_delta(m.pt.y, c.y).abs()
+                            <= i64::from(GetSystemMetrics(SM_CYDOUBLECLK));
                     if burst {
                         c.swallow_next_up = true;
                         CLICK.set(c);
                         return 1;
                     }
-                    CLICK.set(Click { time: m.time, x: m.pt.x, y: m.pt.y, ..c });
-                    // arm a potential drag; the zone (interior vs 16px band) picks move vs
-                    // resize; gen bump invalidates any queued message from a prior drag
-                    let mut d = Drag { generation: DRAG.get().generation.wrapping_add(1), ..Drag::default() };
+                    CLICK.set(Click {
+                        time: m.time,
+                        x: m.pt.x,
+                        y: m.pt.y,
+                        ..c
+                    });
+                    // The generation invalidates queued messages from a prior gesture.
+                    let mut d = Drag {
+                        generation: DRAG.get().generation.wrapping_add(1),
+                        ..Drag::default()
+                    };
                     if let Some((vis, wr)) = native::gesture_rects(h) {
-                        d.zone = geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
+                        d.zone =
+                            geometry::classify_zone(m.pt.x, m.pt.y, &vis, native::drag_band(h));
                         d.vis = vis;
-                        d.had_rgn = vis != wr; // visible == window means no region to preserve
                         d.start = wr;
                         d.origin = (m.pt.x, m.pt.y);
                         d.hwnd = h;
@@ -320,20 +420,23 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 if d.state != DragState::Idle {
                     let m = &*(lparam as *const MSLLHOOKSTRUCT);
                     if d.state == DragState::Armed
-                        && ((m.pt.x - d.origin.0).abs() > GetSystemMetrics(SM_CXDRAG)
-                            || (m.pt.y - d.origin.1).abs() > GetSystemMetrics(SM_CYDRAG))
+                        && (pointer_delta(m.pt.x, d.origin.0).abs()
+                            > i64::from(GetSystemMetrics(SM_CXDRAG))
+                            || pointer_delta(m.pt.y, d.origin.1).abs()
+                                > i64::from(GetSystemMetrics(SM_CYDRAG)))
                     {
-                        d.state = if d.zone == geometry::DragZone::Interior {
-                            DragState::Moving
-                        } else {
-                            DragState::Resizing
-                        };
+                        d.state = DragState::Active;
                     }
-                    if d.state >= DragState::Moving {
+                    if d.state == DragState::Active {
                         d.latest = (m.pt.x, m.pt.y);
                         if !d.move_pending {
                             d.move_pending = true;
-                            PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAG, d.state as usize, d.generation as isize);
+                            PostThreadMessageW(
+                                GetCurrentThreadId(),
+                                WM_APP_DRAG,
+                                0,
+                                d.generation as isize,
+                            );
                         }
                     }
                     DRAG.set(d);
@@ -343,17 +446,99 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let st = d.state;
                 d.state = DragState::Idle;
                 DRAG.set(d);
-                if st >= DragState::Moving {
-                    PostThreadMessageW(GetCurrentThreadId(), WM_APP_DRAGEND, st as usize, d.generation as isize);
+                if st == DragState::Active {
+                    PostThreadMessageW(
+                        GetCurrentThreadId(),
+                        WM_APP_DRAGEND,
+                        0,
+                        d.generation as isize,
+                    );
                 }
                 let mut c = CLICK.get();
                 if c.swallow_next_up {
                     c.swallow_next_up = false;
                     CLICK.set(c);
-                    return 1; // keep the input stream paired: drop the up of a dropped down
+                    let pip = PIP.get();
+                    if pip.hwnd != 0 && owner_is_current(pip.pid, native::window_owner(pip.hwnd)) {
+                        return 1; // keep the input stream paired: drop the up of a dropped down
+                    }
                 }
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+}
+
+#[cfg(test)]
+mod internal_tests {
+    use super::*;
+
+    #[test]
+    fn cached_owner_requires_nonzero_matching_pid() {
+        assert!(owner_is_current(42, 42));
+        assert!(!owner_is_current(42, 99));
+        assert!(!owner_is_current(0, 0));
+    }
+
+    #[test]
+    fn pointer_delta_spans_the_full_i32_domain() {
+        assert_eq!(pointer_delta(i32::MIN, i32::MAX), -4_294_967_295);
+        assert_eq!(pointer_delta(i32::MAX, i32::MIN), 4_294_967_295);
+    }
+
+    #[test]
+    fn drag_reset_preserves_generation_while_clearing_gesture() {
+        let d = Drag {
+            state: DragState::Active,
+            generation: u32::MAX,
+            hwnd: 42,
+            move_pending: true,
+            ..Drag::default()
+        };
+
+        let reset = d.reset();
+
+        assert_eq!(reset.generation, u32::MAX);
+        assert!(reset.state == DragState::Idle);
+        assert_eq!(reset.hwnd, 0);
+        assert!(!reset.move_pending);
+    }
+
+    #[test]
+    fn ended_session_repairs_only_when_state_file_is_absent() {
+        let saved = PipState {
+            hwnd: 1,
+            x: 100,
+            y: 200,
+            w: 1000,
+            h: 640,
+            style: 0,
+            ex_style: 0,
+            target_w: 480,
+            target_h: 270,
+            corner: geometry::Corner::Br,
+            margin: 16,
+            min: true,
+            pid: 42,
+        };
+        let fullscreen = Pip {
+            hwnd: 1,
+            fs: true,
+            pid: 42,
+            snapshot: Some(saved),
+        };
+        let windowed = Pip {
+            hwnd: 1,
+            fs: false,
+            pid: 42,
+            snapshot: Some(saved),
+        };
+
+        assert_eq!(
+            ended_session(fullscreen, Pip::default(), false),
+            Some(saved)
+        );
+        assert_eq!(ended_session(fullscreen, Pip::default(), true), None);
+        assert_eq!(ended_session(fullscreen, windowed, false), None);
     }
 }
