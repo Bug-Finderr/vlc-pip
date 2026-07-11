@@ -68,8 +68,10 @@ try {
         Remove-Item Function:\Get-Process
     }
 
-    $line = "100 pid=42 hotkey=0 timer=1 kb=0 mouse=1"
+    $line = "100 pid=42 hotkey=1 timer=1 kb=0 mouse=1"
     Assert-True (Test-DaemonHeartbeat $line 42 100 105) "valid heartbeat was rejected"
+    Assert-True (-not (Test-DaemonHeartbeat ($line -replace "hotkey=1", "hotkey=0") 42 100 105)) "unarmed hotkey was accepted"
+    Assert-True (-not (Test-DaemonHeartbeat ($line -replace "timer=1", "timer=0") 42 100 105)) "unarmed timer was accepted"
     Assert-True (-not (Test-DaemonHeartbeat $line 41 100 105)) "wrong heartbeat PID was accepted"
     Assert-True (-not (Test-DaemonHeartbeat $line 42 101 105)) "pre-launch heartbeat was accepted"
     Assert-True (-not (Test-DaemonHeartbeat $line 42 100 116)) "stale heartbeat was accepted"

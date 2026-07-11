@@ -100,7 +100,7 @@ function Test-DaemonHeartbeat(
     [long]$notBefore,
     [long]$now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 ) {
-    if ($line -notmatch '\A(?<epoch>\d+) pid=(?<process>\d+) hotkey=[01] timer=[01] kb=[01] mouse=[01]\z') {
+    if ($line -notmatch '\A(?<epoch>\d+) pid=(?<process>\d+) hotkey=1 timer=1 kb=[01] mouse=[01]\z') {
         return $false
     }
     $epoch = [long]0
