@@ -69,8 +69,8 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// Cached owned PiP (hwnd 0 = none). The snapshot repairs a concurrent one-shot exit
-/// after a timer already loaded the old state.
+/// Cached owned PiP (hwnd 0 = none). The snapshot detects external session changes
+/// before queued gesture work is applied.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
@@ -89,13 +89,15 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn ended_session(previous: Pip, current: Pip, state_exists: Option<bool>) -> Option<PipState> {
-    (current.hwnd == 0 && state_exists == Some(false))
-        .then_some(previous.snapshot)
-        .flatten()
+fn reset_input_state() {
+    DRAG.set(DRAG.get().reset());
+    CLICK.set(Click {
+        swallow_next_up: false,
+        ..CLICK.get()
+    });
 }
 
-fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: bool) {
+fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
@@ -110,20 +112,8 @@ fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: b
         });
     PIP.set(pip);
 
-    if repair_ended
-        && previous.snapshot.is_some()
-        && pip.hwnd == 0
-        && let Some(s) = ended_session(previous, pip, state::state_path().try_exists().ok())
-    {
-        native::repair_ended_session(&s);
-    }
-
-    if previous.hwnd != 0 && (previous.hwnd != pip.hwnd || previous.pid != pip.pid) {
-        DRAG.set(DRAG.get().reset());
-        CLICK.set(Click {
-            swallow_next_up: false,
-            ..CLICK.get()
-        });
+    if previous.snapshot != pip.snapshot {
+        reset_input_state();
     }
 
     if pip.hwnd != 0 {
@@ -144,6 +134,10 @@ fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: b
             hooks.1 = std::ptr::null_mut();
         }
     }
+}
+
+fn retry_after_transition_timeout(message: u32) -> bool {
+    matches!(message, WM_HOTKEY | WM_APP_DRAG | WM_APP_DRAGEND)
 }
 
 pub(crate) fn heartbeat_line(
@@ -210,26 +204,56 @@ pub fn run(argv: &[String]) -> i32 {
             ),
         );
     };
-    OWNS_ALIVE_FILE.store(true, Relaxed);
     let mut last_beat = Instant::now();
-    sync_session(&mut hooks, state::load(&state::state_path()), false);
+    let Ok(Some(initial_transition)) = native::TransitionGuard::wait(1_000) else {
+        unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
+        return 1;
+    };
+    sync_session(&mut hooks, state::load(&state::state_path()));
+    drop(initial_transition);
+    OWNS_ALIVE_FILE.store(true, Relaxed);
     beat(&mut last_beat, &hooks);
 
     let mut tracker = native::RegionTracker::default();
+    let mut transition_contended = false;
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
-        let Some(_transition) = native::TransitionGuard::acquire() else {
-            break;
+        let _transition = match native::TransitionGuard::wait(25) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                transition_contended = true;
+                if last_beat.elapsed() > Duration::from_secs(3) {
+                    beat(&mut last_beat, &hooks);
+                }
+                if retry_after_transition_timeout(msg.message)
+                    && unsafe {
+                        PostThreadMessageW(
+                            GetCurrentThreadId(),
+                            msg.message,
+                            msg.wParam,
+                            msg.lParam,
+                        )
+                    } == 0
+                {
+                    break;
+                }
+                continue;
+            }
+            Err(()) => break,
         };
+        if std::mem::take(&mut transition_contended) {
+            reset_input_state();
+            tracker.reset_debounce();
+        }
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
-            sync_session(&mut hooks, state::load(&state::state_path()), true);
+            sync_session(&mut hooks, state::load(&state::state_path()));
         } else if msg.message == WM_TIMER {
             poll_request(argv);
             // The normal tick shares one post-request snapshot between session sync and
             // maintenance. A terminal maintenance change alone triggers a second load.
             let s = state::load(&state::state_path());
-            sync_session(&mut hooks, s, true);
+            sync_session(&mut hooks, s);
             let pip = PIP.get();
             if pip.fs {
                 native::veil_fs_controller(pip.pid);
@@ -241,17 +265,20 @@ pub fn run(argv: &[String]) -> i32 {
                 native::maintain_region(&mut tracker, s)
             };
             if state_dropped {
-                sync_session(&mut hooks, state::load(&state::state_path()), false);
+                sync_session(&mut hooks, state::load(&state::state_path()));
             }
             if last_beat.elapsed() > Duration::from_secs(3) {
                 beat(&mut last_beat, &hooks);
             }
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
-            on_drag_msg(&msg, &mut tracker);
+            sync_session(&mut hooks, state::load(&state::state_path()));
+            if PIP.get().hwnd != 0 {
+                on_drag_msg(&msg, &mut tracker);
+            }
         }
     }
 
-    sync_session(&mut hooks, None, false);
+    sync_session(&mut hooks, None);
     unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     OWNS_ALIVE_FILE.store(false, Relaxed);
@@ -508,41 +535,41 @@ mod internal_tests {
     }
 
     #[test]
-    fn ended_session_repairs_only_when_state_file_is_confirmed_absent() {
-        let saved = PipState {
-            hwnd: 1,
-            x: 100,
-            y: 200,
-            w: 1000,
-            h: 640,
-            style: 0,
-            ex_style: 0,
-            target_w: 480,
-            target_h: 270,
-            corner: geometry::Corner::Br,
-            margin: 16,
-            min: true,
-            pid: 42,
-        };
-        let fullscreen = Pip {
-            hwnd: 1,
-            fs: true,
-            pid: 42,
-            snapshot: Some(saved),
-        };
-        let windowed = Pip {
-            hwnd: 1,
-            fs: false,
-            pid: 42,
-            snapshot: Some(saved),
-        };
+    fn transition_contention_clears_cached_input() {
+        DRAG.set(Drag {
+            state: DragState::Active,
+            generation: 7,
+            hwnd: 42,
+            move_pending: true,
+            ..Drag::default()
+        });
+        CLICK.set(Click {
+            time: 10,
+            x: 20,
+            y: 30,
+            swallow_next_up: true,
+        });
 
-        assert_eq!(
-            ended_session(fullscreen, Pip::default(), Some(false)),
-            Some(saved)
-        );
-        assert_eq!(ended_session(fullscreen, Pip::default(), Some(true)), None);
-        assert_eq!(ended_session(fullscreen, Pip::default(), None), None);
-        assert_eq!(ended_session(fullscreen, windowed, Some(false)), None);
+        reset_input_state();
+
+        let drag = DRAG.get();
+        let click = CLICK.get();
+        assert!(drag.state == DragState::Idle);
+        assert_eq!(drag.generation, 7);
+        assert_eq!(drag.hwnd, 0);
+        assert!(!drag.move_pending);
+        assert_eq!(click.time, 10);
+        assert_eq!(click.x, 20);
+        assert_eq!(click.y, 30);
+        assert!(!click.swallow_next_up);
+    }
+
+    #[test]
+    fn transition_timeout_retries_only_loss_sensitive_messages() {
+        assert!(retry_after_transition_timeout(WM_HOTKEY));
+        assert!(retry_after_transition_timeout(WM_APP_DRAG));
+        assert!(retry_after_transition_timeout(WM_APP_DRAGEND));
+        assert!(!retry_after_transition_timeout(WM_TIMER));
+        assert!(!retry_after_transition_timeout(WM_APP + 10));
     }
 }

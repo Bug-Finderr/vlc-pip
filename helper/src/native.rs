@@ -2,7 +2,7 @@ use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT, WAIT_ABANDONED,
-    WAIT_OBJECT_0,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn,
@@ -42,15 +42,23 @@ pub(crate) struct TransitionGuard(HANDLE);
 
 impl TransitionGuard {
     pub(crate) fn acquire() -> Option<Self> {
+        Self::wait(INFINITE).ok().flatten()
+    }
+
+    pub(crate) fn wait(timeout_ms: u32) -> Result<Option<Self>, ()> {
         let handle = unsafe { CreateMutexW(std::ptr::null(), 0, w!("VlcPipTransition")) };
         if handle.is_null() {
-            return None;
+            return Err(());
         }
-        match unsafe { WaitForSingleObject(handle, INFINITE) } {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Some(Self(handle)),
+        match unsafe { WaitForSingleObject(handle, timeout_ms) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(Self(handle))),
+            WAIT_TIMEOUT => {
+                unsafe { CloseHandle(handle) };
+                Ok(None)
+            }
             _ => {
                 unsafe { CloseHandle(handle) };
-                None
+                Err(())
             }
         }
     }
@@ -195,8 +203,8 @@ pub fn work_area(h: isize) -> geometry::Rect {
 // Exit restores the saved fullscreen style+rect verbatim. Meanwhile the controller strip
 // keeps its empty-region veil and the keyboard hook swallows Esc/F.
 
-/// Was this PiP taken from a fullscreen VLC? The saved pre-PiP style tells (caption
-/// fully absent). Drives the Esc swallow, controller veil, and heal skip.
+/// Was this PiP taken from a fullscreen VLC? The saved pre-PiP style tells (the complete
+/// two-bit caption mask is not present). Drives the Esc swallow, controller veil, and heal skip.
 pub fn fs_origin(style: isize) -> bool {
     style & WS_CAPTION as isize != WS_CAPTION as isize
 }
@@ -654,25 +662,6 @@ fn restore_state(s: &PipState, path: &Path, drop_gone: bool) -> bool {
         }
     }
     false
-}
-
-/// Repair artifacts from a one-shot exit that raced a daemon tick holding old state.
-pub fn repair_ended_session(s: &PipState) {
-    if owns_state(s) {
-        let after = restore_frame(s.hwnd, s.style, s.ex_style);
-        unsafe {
-            SetWindowPos(
-                hw(s.hwnd),
-                after,
-                s.x,
-                s.y,
-                s.w,
-                s.h,
-                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-            );
-        }
-    }
-    unveil_if_fs(s);
 }
 
 pub fn exit_pip() -> bool {

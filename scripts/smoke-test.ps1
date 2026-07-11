@@ -19,7 +19,9 @@ function Status {
     }
     Get-Content $path -Raw | ConvertFrom-Json
 }
-function Req($cmd) { Set-Content "$env:TEMP\vlc-pip-request.txt" $cmd }
+function Req($cmd) {
+    Set-Content -LiteralPath "$env:TEMP\vlc-pip-request.txt" -Value $cmd -NoNewline
+}
 function WaitFor([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt $capMs) {
@@ -403,6 +405,7 @@ if ($hadConfig -and -not (Test-Path -LiteralPath $cfg -PathType Leaf)) {
     throw "PiP config path is not a file: $cfg"
 }
 $vlcProc = $null
+$preserveHealAfterStop = $false
 
 try {
     # Park inside the protected block so every later throw restores the user's config.
@@ -434,6 +437,51 @@ try {
         Check "click burst ($burst): rect unchanged, still pip" `
             ((SameRect $afterBurst $pip) -and $afterBurst.inPip)
     }
+
+    # A cross-process transition may stall in a synchronous Win32 call. The daemon
+    # must keep pumping LL-hook callbacks while it waits for the transition lock.
+    $transitionBlocker = [Threading.Mutex]::new($false, "VlcPipTransition")
+    $transitionBlocked = $false
+    try {
+        $transitionBlocked = $transitionBlocker.WaitOne(1000)
+        if (-not $transitionBlocked) { throw "transition mutex could not be acquired" }
+        Start-Sleep -Milliseconds 300
+        $heartbeatBeforeContention = WaitForVerifiedHeartbeat
+        if (-not $heartbeatBeforeContention) { throw "contention heartbeat baseline missing" }
+        $heartbeatSurvivedContention = WaitFor {
+            $candidate = VerifiedHeartbeat ($heartbeatBeforeContention.Time + 1)
+            [bool]$candidate
+        } 5000 50
+        ClickAt $cx $cy 2
+        SendCtrlAltP
+        Start-Sleep -Milliseconds 100 # force at least one timed-out dequeue + repost
+        $duringContention = Status
+    }
+    finally {
+        if ($transitionBlocked) { $transitionBlocker.ReleaseMutex() }
+        $transitionBlocker.Dispose()
+    }
+    $hooksSurvivedContention = (SameRect $duringContention $pip) -and $duringContention.inPip
+    $delayedHotkey = WaitForStableStatus {
+        param($status)
+        (-not $status.inPip) -and $status.caption -and (SameRect $status $before)
+    } 3000 150
+    $hotkeyAppliedAfterUnlock = $delayedHotkey.Matched
+    Check "transition contention: heartbeat advances" $heartbeatSurvivedContention
+    Check "transition contention: input guards stay armed" $hooksSurvivedContention
+    Check "transition contention: hotkey applies after unlock" $hotkeyAppliedAfterUnlock
+    if (-not ($heartbeatSurvivedContention -and $hooksSurvivedContention -and $hotkeyAppliedAfterUnlock)) {
+        throw "daemon stalled during transition contention"
+    }
+
+    Req "enter"
+    $reentered = WaitForStableStatus { param($status) $status.inPip -and $status.minimal } 3000 150
+    if (-not $reentered.Matched) { throw "contention recovery could not re-enter PiP" }
+    $pip = $reentered.Status
+    $visible = VisibleRect $pip
+    if (-not $visible.Found) { throw "re-entered PiP visible region was not measurable" }
+    $cx = [int](($visible.Left + $visible.Right) / 2)
+    $cy = [int](($visible.Top + $visible.Bottom) / 2)
 
     DragFrom $cx $cy ($cx - 80) ($cy - 60)
     $movedResult = WaitForStatus {
@@ -510,7 +558,7 @@ try {
         ((-not $s.inPip) -and $s.topmost -eq $before.topmost -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
     # Sweep direct exit->enter across the daemon's tick phase. Without cross-process
-    # transition serialization, repair can restore the old frame after the new state lands.
+    # serialization, a stale daemon action can restore the old frame after new state lands.
     $transitionClean = $true
     $direct = Start-Process $exe -ArgumentList 'enter min=0' -PassThru -Wait
     if ($direct.ExitCode -ne 0) { throw "transition stress setup failed" }
@@ -628,7 +676,10 @@ try {
             $installedUnveiled)
 
     Req "toggle"
-    $null = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip-request.txt") } 1500 25    # first consumed
+    $null = WaitFor {
+        try { -not (Test-Path -LiteralPath "$env:TEMP\vlc-pip-request.txt" -ErrorAction Stop) }
+        catch { $false } # delete/open races mean "not consumed yet", not test failure
+    } 1500 25
     Req "toggle"
     $null = WaitFor { $d = Status; (-not $d.inPip) -and (-not $d.caption) } 3000 150
     $fdbl = Status
@@ -732,13 +783,19 @@ try {
         ($healDone.Matched -and (SameRect $healed $pre) -and (-not (Test-Path "$env:TEMP\vlc-pip.state")))
     # Clean-close this instance so VLC persists the healed geometry (the finally
     # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
+    $preserveHealAfterStop = $true
     $vlcProc.CloseMainWindow() | Out-Null
     if (-not $vlcProc.WaitForExit(8000)) { throw "healed VLC did not close cleanly" }
+    $preserveHealAfterStop = $false
 }
 finally {
     $cleanupErrors = @()
     # Restore a live window, but preserve pending heal state for the next VLC launch.
-    try { if (Test-Path $exe) { Resolve-PipState $statePath $exe -RequireRestore } }
+    try {
+        if (-not $preserveHealAfterStop -and (Test-Path $exe)) {
+            Resolve-PipState $statePath $exe -RequireRestore
+        }
+    }
     catch { $cleanupErrors += $_.Exception.Message }
     try {
         if ($vlcProc) {
@@ -746,6 +803,13 @@ finally {
                 try { $vlcProc.Kill() } catch {}
             }
             if (-not $vlcProc.WaitForExit(3000)) { throw "VLC did not stop" }
+        }
+        if ($preserveHealAfterStop -and -not (Test-Path -LiteralPath $statePath)) {
+            [IO.File]::WriteAllText($statePath, $pendingState, [Text.UTF8Encoding]::new($false))
+        }
+        if ($preserveHealAfterStop -and
+            [IO.File]::ReadAllText($statePath) -ne $pendingState) {
+            throw "pending heal state could not be preserved"
         }
     } catch { $cleanupErrors += $_.Exception.Message }
     try {
