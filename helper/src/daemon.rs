@@ -89,8 +89,8 @@ pub fn owns_alive_file() -> bool {
     OWNS_ALIVE_FILE.load(Relaxed)
 }
 
-fn ended_session(previous: Pip, current: Pip, state_exists: bool) -> Option<PipState> {
-    (current.hwnd == 0 && !state_exists)
+fn ended_session(previous: Pip, current: Pip, state_exists: Option<bool>) -> Option<PipState> {
+    (current.hwnd == 0 && state_exists == Some(false))
         .then_some(previous.snapshot)
         .flatten()
 }
@@ -113,7 +113,7 @@ fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>, repair_ended: b
     if repair_ended
         && previous.snapshot.is_some()
         && pip.hwnd == 0
-        && let Some(s) = ended_session(previous, pip, state::state_path().exists())
+        && let Some(s) = ended_session(previous, pip, state::state_path().try_exists().ok())
     {
         native::repair_ended_session(&s);
     }
@@ -505,7 +505,7 @@ mod internal_tests {
     }
 
     #[test]
-    fn ended_session_repairs_only_when_state_file_is_absent() {
+    fn ended_session_repairs_only_when_state_file_is_confirmed_absent() {
         let saved = PipState {
             hwnd: 1,
             x: 100,
@@ -535,10 +535,11 @@ mod internal_tests {
         };
 
         assert_eq!(
-            ended_session(fullscreen, Pip::default(), false),
+            ended_session(fullscreen, Pip::default(), Some(false)),
             Some(saved)
         );
-        assert_eq!(ended_session(fullscreen, Pip::default(), true), None);
-        assert_eq!(ended_session(fullscreen, windowed, false), None);
+        assert_eq!(ended_session(fullscreen, Pip::default(), Some(true)), None);
+        assert_eq!(ended_session(fullscreen, Pip::default(), None), None);
+        assert_eq!(ended_session(fullscreen, windowed, Some(false)), None);
     }
 }
