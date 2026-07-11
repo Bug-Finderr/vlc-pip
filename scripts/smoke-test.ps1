@@ -423,13 +423,17 @@ try {
             $visible.Found -and $visible.Right - $visible.Left -eq 480 -and
             $visible.Bottom - $visible.Top -eq 270)
 
-    # Five clicks cover adjacent and nonadjacent double/triple-click pairing.
+    # Keep separate terminal assertions: a broken five-click guard can fullscreen twice
+    # and land back at the starting rect, hiding the regression in its final state.
     if (-not $visible.Found) { throw "PiP visible region was not measurable" }
     $cx = [int](($visible.Left + $visible.Right) / 2)
     $cy = [int](($visible.Top + $visible.Bottom) / 2)
-    ClickAt $cx $cy 5; $afterSpam = Status
-    Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
-        ((SameRect $afterSpam $pip) -and $afterSpam.inPip)
+    foreach ($burst in 2, 3, 5) {
+        ClickAt $cx $cy $burst
+        $afterBurst = Status
+        Check "click burst ($burst): rect unchanged, still pip" `
+            ((SameRect $afterBurst $pip) -and $afterBurst.inPip)
+    }
 
     DragFrom $cx $cy ($cx - 80) ($cy - 60)
     $movedResult = WaitForStatus {
@@ -703,26 +707,19 @@ try {
     # Clean-close this instance so VLC persists the healed geometry (the finally
     # force-kill would strand the PiP rect in vlc-qt-interface.ini for the next launch)
     $vlcProc.CloseMainWindow() | Out-Null
-    $vlcProc.WaitForExit(8000) | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { throw "healed VLC did not close cleanly" }
 }
 finally {
     $cleanupErrors = @()
-    $vlcStopped = $null -eq $vlcProc
-    # Exit restores a live window; state removal below drops only this test's pending heal.
-    try { if (Test-Path $exe) { Start-Process $exe exit -Wait } } catch {}
+    # Restore a live window, but preserve pending heal state for the next VLC launch.
+    try { if (Test-Path $exe) { Resolve-PipState $statePath $exe -RequireRestore } }
+    catch { $cleanupErrors += $_.Exception.Message }
     try {
         if ($vlcProc) {
             if (-not $vlcProc.HasExited) {
                 try { $vlcProc.Kill() } catch {}
             }
             if (-not $vlcProc.WaitForExit(3000)) { throw "VLC did not stop" }
-            $vlcStopped = $true
-        }
-    } catch { $cleanupErrors += $_.Exception.Message }
-    try {
-        if ($vlcStopped -and (Test-Path -LiteralPath $statePath)) {
-            Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $statePath) { throw "PiP state could not be removed" }
         }
     } catch { $cleanupErrors += $_.Exception.Message }
     try {
