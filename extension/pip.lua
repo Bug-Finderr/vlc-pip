@@ -1,10 +1,9 @@
--- VLC PiP: View-menu trigger that toggles the PiP daemon.
 -- capabilities={"trigger"}: VLC calls trigger() on every menu click (no checkmark state).
 
 function descriptor()
     return {
         title = "PiP Mode",
-        version = "2.1.1",
+        version = "2.1.2",
         author = "Sudharsan",
         shortdesc = "PiP Mode",
         description = "Toggle VLC into a borderless always-on-top corner window",
@@ -12,9 +11,8 @@ function descriptor()
     }
 end
 
--- Keep env lookups lazy inside functions (SPEC gotcha #2): VLC's extension probe
--- executes this chunk's top level to read descriptor(); any error there makes the
--- extension silently disappear from the View menu.
+-- Keep env lookups lazy: VLC probes descriptor() by executing the chunk top level,
+-- where an error makes the extension disappear from the View menu.
 local function temp_dir()
     return (os.getenv("TEMP") or os.getenv("TMP") or ".")
 end
@@ -28,10 +26,8 @@ local function daemon_alive()
     if not f then return false end
     local ts = f:read("*n")
     f:close()
-    -- The file is a heartbeat (leading epoch-seconds, rewritten every ~3s): a force-killed
-    -- daemon leaves it behind, so existence alone is not liveness. ts == nil means we read
-    -- mid-write (WriteAllText truncates first): the daemon IS alive, so never respawn
-    -- (console flash). Stale old-format PID files parse far from os.time() and read as dead.
+    -- A force-killed daemon leaves its heartbeat behind. A nil timestamp means this read
+    -- raced truncate-then-write, so treat the daemon as alive and avoid a respawn flash.
     return ts == nil or math.abs(os.time() - ts) < 15
 end
 
