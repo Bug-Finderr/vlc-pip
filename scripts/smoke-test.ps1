@@ -509,6 +509,32 @@ try {
     Check "hotkey then request: no desync, exact rect" `
         ((-not $s.inPip) -and $s.topmost -eq $before.topmost -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
+    # Sweep direct exit->enter across the daemon's tick phase. Without cross-process
+    # transition serialization, repair can restore the old frame after the new state lands.
+    $transitionClean = $true
+    $direct = Start-Process $exe -ArgumentList 'enter min=0' -PassThru -Wait
+    if ($direct.ExitCode -ne 0) { throw "transition stress setup failed" }
+    foreach ($cycle in 0..49) {
+        Start-Sleep -Milliseconds $cycle
+        $direct = Start-Process $exe exit -PassThru -Wait
+        if ($direct.ExitCode -ne 0) { throw "transition stress exit failed at cycle $cycle" }
+        $direct = Start-Process $exe -ArgumentList 'enter min=0' -PassThru -Wait
+        if ($direct.ExitCode -ne 0) { throw "transition stress enter failed at cycle $cycle" }
+        $transition = Status
+        if (-not $transition.inPip -or $transition.caption) { $transitionClean = $false; break }
+    }
+    $direct = Start-Process $exe exit -PassThru -Wait
+    $transitionEnd = WaitForStableStatus {
+        param($status)
+        (-not $status.inPip) -and $status.caption -and (SameRect $status $before)
+    } 3000 150
+    Check "one-shot exit-enter: 50 serialized transitions" `
+        ($transitionClean -and $direct.ExitCode -eq 0 -and $transitionEnd.Matched)
+    if (-not ($transitionClean -and $direct.ExitCode -eq 0 -and $transitionEnd.Matched)) {
+        throw "one-shot exit-enter serialization failed"
+    }
+    $s = $transitionEnd.Status
+
     PostKey $s.hwnd 0x46 0x21
     $fullscreen = WaitForStableStatus { param($status) $status.found -and (-not $status.caption) } 2500 150
     $fs = $fullscreen.Status

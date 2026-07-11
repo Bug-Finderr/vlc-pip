@@ -27,6 +27,11 @@ fn main() {
     std::process::exit(run());
 }
 
+fn locked<T>(action: impl FnOnce() -> T) -> Option<T> {
+    let _guard = native::TransitionGuard::acquire()?;
+    Some(action())
+}
+
 fn run() -> i32 {
     native::enable_dpi_awareness();
     // args_os + lossy: std::env::args() panics on non-Unicode argv; every legitimate
@@ -42,14 +47,17 @@ fn run() -> i32 {
     match mode.as_str() {
         "toggle" => {
             let o = options::effective(tail);
-            one_shot(native::toggle(&o), &o)
+            one_shot(locked(|| native::toggle(&o)).unwrap_or(false), &o)
         }
         "enter" => {
             let o = options::effective(tail);
-            one_shot(native::enter(native::find_player(), &o), &o)
+            one_shot(
+                locked(|| native::enter(native::find_player(), &o)).unwrap_or(false),
+                &o,
+            )
         }
-        "exit" => i32::from(!native::exit_pip()),
-        "restore" => native::maintenance_restore().code(),
+        "exit" => i32::from(!locked(native::exit_pip).unwrap_or(false)),
+        "restore" => locked(|| native::maintenance_restore().code()).unwrap_or(1),
         "status" => {
             let s = native::status();
             let _ = std::fs::write(state::status_path(), &s); // the reliable channel for scripts: written FIRST
@@ -75,7 +83,11 @@ fn one_shot(ok: bool, o: &options::PipOptions) -> i32 {
         for _ in 0..6 {
             // debounce needs ~4 ticks: measure, resize, measure, region
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let _ = native::maintain_region(&mut tracker, state::load(&state::state_path()));
+            if locked(|| native::maintain_region(&mut tracker, state::load(&state::state_path())))
+                .is_none()
+            {
+                return 1;
+            }
         }
     }
     i32::from(!ok)

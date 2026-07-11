@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT,
+    CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, POINT, RECT, WAIT_ABANDONED,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, CreateRectRgn, DeleteObject, GetMonitorInfoW, GetRgnBox, GetWindowRgn,
@@ -10,6 +11,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
@@ -22,7 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WS_CAPTION, WS_EX_TOPMOST,
     WS_MAXIMIZE, WS_THICKFRAME,
 };
-use windows_sys::core::BOOL;
+use windows_sys::core::{BOOL, w};
 
 use crate::geometry;
 use crate::options::PipOptions;
@@ -32,6 +36,33 @@ use crate::state::{self, PipState, StatusInfo};
 // handles are *mut c_void: not Send/Sync). Cast at the call boundary only.
 fn hw(h: isize) -> HWND {
     h as HWND
+}
+
+pub(crate) struct TransitionGuard(HANDLE);
+
+impl TransitionGuard {
+    pub(crate) fn acquire() -> Option<Self> {
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, w!("VlcPipTransition")) };
+        if handle.is_null() {
+            return None;
+        }
+        match unsafe { WaitForSingleObject(handle, INFINITE) } {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Some(Self(handle)),
+            _ => {
+                unsafe { CloseHandle(handle) };
+                None
+            }
+        }
+    }
+}
+
+impl Drop for TransitionGuard {
+    fn drop(&mut self) {
+        unsafe {
+            ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
 }
 
 // Closure-based window enumeration (return false to stop). Only for EnumWindows /

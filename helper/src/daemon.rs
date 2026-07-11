@@ -218,6 +218,9 @@ pub fn run(argv: &[String]) -> i32 {
     let mut tracker = native::RegionTracker::default();
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+        let Some(_transition) = native::TransitionGuard::acquire() else {
+            break;
+        };
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv));
             sync_session(&mut hooks, state::load(&state::state_path()), true);
