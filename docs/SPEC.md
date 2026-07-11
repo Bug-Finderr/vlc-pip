@@ -246,7 +246,7 @@ PowerShell (from v1 dev): `if` is not an expression; single-letter functions col
 
 ## 11. Acceptance test checklist
 
-Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS. The live test verifies the heartbeat's freshness, PID, installed-executable identity, hotkey, and timer; enter/exit geometry, styles, exact topmost state, and exact rect restore; minimal look; click guards; hotkey/request interleaving; drag, resize, wheel, and persistence behavior; every matching fullscreen controller veiled during PiP and unveiled after exit; fullscreen stop dissolve; and close-in-PiP reopen heal. It also validates virtual-desktop bounds. Absolute input on a non-primary monitor is probed only when multiple monitors exist; this branch is configured but untested on the current one-monitor host.
+Automated: `cargo test` green, then `scripts/smoke-test.ps1` → ALL PASS. The live test verifies the heartbeat's freshness, PID, installed-executable identity, hotkey, and timer; enter/exit geometry, styles, exact topmost state, region, state deletion, and rect restore; click guards; hotkey/request sequencing; drag, resize, wheel, and persistence; every matching fullscreen controller veiled during PiP and unveiled after exit; daemon-active one-shot exit races; install during fullscreen PiP; pending-heal uninstall refusal and daemon restart; fullscreen stop dissolve; and close-in-PiP reopen heal. It also validates virtual-desktop bounds. Absolute input on a non-primary monitor is probed only when multiple monitors exist; this branch is configured but untested on the current one-monitor host.
 
 Manual (once per release):
 - [ ] View → "PiP Mode" appears after a VLC restart; repeated menu clicks alternate enter/exit.

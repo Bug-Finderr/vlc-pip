@@ -4,6 +4,9 @@ $ErrorActionPreference = "Stop"
 
 $exe = "$env:APPDATA\vlc\pip\pip-helper.exe"
 $heartbeatPath = "$env:TEMP\vlc-pip-daemon.alive"
+$statePath = "$env:TEMP\vlc-pip.state"
+$luaPath = "$env:APPDATA\vlc\lua\extensions\pip.lua"
+$startupLink = Join-Path ([Environment]::GetFolderPath("Startup")) "VLC PiP Daemon.lnk"
 
 # WinExe stdout is invisible to PowerShell capture; run the helper and read its
 # status-file channel instead of capturing output.
@@ -38,6 +41,11 @@ function WaitForStatus([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 60
 function SameRect($left, $right) {
     $left.x -eq $right.x -and $left.y -eq $right.y -and
         $left.w -eq $right.w -and $left.h -eq $right.h
+}
+function IsFullscreenRestore($status, $baseline) {
+    $status.found -and (-not $status.caption) -and (-not $status.inPip) -and
+        (-not $status.minimal) -and $status.topmost -eq $baseline.topmost -and
+        (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and (SameRect $status $baseline)
 }
 function WaitForStableStatus([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 150) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -76,6 +84,25 @@ function ReadHeartbeat {
     }
     catch { $null }
 }
+function VerifiedHeartbeat([long]$notBefore = 0) {
+    $heartbeat = ReadHeartbeat
+    if (-not $heartbeat -or $heartbeat.Time -lt $notBefore -or
+        [math]::Abs([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $heartbeat.Time) -ge 15) { return }
+    $process = Get-Process -Id ([int]$heartbeat.Pid) -ErrorAction SilentlyContinue
+    if ($process -and (Test-InstalledHelperProcess $process $exe)) { $heartbeat }
+}
+function WaitForVerifiedHeartbeat(
+    [long]$notBefore = 0,
+    [uint32]$differentPid = 0,
+    [int]$capMs = 3000
+) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $heartbeat = VerifiedHeartbeat $notBefore
+        if ($heartbeat -and ($differentPid -eq 0 -or $heartbeat.Pid -ne $differentPid)) { return $heartbeat }
+        Start-Sleep -Milliseconds 50
+    } while ($sw.ElapsedMilliseconds -lt $capMs)
+}
 $fail = @()
 function Check($name, $cond) {
     if ($cond) { Write-Host "PASS $name" }
@@ -100,7 +127,6 @@ if (-not ('Smoke.Keys' -as [type])) {
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int max);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
-[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT rect);
 [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
 [DllImport("user32.dll")] public static extern int GetWindowRgn(IntPtr h, IntPtr rgn);
 [DllImport("gdi32.dll")] public static extern int GetRgnBox(IntPtr rgn, out RECT box);
@@ -116,6 +142,13 @@ public sealed class ScreenPoint {
     public bool Found;
     public int X;
     public int Y;
+}
+public sealed class ScreenRect {
+    public bool Found;
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
 }
 public sealed class ControllerState {
     public int Found;
@@ -133,12 +166,28 @@ public static bool CursorNear(int x, int y, int tolerance) {
         && Math.Abs(point.X - x) <= tolerance
         && Math.Abs(point.Y - y) <= tolerance;
 }
+public static ScreenRect VisibleRect(IntPtr h, int x, int y) {
+    IntPtr probe = CreateRectRgn(0, 0, 0, 0);
+    if (probe == IntPtr.Zero) throw new InvalidOperationException("CreateRectRgn failed");
+    try {
+        RECT box = new RECT();
+        bool found = GetWindowRgn(h, probe) > NULLREGION
+            && GetRgnBox(probe, out box) > NULLREGION;
+        return new ScreenRect {
+            Found = found,
+            Left = x + box.Left,
+            Top = y + box.Top,
+            Right = x + box.Right,
+            Bottom = y + box.Bottom
+        };
+    }
+    finally { DeleteObject(probe); }
+}
 public static bool PipLanded(IntPtr h, int maxWidth) {
-    RECT rect;
-    return GetWindowRect(h, out rect)
+    var rect = VisibleRect(h, 0, 0);
+    return rect.Found && rect.Right - rect.Left < maxWidth
         && (GetWindowLongW(h, -16) & WS_CAPTION) != WS_CAPTION
-        && (GetWindowLongW(h, -20) & WS_EX_TOPMOST) != 0
-        && rect.Right - rect.Left < maxWidth;
+        && (GetWindowLongW(h, -20) & WS_EX_TOPMOST) != 0;
 }
 // VLC's vout event thread processes POSTED keys regardless of focus - keybd_event would
 // need VLC foreground, and injected focus-clicks from a background session are flaky
@@ -184,6 +233,33 @@ public static ControllerState FscState(IntPtr vlcTop) {
     return state;
 }
 '@
+}
+function VisibleRect($status) {
+    [Smoke.Keys]::VisibleRect([IntPtr]::new([long]$status.hwnd), $status.x, $status.y)
+}
+function SameVisibleRect($left, $right) {
+    $left.Left -eq $right.Left -and $left.Top -eq $right.Top -and
+        $left.Right -eq $right.Right -and $left.Bottom -eq $right.Bottom
+}
+function WaitForStableVisibleRect([scriptblock]$cond, [int]$capMs = 3000, [int]$stepMs = 150) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $previous = $null
+    $stableTicks = 0
+    while ($sw.ElapsedMilliseconds -lt $capMs) {
+        $status = Status
+        $rect = VisibleRect $status
+        if ($rect.Found -and (& $cond $status)) {
+            if ($previous -and (SameVisibleRect $rect $previous)) {
+                $stableTicks++
+                if ($stableTicks -ge 3) { return [pscustomobject]@{ Status = $status; Rect = $rect } }
+            }
+            else { $stableTicks = 0 }
+            $previous = $rect
+        }
+        else { $previous = $null; $stableTicks = 0 }
+        Start-Sleep -Milliseconds $stepMs
+    }
+    throw "visible PiP region did not stabilize"
 }
 function ClickAt($x, $y, $times) {
     $doubleClickMs = [int][Smoke.Keys]::GetDoubleClickTime()
@@ -274,7 +350,6 @@ function DragFrom($x1, $y1, $x2, $y2) {
         Start-Sleep -Milliseconds 25
     }
     [Smoke.Keys]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)   # LEFTUP
-    Start-Sleep -Milliseconds 400                             # drag-end write lands
 }
 function HoverWiggle($cx, $cy) {
     for ($i = 0; $i -lt 8; $i++) {
@@ -297,7 +372,7 @@ $heartbeatReady = WaitFor {
 $heartbeat = $script:heartbeat
 Check "daemon heartbeat: valid and fresh" $heartbeatReady
 $daemon = if ($heartbeat) { Get-Process -Id ([int]$heartbeat.Pid) -ErrorAction SilentlyContinue } else { $null }
-$daemonIdentity = $daemon -and $daemon.Path -and (Test-SamePath $daemon.Path $exe)
+$daemonIdentity = $daemon -and (Test-InstalledHelperProcess $daemon $exe)
 Check "daemon heartbeat: pid owns installed helper" `
     $daemonIdentity
 # Idle session hooks may be absent; the global hotkey and timer are mandatory daemon arms.
@@ -318,13 +393,20 @@ if (-not (Test-Path $vlcPath)) { throw "vlc.exe not found" }
 if (Get-Process vlc -ErrorAction SilentlyContinue) {
     throw "Close VLC first: this test resizes, clicks, and kills the VLC instance it targets"
 }
+if (Test-Path -LiteralPath $statePath) {
+    throw "Resolve the pending PiP restore before running this test"
+}
 $cfg = "$env:APPDATA\vlc\pip\config.txt"
-$cfgBak = "$cfg.smoke-bak"
+$cfgBak = Join-Path ([IO.Path]::GetTempPath()) "vlc-pip-config-smoke-$PID-$([guid]::NewGuid().ToString('N')).bak"
+$hadConfig = Test-Path -LiteralPath $cfg
+if ($hadConfig -and -not (Test-Path -LiteralPath $cfg -PathType Leaf)) {
+    throw "PiP config path is not a file: $cfg"
+}
 $vlcProc = $null
 
 try {
     # Park inside the protected block so every later throw restores the user's config.
-    if (Test-Path $cfg) { Move-Item $cfg $cfgBak -Force }
+    if ($hadConfig) { Move-Item $cfg $cfgBak -Force }
 
     # screen:// = live playing video, so the video child window and minimal-look region exist
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
@@ -335,50 +417,83 @@ try {
     Req "toggle"
     $null = WaitFor { (Status).minimal } 4000 150
     $pip = Status
+    $visible = VisibleRect $pip
     Check "enter: pip formed (borderless, topmost, video 480w, region, state)" `
-        ((-not $pip.caption) -and $pip.topmost -and $pip.w -eq 480 -and $pip.inPip -and $pip.minimal)
+        ((-not $pip.caption) -and $pip.topmost -and $pip.inPip -and $pip.minimal -and
+            $visible.Found -and $visible.Right - $visible.Left -eq 480 -and
+            $visible.Bottom - $visible.Top -eq 270)
 
     # Five clicks cover adjacent and nonadjacent double/triple-click pairing.
-    $cx = $pip.x + [int]($pip.w / 2); $cy = $pip.y + [int]($pip.h / 2)
+    if (-not $visible.Found) { throw "PiP visible region was not measurable" }
+    $cx = [int](($visible.Left + $visible.Right) / 2)
+    $cy = [int](($visible.Top + $visible.Bottom) / 2)
     ClickAt $cx $cy 5; $afterSpam = Status
     Check "click burst (dbl/triple/spam): rect unchanged, still pip" `
         ((SameRect $afterSpam $pip) -and $afterSpam.inPip)
 
-    DragFrom $cx $cy ($cx - 220) ($cy - 160)
-    $moved = Status
+    DragFrom $cx $cy ($cx - 80) ($cy - 60)
+    $movedResult = WaitForStatus {
+        param($status)
+        [math]::Abs($status.x - ($pip.x - 80)) -le 2 -and
+            [math]::Abs($status.y - ($pip.y - 60)) -le 2 -and
+            $status.w -eq $pip.w -and $status.h -eq $pip.h -and $status.inPip
+    } 3000 60
+    $moved = $movedResult.Status
+    $movedVisible = VisibleRect $moved
+    if (-not $movedVisible.Found) { throw "moved PiP visible region was not measurable" }
     Check "drag-move: at delta, size held, still pip" `
-        ([math]::Abs($moved.x - ($pip.x - 220)) -le 2 -and [math]::Abs($moved.y - ($pip.y - 160)) -le 2 -and $moved.w -eq $pip.w -and $moved.h -eq $pip.h -and $moved.inPip)
+        $movedResult.Matched
+    $visibleWidth = $movedVisible.Right - $movedVisible.Left
+    $visibleHeight = $movedVisible.Bottom - $movedVisible.Top
+    $configReady = WaitFor {
+        try { (Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop).Trim() -eq "w=$visibleWidth h=$visibleHeight c=br" }
+        catch { $false }
+    } 2000 50
     Check "drag-move: config persisted (w/h + corner)" `
-        ((Test-Path $cfg) -and ((Get-Content $cfg -Raw).Trim() -match '^w=\d+ h=\d+ c=br$'))
+        $configReady
 
-    ClickAt ($moved.x + $moved.w - 8) ($moved.y + [int]($moved.h / 2)) 1
+    $edgeX = $movedVisible.Right - 8
+    $edgeY = [int](($movedVisible.Top + $movedVisible.Bottom) / 2)
+    ClickAt $edgeX $edgeY 1
     $bandClick = Status
     Check "band click: no resize, no move" ((SameRect $bandClick $moved) -and $bandClick.inPip)
 
-    # right edge at mid-height: horizontal chrome is 0 so window right == visible right,
-    # while the top/bottom strips are region-clipped chrome (corner drags are manual)
-    DragFrom ($moved.x + $moved.w - 8) ($moved.y + [int]($moved.h / 2)) ($moved.x + $moved.w - 108) ($moved.y + [int]($moved.h / 2))
-    $null = WaitFor { $s = Status; $s.w -lt $moved.w -and $s.minimal } 4000 150   # convergence re-clips
-    $rs = Status
-    Check "drag-resize (right edge): width shrank, minimal look held" ($rs.w -lt $moved.w -and $rs.inPip -and $rs.minimal)
+    DragFrom $edgeX $edgeY ($edgeX - 100) $edgeY
+    $resizeStable = WaitForStableVisibleRect { param($status) $status.w -lt $moved.w -and $status.minimal } 4000
+    $rs = $resizeStable.Status
+    $resizedVisible = $resizeStable.Rect
+    Check "drag-resize (right edge): width shrank, minimal look held" `
+        ($resizedVisible.Right - $resizedVisible.Left -lt $visibleWidth -and $rs.inPip -and $rs.minimal)
 
-    [Smoke.Keys]::SetCursorPos(($rs.x + [int]($rs.w / 2)), ($rs.y + [int]($rs.h / 2))) | Out-Null
+    [Smoke.Keys]::SetCursorPos(
+        [int](($resizedVisible.Left + $resizedVisible.Right) / 2),
+        [int](($resizedVisible.Top + $resizedVisible.Bottom) / 2)
+    ) | Out-Null
     Start-Sleep -Milliseconds 100
     [Smoke.Keys]::mouse_event(0x0800, 0, 0, 120, [UIntPtr]::Zero)   # WHEEL up one notch
     Start-Sleep -Milliseconds 400
     $wheeled = Status
-    Check "wheel: size untouched (volume, not resize)" ($wheeled.w -eq $rs.w -and $wheeled.h -eq $rs.h)
+    $wheeledVisible = VisibleRect $wheeled
+    Check "wheel: helper does not resize" `
+        ($wheeledVisible.Found -and $wheeledVisible.Left -eq $resizedVisible.Left -and
+            $wheeledVisible.Top -eq $resizedVisible.Top -and $wheeledVisible.Right -eq $resizedVisible.Right -and
+            $wheeledVisible.Bottom -eq $resizedVisible.Bottom)
 
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $after = Status
     Check "exit: exact windowed restore (caption, rect, topmost, region/state)" `
-        ($after.caption -and $after.topmost -eq $before.topmost -and (-not $after.inPip) -and (-not $after.minimal) -and $after.x -eq $before.x -and $after.y -eq $before.y -and $after.w -eq $before.w -and $after.h -eq $before.h)
+        ($after.caption -and $after.topmost -eq $before.topmost -and (-not $after.inPip) -and (-not $after.minimal) -and
+            (-not (Test-Path "$env:TEMP\vlc-pip.state")) -and (SameRect $after $before))
 
     Req "toggle"
     $null = WaitFor { (Status).inPip } 3000 150
     $re = Status
-    Check "persist: re-enter at gestured width" ([math]::Abs($re.w - $rs.w) -le 2)
+    $reVisible = VisibleRect $re
+    Check "persist: re-enter at gestured size" `
+        ($reVisible.Found -and
+            [math]::Abs(($reVisible.Right - $reVisible.Left) - ($resizedVisible.Right - $resizedVisible.Left)) -le 2 -and
+            [math]::Abs(($reVisible.Bottom - $reVisible.Top) - ($resizedVisible.Bottom - $resizedVisible.Top)) -le 2)
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
 
@@ -387,7 +502,7 @@ try {
     Req "toggle"
     $null = WaitFor { -not (Status).inPip } 3000 150
     $s = Status
-    Check "interleave hotkey+request: no desync, exact rect" `
+    Check "hotkey then request: no desync, exact rect" `
         ((-not $s.inPip) -and $s.topmost -eq $before.topmost -and $s.x -eq $before.x -and $s.y -eq $before.y -and $s.w -eq $before.w -and $s.h -eq $before.h)
 
     PostKey $s.hwnd 0x46 0x21
@@ -423,7 +538,10 @@ try {
 
     # VLC can show or recreate several controller windows on hover; every survivor must
     # retain an empty region, including hidden instances.
-    HoverWiggle ($fpip.x + [int]($fpip.w / 2)) ($fpip.y + [int]($fpip.h / 2))
+    $fullscreenVisible = VisibleRect $fpip
+    if (-not $fullscreenVisible.Found) { throw "fullscreen PiP visible region was not measurable" }
+    HoverWiggle ([int](($fullscreenVisible.Left + $fullscreenVisible.Right) / 2)) `
+        ([int](($fullscreenVisible.Top + $fullscreenVisible.Bottom) / 2))
     Check "controller: every matching window remains veiled through hover" `
         (WaitFor { AllControllersVeiled $fs.hwnd } 1000 50)
 
@@ -431,11 +549,53 @@ try {
     $null = WaitFor { -not (Status).inPip } 3000 150
     $fout = Status
     Check "fullscreen exit: fullscreen and topmost state restored" `
-        ((-not $fout.caption) -and (-not $fout.inPip) -and $fout.topmost -eq $fs.topmost -and (SameRect $fout $fs))
+        (IsFullscreenRestore $fout $fs)
     # Absence is acceptable; any matching controller that survived must have no veil.
     HoverWiggle $fcx $fcy
     Check "controller: no empty-region veil survives exit" `
         (WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Veiled -eq 0 } 2500 60)
+
+    $raceClean = $true
+    foreach ($cycle in 1..8) {
+        Req "enter"
+        $entered = WaitFor {
+            (Test-Path $statePath) -and
+                [Smoke.Keys]::PipLanded([IntPtr]::new([long]$fs.hwnd), [int]($fs.w / 2))
+        } 2000 15
+        if (-not $entered) { $raceClean = $false; break }
+        $oneShot = Start-Process $exe exit -PassThru -Wait
+        $restored = WaitForStableStatus {
+            param($status)
+            IsFullscreenRestore $status $fs
+        } 3000 150
+        $unveiled = WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Veiled -eq 0 } 1000 25
+        if ($oneShot.ExitCode -ne 0 -or -not $restored.Matched -or -not $unveiled) {
+            $raceClean = $false
+            break
+        }
+    }
+    Check "one-shot exit vs daemon tick: 8 exact clean restores" $raceClean
+
+    Req "enter"
+    $installReady = WaitFor {
+        (Test-Path $statePath) -and
+            [Smoke.Keys]::PipLanded([IntPtr]::new([long]$fs.hwnd), [int]($fs.w / 2))
+    } 2000 15
+    if (-not $installReady) { throw "install precondition failed: fullscreen PiP did not form" }
+    $daemonBeforeInstall = WaitForVerifiedHeartbeat
+    if (-not $daemonBeforeInstall) { throw "install precondition failed: daemon heartbeat missing" }
+    $installStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    & "$PSScriptRoot\install.ps1"
+    $installedRestore = WaitForStableStatus {
+        param($status)
+        IsFullscreenRestore $status $fs
+    } 3000 150
+    $installedHeartbeat = WaitForVerifiedHeartbeat $installStarted $daemonBeforeInstall.Pid
+    $installedUnveiled = WaitFor { ([Smoke.Keys]::FscState([IntPtr]::new([long]$fs.hwnd))).Veiled -eq 0 } 1000 25
+    Check "install during fullscreen PiP: exact restore and verified daemon" `
+        ($installedRestore.Matched -and $installedHeartbeat -and $installedHeartbeat.Hotkey -eq 1 -and
+            $installedHeartbeat.Timer -eq 1 -and $installedHeartbeat.Pid -ne $daemonBeforeInstall.Pid -and
+            $installedUnveiled)
 
     Req "toggle"
     $null = WaitFor { -not (Test-Path "$env:TEMP\vlc-pip-request.txt") } 1500 25    # first consumed
@@ -448,10 +608,14 @@ try {
     # leave fullscreen via VLC itself: the window was untouched while fullscreen, so
     # Qt's own restore must land the exact pre-fullscreen rect
     PostKey $fdbl.hwnd 0x46 0x21
-    $null = WaitFor { $w = Status; $w.caption -and $w.topmost -eq $before.topmost -and $w.w -eq $before.w } 3000 150
-    $fw = Status
+    $windowedAgain = WaitForStableStatus {
+        param($status)
+        $status.caption -and $status.topmost -eq $before.topmost -and (SameRect $status $before)
+    } 6000 300
+    $fw = $windowedAgain.Status
     Check "fullscreen left: original windowed rect intact" `
-        ($fw.caption -and $fw.topmost -eq $before.topmost -and $fw.x -eq $before.x -and $fw.y -eq $before.y -and $fw.w -eq $before.w -and $fw.h -eq $before.h)
+        $windowedAgain.Matched
+    if (-not $windowedAgain.Matched) { throw "fullscreen exit did not restore the windowed baseline" }
 
     # stopping playback inside a fullscreen-origin PiP: VLC leaves fullscreen by itself
     # and balloons the window - the daemon must dissolve the session into a plain
@@ -505,6 +669,28 @@ try {
     if (-not (Test-Path "$env:TEMP\vlc-pip.state")) {
         throw "reopen-heal precondition failed: state was deleted before recorded VLC exited"
     }
+    $pendingState = [IO.File]::ReadAllText("$env:TEMP\vlc-pip.state")
+    $daemonBeforeUninstall = WaitForVerifiedHeartbeat
+    if (-not $daemonBeforeUninstall) { throw "pending-heal uninstall precondition failed: daemon heartbeat missing" }
+    $uninstallStarted = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $uninstall = Start-Process powershell.exe `
+        "-NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\uninstall.ps1`"" `
+        -PassThru -WindowStyle Hidden
+    if (-not $uninstall.WaitForExit(15000)) {
+        try { $uninstall.Kill() } catch {}
+        if (-not $uninstall.WaitForExit(3000)) { throw "pending-heal uninstall could not be terminated" }
+        throw "pending-heal uninstall did not terminate"
+    }
+    $recoveryHeartbeat = WaitForVerifiedHeartbeat $uninstallStarted $daemonBeforeUninstall.Pid
+    $statePreserved = (Test-Path -LiteralPath "$env:TEMP\vlc-pip.state" -PathType Leaf) -and
+        [IO.File]::ReadAllText("$env:TEMP\vlc-pip.state") -eq $pendingState
+    $uninstallRefused = $uninstall.ExitCode -ne 0 -and $statePreserved -and
+        (Test-Path -LiteralPath $exe -PathType Leaf) -and
+        (Test-Path -LiteralPath $luaPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $startupLink -PathType Leaf) -and $recoveryHeartbeat -and
+        $recoveryHeartbeat.Hotkey -eq 1 -and $recoveryHeartbeat.Timer -eq 1
+    Check "uninstall during pending heal: refused, state/artifacts preserved, daemon restarted" $uninstallRefused
+    if (-not $uninstallRefused) { throw "pending-heal uninstall invariant failed" }
     Start-Sleep 1
     $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
     $healDone = WaitForStatus {
@@ -520,12 +706,49 @@ try {
     $vlcProc.WaitForExit(8000) | Out-Null
 }
 finally {
-    # restore the window if the test aborted mid-PiP (no-op otherwise, works without the daemon)
-    try { Start-Process $exe exit -Wait } catch {}
-    # put the user's config back (or clear the one this run wrote) before tearing VLC down
-    if (Test-Path $cfgBak) { Move-Item $cfgBak $cfg -Force }
-    elseif (Test-Path $cfg) { Remove-Item $cfg -Force -ErrorAction SilentlyContinue }
-    if ($vlcProc -and -not $vlcProc.HasExited) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false -ErrorAction SilentlyContinue }
+    $cleanupErrors = @()
+    $vlcStopped = $null -eq $vlcProc
+    # Exit restores a live window; state removal below drops only this test's pending heal.
+    try { if (Test-Path $exe) { Start-Process $exe exit -Wait } } catch {}
+    try {
+        if ($vlcProc) {
+            if (-not $vlcProc.HasExited) {
+                try { $vlcProc.Kill() } catch {}
+            }
+            if (-not $vlcProc.WaitForExit(3000)) { throw "VLC did not stop" }
+            $vlcStopped = $true
+        }
+    } catch { $cleanupErrors += $_.Exception.Message }
+    try {
+        if ($vlcStopped -and (Test-Path -LiteralPath $statePath)) {
+            Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $statePath) { throw "PiP state could not be removed" }
+        }
+    } catch { $cleanupErrors += $_.Exception.Message }
+    try {
+        if (Test-Path $cfgBak) {
+            New-Item -ItemType Directory -Path (Split-Path $cfg -Parent) -Force | Out-Null
+            Move-Item $cfgBak $cfg -Force
+        }
+        elseif (-not $hadConfig -and (Test-Path $cfg)) { Remove-Item $cfg -Force }
+    } catch { $cleanupErrors += $_.Exception.Message }
+    try {
+        $cleanupHeartbeat = WaitForVerifiedHeartbeat 0 0 1200
+        $installationHealthy = (Test-Path -LiteralPath $exe -PathType Leaf) -and
+            (Test-Path -LiteralPath $luaPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $startupLink -PathType Leaf) -and $cleanupHeartbeat -and
+            $cleanupHeartbeat.Hotkey -eq 1 -and $cleanupHeartbeat.Timer -eq 1
+        if (-not $installationHealthy) {
+            & "$PSScriptRoot\install.ps1"
+            $cleanupHeartbeat = WaitForVerifiedHeartbeat
+            if (-not $cleanupHeartbeat -or $cleanupHeartbeat.Hotkey -ne 1 -or $cleanupHeartbeat.Timer -ne 1) {
+                throw "reinstalled daemon could not be verified"
+            }
+        }
+    } catch { $cleanupErrors += $_.Exception.Message }
+    if ($cleanupErrors.Count) {
+        throw "smoke cleanup failed: $($cleanupErrors -join '; ')"
+    }
 }
 
 if ($fail.Count) { Write-Host "`n$($fail.Count) FAILURES"; exit 1 } else { Write-Host "`nALL PASS"; exit 0 }
