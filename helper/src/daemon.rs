@@ -165,7 +165,7 @@ pub fn run(argv: &[String]) -> i32 {
     // one that would kill us on the first tick); only "stop", so a queued toggle survives
     let rp = state::request_path();
     if let Ok(c) = std::fs::read_to_string(&rp)
-        && c.trim() == "stop"
+        && c.split_whitespace().next() == Some("stop")
     {
         let _ = std::fs::remove_file(&rp);
     }
@@ -246,7 +246,7 @@ pub fn run(argv: &[String]) -> i32 {
             tracker.reset_debounce();
         }
         if msg.message == WM_HOTKEY {
-            native::toggle(&options::effective(argv));
+            native::toggle(&options::effective(argv), None);
             sync_session(&mut hooks, state::load(&state::state_path()));
         } else if msg.message == WM_TIMER {
             poll_request(argv);
@@ -352,12 +352,20 @@ fn pointer_delta(current: i32, origin: i32) -> i64 {
 }
 
 fn poll_request(argv: &[String]) {
-    match state::consume_request(&state::request_path()).as_deref() {
+    let Some(req) = state::consume_request(&state::request_path()) else {
+        return;
+    };
+    let mut tokens = req.split_whitespace();
+    match tokens.next() {
         Some("toggle") => {
-            native::toggle(&options::effective(argv));
+            native::toggle(&options::effective(argv), parse_media(tokens.next()));
         }
         Some("enter") => {
-            native::enter(native::find_player(), &options::effective(argv));
+            native::enter(
+                native::find_player(),
+                &options::effective(argv),
+                parse_media(tokens.next()),
+            );
         }
         Some("exit") => {
             native::exit_pip();
@@ -365,6 +373,14 @@ fn poll_request(argv: &[String]) {
         Some("stop") => unsafe { PostQuitMessage(0) },
         _ => {}
     }
+}
+
+/// Optional `v=WxH` request token: the extension's media video dimensions. Anything
+/// malformed or nonpositive is None - the enter then keeps the configured box.
+fn parse_media(token: Option<&str>) -> Option<(i32, i32)> {
+    let (w, h) = token?.strip_prefix("v=")?.split_once('x')?;
+    let (w, h) = (w.parse().ok()?, h.parse().ok()?);
+    (w > 0 && h > 0).then_some((w, h))
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -563,6 +579,16 @@ mod internal_tests {
         assert_eq!(click.x, 20);
         assert_eq!(click.y, 30);
         assert!(!click.swallow_next_up);
+    }
+
+    #[test]
+    fn media_token_parses_only_positive_v_pairs() {
+        assert_eq!(parse_media(Some("v=1920x816")), Some((1920, 816)));
+        assert_eq!(parse_media(Some("v=0x816")), None);
+        assert_eq!(parse_media(Some("v=1920x-1")), None);
+        assert_eq!(parse_media(Some("1920x816")), None);
+        assert_eq!(parse_media(Some("v=1920")), None);
+        assert_eq!(parse_media(None), None);
     }
 
     #[test]

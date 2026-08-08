@@ -182,6 +182,34 @@ pub fn plan_move(start: &Rect, dx: i64, dy: i64) -> Option<Rect> {
     })
 }
 
+/// Media-adapted PiP box for enter: keep the configured width as the size knob and
+/// follow the video's aspect, shrinking at that aspect when the height would exceed
+/// 80% of the work area; the 256px floor wins over the cap, matching plan_resize.
+/// No media or degenerate dimensions fall back to the configured box.
+pub fn adapt_box(o_w: i32, o_h: i32, media: Option<(i32, i32)>, work: &Rect) -> (i32, i32) {
+    let Some((mw, mh)) = media else {
+        return (o_w, o_h);
+    };
+    if o_w < 1 || mw < 1 || mh < 1 {
+        return (o_w, o_h);
+    }
+    let mut w = i64::from(o_w);
+    let mut h = (w * i64::from(mh) / i64::from(mw)).max(1);
+    let max_h = i64::from(work.bottom - work.top) * 4 / 5;
+    if h > max_h {
+        h = max_h.max(1);
+        w = (h * i64::from(mw) / i64::from(mh)).max(1);
+        if w < 256 {
+            w = 256;
+            h = (w * i64::from(mh) / i64::from(mw)).max(1);
+        }
+    }
+    match (i32::try_from(w), i32::try_from(h)) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => (o_w, o_h),
+    }
+}
+
 /// Window-relative region that keeps the minimal look live through a resize drag: the
 /// per-side chrome measured at drag start, applied to the target size. None when the
 /// target has shrunk below the chrome (an inverted box must not clip).

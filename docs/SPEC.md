@@ -60,7 +60,7 @@ VLC's Lua extension API **cannot** do any of this (no window-geometry API). So t
 
 ```mermaid
 flowchart TD
-    MENU["VLC View menu: pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle', pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
+    MENU["VLC View menu: pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle' + media v=WxH, pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
     HK["Ctrl+Alt+P global hotkey, WM_HOTKEY"] --> D
     REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon: Rust, GUI subsystem, login-started, raw Win32 message pump"]
     D -- "WM_TIMER 150 ms: consume request, sync session/hooks, heartbeat ~3 s, converge minimal-look region" --> D
@@ -77,7 +77,7 @@ Toggle = `owns_state` ? Exit : Enter. Menu and hotkey both call the same path.
 
 ### 5.1 `pip.lua` (VLC extension)
 - `descriptor()` returns `capabilities = { "trigger" }`, title "PiP Mode".
-- `trigger()` → ensure daemon alive (heartbeat check, §6.3), write `"toggle"` to the request file; errors go to `vlc.msg.err`.
+- `trigger()` → ensure daemon alive (heartbeat check, §6.3), write `"toggle"` - with ` v=WxH` appended when the playing video's visible size is known (the localized `item:info()` is matched on the English `Video resolution` key only, so a localized VLC sends the bare word; transposed `Orientation` values - `Left ...`/`Right ...` - swap the axes, since the resolution row is the pre-rotation raster) - to the request file; errors go to `vlc.msg.err`.
 - Fallback only: if the daemon is dead, `os.execute('start "" "<exe>" daemon')` (the sole case that may flash; normally never fires because of login auto-start).
 - Installs to `%APPDATA%\vlc\lua\extensions\pip.lua` (ONLY the .lua here).
 
@@ -112,12 +112,12 @@ Created by Enter and updated on drag release: one newline-terminated line of exa
 ```
 66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345
 ```
-Wire types: `hwnd`/`style`/`ex_style` signed i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. The three native-width values are held as `isize` internally: reads parse signed i64 then checked-convert, and writes cast back to i64, preserving this x64 wire format. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the options in effect at Enter (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
+Wire types: `hwnd`/`style`/`ex_style` signed i64; `x y w h target_w target_h margin` i32; `corner` one of `br bl tr tl` (unknown reads as `br`); `min` `1|0`; `pid` u32. The three native-width values are held as `isize` internally: reads parse signed i64 then checked-convert, and writes cast back to i64, preserving this x64 wire format. `x..ex_style` are the pre-PiP restore data; `target_w..min` are the box in effect at Enter - the options after any media adaptation (so daemon and one-shot CLI converge on the same geometry); `pid` is the owner process.
 - **Any** parse failure (missing trailing newline, wrong token count, bad number) loads as `None` = "not in PiP" - the benign failure mode is the point. The trailing newline is the torn-write sentinel: a truncated write loses it, so a partial line (which could carry a numeric prefix of `pid`) can never parse.
 - **Ownership (`owns_state`)**: a valid record is a live PiP iff `pid != 0` and `GetWindowThreadProcessId(hwnd) == pid`. A destroyed or recycled HWND yields 0 or a foreign owner, so handle validity alone is insufficient. An unowned valid record is pending reopen heal (§12); explicit Exit drops it, maintenance Restore preserves it, and Enter overwrites it, while `in_pip`/`status` leave it untouched. Terminal cleanup and successful overwrite clear the recorded controller veil only for fullscreen-origin state. Delete failures are retried by the next caller.
 
 ### 6.2 `vlc-pip-request.txt` - command channel into the daemon
-Bare word, trimmed on read: `toggle` | `enter` | `exit` | `stop` (case-sensitive). Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored. On daemon start, a pre-existing request is discarded **only if it is `stop`** (a `pip-helper stop` with no daemon alive leaves one that would kill the fresh daemon on its first tick; a queued user toggle survives).
+First whitespace token, trimmed on read: `toggle` | `enter` | `exit` | `stop` (case-sensitive). `toggle` and `enter` accept an optional second token `v=WxH` - the extension's playing-video dimensions, used by enter's box adaptation; a malformed or nonpositive token reads as absent, and further tokens are ignored. Consumed (read + delete) every 150 ms tick; read errors leave the file for the next tick; empty file is deleted and ignored. On daemon start, a pre-existing request is discarded **only if its command token is `stop`** (same tokenization as the pump) (a `pip-helper stop` with no daemon alive leaves one that would kill the fresh daemon on its first tick; a queued user toggle survives).
 
 ### 6.3 `vlc-pip-daemon.alive` - heartbeat + arming diagnostics
 Single line, no newline, rewritten on start and then every >3000 ms (checked each 150 ms tick):
@@ -145,15 +145,16 @@ The smoke consumer deletes the previous file before launching `status`, waits fo
 1. Toolhelp process snapshot → set of PIDs whose exe name == `vlc.exe` (case-insensitive). Empty → null.
 2. `EnumWindows`: skip invisible; skip PIDs not in the set; skip **empty titles** (filters VLC's hidden/extension windows); first window whose title contains `"VLC media player"` (case-insensitive) wins and stops enumeration; else track the biggest-area window as fallback.
 
-### enter(h, o) - all steps in this order
+### enter(h, o, media) - all steps in this order
 1. Guard: null h or already InPip → false.
 2. Reject a nonpositive target before changing the window.
 3. `IsIconic(h)` → `ShowWindow(h, SW_RESTORE)` (else both the chrome measurement and restore rect can be stale/off-screen).
-4. Read the work area and, with `min=1` and a video child present, the client-relative chrome around the child (menu above, controller below - Qt client-area widgets, so the offsets survive the border strip; sanity: per-axis sums within 0..=300, else use the plain path). Precompute the complete landing rect and optional region with checked arithmetic. An unrepresentable coordinate or size returns false before state save or PiP mutation.
-5. Read rect, `GWL_STYLE`, `GWL_EXSTYLE`, owner pid; reject a nonpositive or unrepresentable restore size; **save state before any PiP mutation**. A successful stale-state overwrite clears its fullscreen controller veil. For a new fullscreen-origin state, hide any currently visible controller and apply its persistent empty-region veil before reshaping.
-6. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
-7. Apply the precomputed corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`. With measured chrome, one `SetWindowPos(h, HWND_TOPMOST, vx-cl, vy-ct, w+cl+cr, h+ct+cb, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` followed immediately by the region `(cl, ct, cl+w, ct+h)` - the PiP lands fully formed, no visible grow-then-clip pass (the converger only verifies). Without chrome (not playing, `min=0`, garbage measurement): plain `SetWindowPos(..., o.w, o.h, ...)` and the converger takes over.
-8. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, clear the fullscreen controller veil, delete state, never claim in-PiP (the main-window region is only applied after a successful SetWindowPos).
+4. With media dimensions present (menu trigger's `v=WxH`, the visible raster size - VLC exposes no SAR-corrected size, so anamorphic media adapts to its raster shape), adapt the box: keep the configured width, derive the height from the video's aspect (floor 1), and shrink at that aspect when the height would exceed 80% of the work area - the 256px width floor wins over the cap, matching resize. Degenerate media dims keep the configured box. The adapted box is the target everywhere below (state `target_w/h`, corner, chrome landing).
+5. Read the work area and, with `min=1` and a video child present, the client-relative chrome around the child (menu above, controller below - Qt client-area widgets, so the offsets survive the border strip; sanity: per-axis sums within 0..=300, else use the plain path). Precompute the complete landing rect and optional region with checked arithmetic. An unrepresentable coordinate or size returns false before state save or PiP mutation.
+6. Read rect, `GWL_STYLE`, `GWL_EXSTYLE`, owner pid; reject a nonpositive or unrepresentable restore size; **save state before any PiP mutation**. A successful stale-state overwrite clears its fullscreen controller veil. For a new fullscreen-origin state, hide any currently visible controller and apply its persistent empty-region veil before reshaping.
+7. Strip `WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZE` (WS_MAXIMIZE too: a zoomed window keeps IsZoomed, so Win+Down/Aero would snap the PiP back to Qt's normal placement rect).
+8. Apply the precomputed corner from the **work area** (`GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)).rcWork`, taskbar excluded): `left = work.left+margin; top = work.top+margin; right = work.right-w-margin; bottom = work.bottom-h-margin`; `tl/tr/bl` as named, anything else = `br`. With measured chrome, one `SetWindowPos(h, HWND_TOPMOST, vx-cl, vy-ct, w+cl+cr, h+ct+cb, SWP_FRAMECHANGED|SWP_SHOWWINDOW)` followed immediately by the region `(cl, ct, cl+w, ct+h)` - the PiP lands fully formed, no visible grow-then-clip pass (the converger only verifies). Without chrome (not playing, `min=0`, garbage measurement): plain `SetWindowPos` at the adapted `w/h` and the converger takes over.
+9. **Rollback on failure** (e.g. UIPI vs elevated VLC): restore the original style, clear the fullscreen controller veil, delete state, never claim in-PiP (the main-window region is only applied after a successful SetWindowPos).
 
 ### exit() - all steps in this order
 1. Load state; null → false. `owns_state` fails → clear a fullscreen-origin controller veil, delete state, false.
@@ -267,7 +268,7 @@ New in v2.1; everything above is unchanged. No modifier keys and nothing new is 
 ### Gesture contract
 - **Interior drag = free move.** Press inside the visible PiP, drag past the system drag threshold, release: the window follows live and stays where dropped. Free placement survives the region converger (`plan_region` only repositions during a size correction).
 - **Band drag = aspect-locked resize.** A drag starting in the outer 16px band (DPI-scaled: 16 x dpi/96) of the **visible** rect - the region box, not the window rect - resizes live from that edge or corner, opposite side anchored; pure edges keep the perpendicular center fixed. The zone is a per-axis `(sx, sy)` pair (`-1` low edge, `0` interior, `1` high edge), so corners combine the independent axes and the low edge wins if opposite bands overlap. Aspect is the **visible box's** at drag start - chrome is a constant band, so following the outer window would skew the video ratio on every resize and release would persist the skew; a region box implying per-axis chrome sums outside 0-300px is stale mid-relayout garbage, so the whole gesture (zone, live clip, release persistence) treats it as no region and works from the window rect. The video width has a 256px minimum and a nominal cap keeping the whole window within 80% of the work area. The minimum wins when a work area is too small to satisfy both.
-- **Release** derives `corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `target_w/h` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. The next enter and any convergence-driven re-park use them.
+- **Release** derives `corner` = work-area quadrant of the window center (tie = `br`) and, for a resize, `target_w/h` = final size minus the chrome measured at drag start; both go to the state file and `config.txt`. A move-only release writes the corner with the **configured** size - the state's target may carry enter's media-adapted box, which must not leak into config. The next enter and any convergence-driven re-park use them.
 - **Wheel: never touched.** Plain wheel = VLC volume - Windows ships "scroll inactive windows" on, so this already works over the unfocused PiP - and Ctrl+wheel = subtitle scale. The hook intercepts no wheel message.
 - Fullscreen guards unchanged: burst-swallowed downs never arm a drag.
 

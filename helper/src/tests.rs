@@ -429,6 +429,36 @@ mod geometry {
     }
 
     #[test]
+    fn adapt_box_follows_media_aspect() {
+        // scope film in a 16:9 config: 480*816/1920 = 204; no media = configured box
+        assert_eq!(adapt_box(480, 270, Some((1920, 816)), &WORK), (480, 204));
+        assert_eq!(adapt_box(480, 270, None, &WORK), (480, 270));
+    }
+
+    #[test]
+    fn adapt_box_caps_portrait_height_at_work() {
+        // 9:16 shorts want 853 tall: cap at 832 (80% of 1040), width follows at 468
+        assert_eq!(adapt_box(480, 270, Some((1080, 1920)), &WORK), (468, 832));
+    }
+
+    #[test]
+    fn adapt_box_min_width_wins_over_cap() {
+        // 1:10 media: the capped width would be 83 -> floor 256, height follows
+        assert_eq!(adapt_box(480, 270, Some((100, 1000)), &WORK), (256, 2560));
+    }
+
+    #[test]
+    fn adapt_box_degenerate_media_falls_back() {
+        assert_eq!(adapt_box(480, 270, Some((0, 1080)), &WORK), (480, 270));
+        assert_eq!(adapt_box(480, 270, Some((1920, 0)), &WORK), (480, 270));
+    }
+
+    #[test]
+    fn adapt_box_extreme_wide_floors_height_at_one() {
+        assert_eq!(adapt_box(480, 270, Some((100_000, 1)), &WORK), (480, 1));
+    }
+
+    #[test]
     fn move_translation_preserves_normal_behavior() {
         assert_eq!(
             plan_move(&rc(100, 100, 580, 370), 20, -30),
