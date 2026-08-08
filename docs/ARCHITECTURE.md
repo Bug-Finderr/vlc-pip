@@ -15,8 +15,8 @@ sequenceDiagram
     U->>L: click "PiP Mode" (or Ctrl+Alt+P straight to D)
     L->>R: write "toggle" (pure Lua I/O, no console flash)
     D->>R: consume on next 150 ms tick
-    D->>V: Enter: save rect+styles to vlc-pip.state,<br>strip caption/frame, topmost, park in corner
-    D->>V: Exit: restore saved styles, topmost state,<br>and exact rect; delete state on success
+    D->>V: Enter: save rect+styles to vlc-pip.state, strip caption/frame, topmost, park in corner
+    D->>V: Exit: restore saved styles, topmost state, and exact rect, then delete state on success
 ```
 
 A valid `%TEMP%\vlc-pip.state` is either an owned live PiP or a stale pending reopen-heal record. `owns_state` checks the recorded HWND and PID to decide whether PiP is active, so a recycled handle cannot activate hooks or input guards. Enter creates the record; drag release can update its target size and corner. Menu and hotkey both call the same toggle path, while a pending record remains available for reopen heal.
@@ -25,16 +25,19 @@ A valid `%TEMP%\vlc-pip.state` is either an owned live PiP or a stale pending re
 
 ```mermaid
 flowchart LR
-    subgraph D["daemon (single instance via named mutex, raw GetMessage pump)"]
-        T["WM_TIMER 150 ms<br>consume request, sync, converge region,<br>resync on drop, heartbeat ~3 s"]
-        H["WM_HOTKEY<br>Ctrl+Alt+P = toggle"]
-        K["WH_KEYBOARD_LL<br>swallow F while in PiP + VLC focused"]
-        M["WH_MOUSE_LL<br>rate-limit clicks over the PiP,<br>arm + track drag gestures"]
-        G["WM_APP drag (coalesced)<br>pump computes rect, applies async,<br>release: persist size + corner"]
+    subgraph D["daemon - single instance via named mutex, raw GetMessage pump"]
+        T["WM_TIMER 150 ms: consume request, sync session, converge region, resync on drop, heartbeat ~3 s"]
+        H["WM_HOTKEY: Ctrl+Alt+P = toggle"]
+        M["WH_MOUSE_LL: rate-limit clicks over the PiP, arm + track drag gestures"]
+        K["WH_KEYBOARD_LL: swallow F (Esc too when fullscreen-origin) while in PiP + VLC focused"]
+        G["WM_APP drag (coalesced): pump computes rect, applies async, release persists size + corner"]
+        CACHE["cached HWND + PID"]
     end
     M --> G
+    T -->|refresh| CACHE
+    K -.->|read, never the disk| CACHE
+    M -.-> CACHE
     T --> FILES["runtime files in TEMP"]
-    K & M -.->|read pump-thread cache,<br>never the disk| CACHE["cached HWND + PID"]
 ```
 
 Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):

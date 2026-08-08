@@ -60,13 +60,13 @@ VLC's Lua extension API **cannot** do any of this (no window-geometry API). So t
 
 ```mermaid
 flowchart TD
-    MENU["VLC View menu<br>pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle'<br>pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
-    HK["Ctrl+Alt+P global hotkey<br>WM_HOTKEY"] --> D
-    REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon<br>Rust, GUI subsystem, login-started<br>raw Win32 message pump"]
-    D -- "WM_TIMER 150 ms: consume request,<br>sync session/hooks, heartbeat ~3 s,<br>converge minimal-look region" --> D
-    D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused<br>WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
-    D -- "Toggle" --> WIN["Win32 reshape<br>Enter: save state, strip frame, topmost, corner<br>Exit: restore styles + rect from saved state"]
-    WIN <-- "owned record = live PiP<br>unowned record = pending heal" --> STATE["vlc-pip.state in TEMP"]
+    MENU["VLC View menu: pip.lua, capabilities = trigger"] -- "trigger() writes 'toggle', pure Lua I/O, no flash" --> REQ["vlc-pip-request.txt in TEMP"]
+    HK["Ctrl+Alt+P global hotkey, WM_HOTKEY"] --> D
+    REQ -- "consumed each 150 ms tick" --> D["pip-helper.exe daemon: Rust, GUI subsystem, login-started, raw Win32 message pump"]
+    D -- "WM_TIMER 150 ms: consume request, sync session/hooks, heartbeat ~3 s, converge minimal-look region" --> D
+    D -- "WH_KEYBOARD_LL swallows F in PiP + VLC focused, WH_MOUSE_LL rate-limits clicks over the PiP" --> FS["fullscreen prevented"]
+    D -- "Toggle" --> WIN["Win32 reshape. Enter: save state, strip frame, topmost, corner. Exit: restore styles + rect from saved state"]
+    WIN <-- "owned record = live PiP, unowned record = pending heal" --> STATE["vlc-pip.state in TEMP"]
 ```
 
 Toggle = `owns_state` ? Exit : Enter. Menu and hotkey both call the same path.
