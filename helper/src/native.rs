@@ -363,6 +363,11 @@ pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
         right: wr.left + r,
         bottom: wr.top + b,
     });
+    // A box implying impossible chrome is a stale region mid-relayout: gesture the full
+    // window instead, or release persists target = final size minus garbage chrome.
+    if !geometry::credible_vis(&wr, &vis) {
+        return Some((wr, wr));
+    }
     Some((vis, wr))
 }
 

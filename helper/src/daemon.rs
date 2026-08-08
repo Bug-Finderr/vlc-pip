@@ -308,6 +308,7 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     let target = if resizing {
         Some(geometry::plan_resize(
             &d.start,
+            &d.vis,
             d.zone,
             dx,
             dy,

@@ -147,7 +147,14 @@ mod geometry {
     fn resize_br_grows_anchored_tl() {
         // 480x270 at (100,100); +48/+27 is width-driven (48*270 >= 27*480): 528x297
         assert_eq!(
-            plan_resize(&rc(100, 100, 580, 370), (1, 1), 48, 27, &WORK),
+            plan_resize(
+                &rc(100, 100, 580, 370),
+                &rc(100, 100, 580, 370),
+                (1, 1),
+                48,
+                27,
+                &WORK
+            ),
             rc(100, 100, 628, 397)
         );
     }
@@ -156,7 +163,14 @@ mod geometry {
     fn resize_tl_anchors_br() {
         // dw = -dx = 48: 528x297 anchored at (right,bottom)
         assert_eq!(
-            plan_resize(&rc(100, 100, 580, 370), (-1, -1), -48, 0, &WORK),
+            plan_resize(
+                &rc(100, 100, 580, 370),
+                &rc(100, 100, 580, 370),
+                (-1, -1),
+                -48,
+                0,
+                &WORK
+            ),
             rc(52, 73, 580, 370)
         );
     }
@@ -165,7 +179,14 @@ mod geometry {
     fn resize_right_edge_keeps_vertical_center() {
         // edge zone: dy ignored; 576x324, v-center 235 fixed
         assert_eq!(
-            plan_resize(&rc(100, 100, 580, 370), (1, 0), 96, 500, &WORK),
+            plan_resize(
+                &rc(100, 100, 580, 370),
+                &rc(100, 100, 580, 370),
+                (1, 0),
+                96,
+                500,
+                &WORK
+            ),
             rc(100, 73, 676, 397)
         );
     }
@@ -174,7 +195,14 @@ mod geometry {
     fn resize_top_edge_keeps_horizontal_center() {
         // dh = -dy = 54 -> h-driven: 576x324, anchored bottom, h-center 340 fixed
         assert_eq!(
-            plan_resize(&rc(100, 100, 580, 370), (0, -1), 500, -54, &WORK),
+            plan_resize(
+                &rc(100, 100, 580, 370),
+                &rc(100, 100, 580, 370),
+                (0, -1),
+                500,
+                -54,
+                &WORK
+            ),
             rc(52, 46, 628, 370)
         );
     }
@@ -183,7 +211,14 @@ mod geometry {
     fn resize_corner_height_driven_when_dy_dominates() {
         // 100*480 > 30*270: h = 370 -> w = 370*480/270 = 657 -> h = 657*270/480 = 369
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 1), 30, 100, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 1),
+                30,
+                100,
+                &WORK
+            ),
             rc(0, 0, 657, 369)
         );
     }
@@ -191,7 +226,14 @@ mod geometry {
     #[test]
     fn resize_height_driven_shrink_rounds_the_whole_ratio() {
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 1), 0, -1, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 1),
+                0,
+                -1,
+                &WORK
+            ),
             rc(0, 0, 478, 268)
         );
     }
@@ -199,7 +241,14 @@ mod geometry {
     #[test]
     fn resize_clamps_min_256() {
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 1), -400, -400, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 1),
+                -400,
+                -400,
+                &WORK
+            ),
             rc(0, 0, 256, 144)
         );
     }
@@ -208,7 +257,14 @@ mod geometry {
     fn resize_clamps_max_80pct_work() {
         // max_w = min(1536, 832*480/270 = 1479) = 1479; h = 1479*270/480 = 831
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 1), 5000, 0, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 1),
+                5000,
+                0,
+                &WORK
+            ),
             rc(0, 0, 1479, 831)
         );
     }
@@ -216,7 +272,7 @@ mod geometry {
     #[test]
     fn resize_degenerate_start_is_noop() {
         assert_eq!(
-            plan_resize(&rc(0, 0, 0, 270), (1, 1), 50, 50, &WORK),
+            plan_resize(&rc(0, 0, 0, 270), &rc(0, 0, 0, 270), (1, 1), 50, 50, &WORK),
             rc(0, 0, 0, 270)
         );
     }
@@ -226,7 +282,14 @@ mod geometry {
         // 80% of 200 < 256: max floors to min - clamp() must not see min > max
         let tiny = rc(0, 0, 200, 200);
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 1), -400, 0, &tiny),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 1),
+                -400,
+                0,
+                &tiny
+            ),
             rc(0, 0, 256, 144)
         );
     }
@@ -234,7 +297,14 @@ mod geometry {
     #[test]
     fn resize_low_edge_handles_min_pointer_delta() {
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (-1, 0), i64::from(i32::MIN), 0, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (-1, 0),
+                i64::from(i32::MIN),
+                0,
+                &WORK
+            ),
             rc(-999, -280, 480, 551)
         );
     }
@@ -243,7 +313,14 @@ mod geometry {
     fn resize_accepts_full_pointer_delta_width() {
         let full_delta = i64::from(i32::MAX) - i64::from(i32::MIN);
         assert_eq!(
-            plan_resize(&rc(0, 0, 480, 270), (1, 0), full_delta, 0, &WORK),
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(0, 0, 480, 270),
+                (1, 0),
+                full_delta,
+                0,
+                &WORK
+            ),
             rc(0, -280, 1479, 551)
         );
     }
@@ -251,13 +328,104 @@ mod geometry {
     #[test]
     fn resize_high_edge_overflow_is_noop() {
         let start = rc(i32::MAX - 480, 0, i32::MAX, 270);
-        assert_eq!(plan_resize(&start, (1, 0), 1000, 0, &WORK), start);
+        assert_eq!(plan_resize(&start, &start, (1, 0), 1000, 0, &WORK), start);
     }
 
     #[test]
     fn resize_low_edge_overflow_is_noop() {
         let start = rc(i32::MIN, 0, i32::MIN + 480, 270);
-        assert_eq!(plan_resize(&start, (-1, 0), -1000, 0, &WORK), start);
+        assert_eq!(plan_resize(&start, &start, (-1, 0), -1000, 0, &WORK), start);
+    }
+
+    #[test]
+    fn resize_keeps_video_aspect_through_chrome() {
+        // outer 496x380 holds a 480x270 video (chrome 16x110); doubling the video width
+        // stays 16:9 on the VIDEO box (960x540 + chrome), not the outer rect
+        assert_eq!(
+            plan_resize(
+                &rc(100, 100, 596, 480),
+                &rc(108, 130, 588, 400),
+                (1, 1),
+                480,
+                0,
+                &WORK
+            ),
+            rc(100, 100, 1076, 750)
+        );
+    }
+
+    #[test]
+    fn resize_min_clamp_applies_to_video_width() {
+        // video floors at 256x144, then chrome 16x110 comes back on top
+        assert_eq!(
+            plan_resize(
+                &rc(100, 100, 596, 480),
+                &rc(108, 130, 588, 400),
+                (1, 1),
+                -400,
+                0,
+                &WORK
+            ),
+            rc(100, 100, 372, 354)
+        );
+    }
+
+    #[test]
+    fn resize_max_cap_bounds_outer_window_with_chrome() {
+        // height cap subtracts chrome: vw <= (832-110)*480/270 = 1283, vh = 721,
+        // outer 1299x831 stays within 80% of the 1920x1040 work area
+        assert_eq!(
+            plan_resize(
+                &rc(100, 100, 596, 480),
+                &rc(108, 130, 588, 400),
+                (1, 1),
+                5000,
+                0,
+                &WORK
+            ),
+            rc(100, 100, 1399, 931)
+        );
+    }
+
+    #[test]
+    fn resize_extreme_wide_aspect_floors_height_at_one() {
+        // 1024x3 shrunk to the 256 minimum: 256*3/1024 truncates to 0 -> floor 1,
+        // so release persists exactly what was planned
+        assert_eq!(
+            plan_resize(
+                &rc(0, 0, 1024, 3),
+                &rc(0, 0, 1024, 3),
+                (1, 1),
+                -900,
+                0,
+                &WORK
+            ),
+            rc(0, 0, 256, 1)
+        );
+    }
+
+    #[test]
+    fn credible_vis_bounds_chrome_per_axis() {
+        let outer = rc(0, 0, 480, 570);
+        assert!(credible_vis(&outer, &rc(0, 300, 180, 570))); // exactly 300x300
+        assert!(!credible_vis(&outer, &rc(0, 301, 180, 570))); // 301 tall chrome: stale
+        assert!(!credible_vis(&outer, &rc(0, 0, 481, 570))); // vis wider than outer
+    }
+
+    #[test]
+    fn resize_stale_chrome_plans_on_outer_rect() {
+        // vis implies chrome above MAX_CHROME: fall back to the outer aspect
+        assert_eq!(
+            plan_resize(
+                &rc(0, 0, 480, 270),
+                &rc(200, 100, 210, 170),
+                (1, 1),
+                48,
+                27,
+                &WORK
+            ),
+            rc(0, 0, 528, 297)
+        );
     }
 
     #[test]
