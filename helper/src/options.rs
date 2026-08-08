@@ -77,9 +77,15 @@ pub fn effective(argv: &[String]) -> PipOptions {
     merge(&cfg, argv)
 }
 
-/// Written on drag release. Failure swallowed: the gesture still holds via the state file.
-pub fn save_config(w: i32, h: i32, corner: Corner) {
+/// Written on drag release. Failure swallowed: the gesture still holds via the state
+/// file. A move-only release passes None and keeps the configured size - the state's
+/// target may carry enter's media-adapted box, which must not leak into config.
+pub fn save_config(size: Option<(i32, i32)>, corner: Corner) {
     let Some(p) = config_path() else { return };
+    let (w, h) = size.unwrap_or_else(|| {
+        let o = merge(&std::fs::read_to_string(&p).unwrap_or_default(), &[]);
+        (o.w, o.h)
+    });
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

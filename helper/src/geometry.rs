@@ -76,11 +76,27 @@ pub fn classify_zone(x: i32, y: i32, vis: &Rect, band: i32) -> DragZone {
 }
 
 /// New window rect for a live resize drag. The dominant relative delta drives the scale
-/// (edges have one axis by construction); the other dimension follows start's aspect,
-/// including at the clamps. i64 intermediates accept the full i32 pointer-delta range;
-/// an anchored result outside Win32's i32 coordinate range is a no-op.
-pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) -> Rect {
-    let (w0, h0) = (start.right - start.left, start.bottom - start.top);
+/// (edges have one axis by construction); the other dimension follows the VISIBLE box's
+/// aspect at drag start - chrome is a constant band, so following the outer rect would
+/// skew the video ratio on every resize, and release persists that skew. Chrome outside
+/// the 0..=MAX_CHROME sanity range plans chrome-free from the outer rect. i64
+/// intermediates accept the full i32 pointer-delta range; an anchored result outside
+/// Win32's i32 coordinate range is a no-op.
+pub fn plan_resize(
+    start: &Rect,
+    vis: &Rect,
+    zone: DragZone,
+    dx: i64,
+    dy: i64,
+    work: &Rect,
+) -> Rect {
+    let (ow0, oh0) = (start.right - start.left, start.bottom - start.top);
+    let (cw, ch) = if credible_vis(start, vis) {
+        (ow0 - (vis.right - vis.left), oh0 - (vis.bottom - vis.top))
+    } else {
+        (0, 0) // stale region measurement: plan on the outer rect
+    };
+    let (w0, h0) = (ow0 - cw, oh0 - ch);
     if w0 < 1 || h0 < 1 {
         return *start; // garbage measurement: no-op
     }
@@ -98,36 +114,35 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) 
     };
     let width_driven = dw.abs() * i64::from(h0) >= dh.abs() * i64::from(w0);
     let min_w = 256;
-    let max_w = ((work.right - work.left) * 4 / 5)
-        .min((i64::from(work.bottom - work.top) * 4 / 5 * i64::from(w0) / i64::from(h0)) as i32)
+    let max_w = ((work.right - work.left) * 4 / 5 - cw)
+        .min(
+            ((i64::from(work.bottom - work.top) * 4 / 5 - i64::from(ch)) * i64::from(w0)
+                / i64::from(h0)) as i32,
+        )
         .max(min_w); // tiny work area: clamp() must never see min > max
     let raw_w = if width_driven {
         i64::from(w0) + dw
     } else {
         (i64::from(h0) + dh).saturating_mul(i64::from(w0)) / i64::from(h0)
     };
-    let w = raw_w.clamp(i64::from(min_w), i64::from(max_w)) as i32;
-    let h = (i64::from(w) * i64::from(h0) / i64::from(w0)) as i32;
+    let vw = raw_w.clamp(i64::from(min_w), i64::from(max_w)) as i32;
+    // aspects beyond 256:1 truncate to 0, which release would refuse to persist
+    let vh = ((i64::from(vw) * i64::from(h0) / i64::from(w0)) as i32).max(1);
+    let (w, h) = (i64::from(vw) + i64::from(cw), i64::from(vh) + i64::from(ch));
     let (left, right) = match zone.0 {
-        -1 => (
-            i64::from(start.right) - i64::from(w),
-            i64::from(start.right),
-        ),
-        1 => (i64::from(start.left), i64::from(start.left) + i64::from(w)),
+        -1 => (i64::from(start.right) - w, i64::from(start.right)),
+        1 => (i64::from(start.left), i64::from(start.left) + w),
         _ => {
-            let l = i64::from(start.left) + i64::from(w0 - w) / 2;
-            (l, l + i64::from(w))
+            let l = i64::from(start.left) + (i64::from(ow0) - w) / 2;
+            (l, l + w)
         }
     };
     let (top, bottom) = match zone.1 {
-        -1 => (
-            i64::from(start.bottom) - i64::from(h),
-            i64::from(start.bottom),
-        ),
-        1 => (i64::from(start.top), i64::from(start.top) + i64::from(h)),
+        -1 => (i64::from(start.bottom) - h, i64::from(start.bottom)),
+        1 => (i64::from(start.top), i64::from(start.top) + h),
         _ => {
-            let t = i64::from(start.top) + i64::from(h0 - h) / 2;
-            (t, t + i64::from(h))
+            let t = i64::from(start.top) + (i64::from(oh0) - h) / 2;
+            (t, t + h)
         }
     };
     let (Ok(left), Ok(top), Ok(right), Ok(bottom)) = (
@@ -146,6 +161,15 @@ pub fn plan_resize(start: &Rect, zone: DragZone, dx: i64, dy: i64, work: &Rect) 
     }
 }
 
+/// True when the visible box's implied chrome is credible for `outer`. A stale region
+/// mid-relayout implies impossible chrome; a gesture must then treat it as no region,
+/// or release would persist target = final size minus garbage chrome.
+pub(crate) fn credible_vis(outer: &Rect, vis: &Rect) -> bool {
+    let cw = (outer.right - outer.left) - (vis.right - vis.left);
+    let ch = (outer.bottom - outer.top) - (vis.bottom - vis.top);
+    (0..=MAX_CHROME).contains(&cw) && (0..=MAX_CHROME).contains(&ch)
+}
+
 /// Translate a move drag without letting a full-width pointer delta wrap screen
 /// coordinates. None means the target cannot be represented by Win32's i32 rect.
 pub fn plan_move(start: &Rect, dx: i64, dy: i64) -> Option<Rect> {
@@ -156,6 +180,42 @@ pub fn plan_move(start: &Rect, dx: i64, dy: i64) -> Option<Rect> {
         right: shift(start.right, dx)?,
         bottom: shift(start.bottom, dy)?,
     })
+}
+
+/// Media-adapted PiP box for enter: keep the configured width as the size knob and
+/// follow the video's aspect, shrinking at that aspect when the height would exceed
+/// 80% of the work area minus `chrome_h` - the same envelope as plan_resize's cap, or
+/// an adapted enter would land a box the first resize drag immediately shrinks. The
+/// 256px floor wins over the cap, matching plan_resize. No media or degenerate
+/// dimensions fall back to the configured box.
+pub fn adapt_box(
+    o_w: i32,
+    o_h: i32,
+    media: Option<(i32, i32)>,
+    chrome_h: i32,
+    work: &Rect,
+) -> (i32, i32) {
+    let Some((mw, mh)) = media else {
+        return (o_w, o_h);
+    };
+    if o_w < 1 || mw < 1 || mh < 1 {
+        return (o_w, o_h);
+    }
+    let mut w = i64::from(o_w);
+    let mut h = (w * i64::from(mh) / i64::from(mw)).max(1);
+    let max_h = i64::from(work.bottom - work.top) * 4 / 5 - i64::from(chrome_h);
+    if h > max_h {
+        h = max_h.max(1);
+        w = (h * i64::from(mw) / i64::from(mh)).max(1);
+        if w < 256 {
+            w = 256;
+            h = (w * i64::from(mh) / i64::from(mw)).max(1);
+        }
+    }
+    match (i32::try_from(w), i32::try_from(h)) {
+        (Ok(w), Ok(h)) => (w, h),
+        _ => (o_w, o_h),
+    }
 }
 
 /// Window-relative region that keeps the minimal look live through a resize drag: the

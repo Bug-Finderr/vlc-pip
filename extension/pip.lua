@@ -3,7 +3,7 @@
 function descriptor()
     return {
         title = "PiP Mode",
-        version = "2.1.2",
+        version = "2.1.3",
         author = "Sudharsan",
         shortdesc = "PiP Mode",
         description = "Toggle VLC into a borderless always-on-top corner window",
@@ -48,10 +48,35 @@ local function ensure_daemon()
     os.execute('start "" "' .. exe .. '" daemon')
 end
 
+-- Playing video's visible size as "WxH", or nil. item:info() keys are localized: match
+-- the English "Video resolution" only (a localized VLC just skips adaptation) - shape-
+-- scanning values instead would let the padded "Buffer dimensions" or a WxH-shaped
+-- stream description hijack the box. VLC exposes no SAR-corrected size, so anamorphic
+-- media adapts to its raster shape.
+local function video_dims()
+    local ok, item = pcall(function() return vlc.input.item() end)
+    if not ok or not item then return nil end
+    local ok2, info = pcall(function() return item:info() end)
+    if not ok2 or type(info) ~= "table" then return nil end
+    for _, cat in pairs(info) do
+        if type(cat) == "table" and cat["Video resolution"] then
+            local w, h = tostring(cat["Video resolution"]):match("^(%d+)x(%d+)$")
+            if w then
+                -- resolution is the pre-rotation raster; transposed orientations
+                -- ("Left ..."/"Right ...") display with the axes swapped
+                if tostring(cat["Orientation"] or ""):match("^[LR]") then w, h = h, w end
+                return w .. "x" .. h
+            end
+        end
+    end
+    return nil
+end
+
 function trigger()
     local ok, err = pcall(function()
         ensure_daemon()
-        write_request("toggle")
+        local dims = video_dims()
+        write_request(dims and ("toggle v=" .. dims) or "toggle")
     end)
     if not ok then vlc.msg.err("pip: " .. tostring(err)) end
 end

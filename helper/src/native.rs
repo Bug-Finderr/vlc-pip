@@ -363,6 +363,11 @@ pub fn gesture_rects(h: isize) -> Option<(geometry::Rect, geometry::Rect)> {
         right: wr.left + r,
         bottom: wr.top + b,
     });
+    // A box implying impossible chrome is a stale region mid-relayout: gesture the full
+    // window instead, or release persists target = final size minus garbage chrome.
+    if !geometry::credible_vis(&wr, &vis) {
+        return Some((wr, wr));
+    }
     Some((vis, wr))
 }
 
@@ -433,7 +438,7 @@ pub fn finish_drag(fin: &geometry::Rect, resized: bool, chrome_w: i32, chrome_h:
         }
     }
     let _ = state::save(&s, &path); // failure swallowed: the gesture already holds on screen
-    crate::options::save_config(s.target_w, s.target_h, s.corner);
+    crate::options::save_config(resized.then_some((s.target_w, s.target_h)), s.corner);
 }
 
 // Client-relative chrome around the video child (menu above, controller below): Qt
@@ -476,7 +481,7 @@ fn client_chrome(h: isize) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-pub fn enter(h: isize, o: &PipOptions) -> bool {
+pub fn enter(h: isize, o: &PipOptions, media: Option<(i32, i32)>) -> bool {
     if h == 0 {
         return false;
     }
@@ -495,12 +500,14 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
     }
 
     // With the restored geometry available, validate the complete landing before
-    // writing restoration state or applying any PiP mutation.
-    let Some((vx, vy)) = geometry::compute_corner(&work_area(h), o.w, o.h, o.corner, o.margin)
-    else {
+    // writing restoration state or applying any PiP mutation. The measured chrome
+    // feeds the adaptation cap so enter and plan_resize share one 80% envelope.
+    let chrome = if o.min { client_chrome(h) } else { None };
+    let chrome_h = chrome.map_or(0, |(_, t, _, b)| t + b);
+    let (bw, bh) = geometry::adapt_box(o.w, o.h, media, chrome_h, &work_area(h));
+    let Some((vx, vy)) = geometry::compute_corner(&work_area(h), bw, bh, o.corner, o.margin) else {
         return false;
     };
-    let chrome = if o.min { client_chrome(h) } else { None };
     let (x, y, tw, th, clip) = match chrome {
         Some((cl, ct, cr, cb)) => {
             let Some(x) = vx.checked_sub(cl) else {
@@ -515,21 +522,21 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
             let Some(chrome_h) = ct.checked_add(cb) else {
                 return false;
             };
-            let Some(tw) = o.w.checked_add(chrome_w) else {
+            let Some(tw) = bw.checked_add(chrome_w) else {
                 return false;
             };
-            let Some(th) = o.h.checked_add(chrome_h) else {
+            let Some(th) = bh.checked_add(chrome_h) else {
                 return false;
             };
-            let Some(right) = cl.checked_add(o.w) else {
+            let Some(right) = cl.checked_add(bw) else {
                 return false;
             };
-            let Some(bottom) = ct.checked_add(o.h) else {
+            let Some(bottom) = ct.checked_add(bh) else {
                 return false;
             };
             (x, y, tw, th, Some((cl, ct, right, bottom)))
         }
-        None => (vx, vy, o.w, o.h, None),
+        None => (vx, vy, bw, bh, None),
     };
 
     let Some(r) = window_rect(h) else {
@@ -555,8 +562,8 @@ pub fn enter(h: isize, o: &PipOptions) -> bool {
         h: rh,
         style,
         ex_style: ex,
-        target_w: o.w,
-        target_h: o.h,
+        target_w: bw,
+        target_h: bh,
         corner: o.corner,
         margin: o.margin,
         min: o.min,
@@ -692,11 +699,11 @@ pub fn maintenance_restore() -> RestoreResult {
     }
 }
 
-pub fn toggle(o: &PipOptions) -> bool {
+pub fn toggle(o: &PipOptions, media: Option<(i32, i32)>) -> bool {
     if in_pip() {
         exit_pip()
     } else {
-        enter(find_player(), o)
+        enter(find_player(), o, media)
     }
 }
 
