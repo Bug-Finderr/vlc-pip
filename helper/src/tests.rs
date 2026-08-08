@@ -413,6 +413,23 @@ mod geometry {
     }
 
     #[test]
+    fn resize_edge_center_uses_outer_dims_with_chrome() {
+        // right-edge drag on a chromed window: video 480x270 + chrome 16x110; the free
+        // axis centers on the OUTER height (380 -> 434 keeps center 290), not the video's
+        assert_eq!(
+            plan_resize(
+                &rc(100, 100, 596, 480),
+                &rc(108, 130, 588, 400),
+                (1, 0),
+                96,
+                500,
+                &WORK
+            ),
+            rc(100, 73, 692, 507)
+        );
+    }
+
+    #[test]
     fn resize_stale_chrome_plans_on_outer_rect() {
         // vis implies chrome above MAX_CHROME: fall back to the outer aspect
         assert_eq!(
@@ -431,31 +448,56 @@ mod geometry {
     #[test]
     fn adapt_box_follows_media_aspect() {
         // scope film in a 16:9 config: 480*816/1920 = 204; no media = configured box
-        assert_eq!(adapt_box(480, 270, Some((1920, 816)), &WORK), (480, 204));
-        assert_eq!(adapt_box(480, 270, None, &WORK), (480, 270));
+        assert_eq!(adapt_box(480, 270, Some((1920, 816)), 0, &WORK), (480, 204));
+        assert_eq!(adapt_box(480, 270, None, 0, &WORK), (480, 270));
     }
 
     #[test]
     fn adapt_box_caps_portrait_height_at_work() {
         // 9:16 shorts want 853 tall: cap at 832 (80% of 1040), width follows at 468
-        assert_eq!(adapt_box(480, 270, Some((1080, 1920)), &WORK), (468, 832));
+        assert_eq!(
+            adapt_box(480, 270, Some((1080, 1920)), 0, &WORK),
+            (468, 832)
+        );
+    }
+
+    #[test]
+    fn adapt_box_cap_shares_the_resize_envelope_with_chrome() {
+        // chrome 110 shrinks the cap to 722 exactly like plan_resize's, so the first
+        // drag on an adapted portrait box no longer clamps it down: w = 722*1080/1920
+        assert_eq!(
+            adapt_box(480, 270, Some((1080, 1920)), 110, &WORK),
+            (406, 722)
+        );
     }
 
     #[test]
     fn adapt_box_min_width_wins_over_cap() {
         // 1:10 media: the capped width would be 83 -> floor 256, height follows
-        assert_eq!(adapt_box(480, 270, Some((100, 1000)), &WORK), (256, 2560));
+        assert_eq!(
+            adapt_box(480, 270, Some((100, 1000)), 0, &WORK),
+            (256, 2560)
+        );
     }
 
     #[test]
     fn adapt_box_degenerate_media_falls_back() {
-        assert_eq!(adapt_box(480, 270, Some((0, 1080)), &WORK), (480, 270));
-        assert_eq!(adapt_box(480, 270, Some((1920, 0)), &WORK), (480, 270));
+        assert_eq!(adapt_box(480, 270, Some((0, 1080)), 0, &WORK), (480, 270));
+        assert_eq!(adapt_box(480, 270, Some((1920, 0)), 0, &WORK), (480, 270));
     }
 
     #[test]
     fn adapt_box_extreme_wide_floors_height_at_one() {
-        assert_eq!(adapt_box(480, 270, Some((100_000, 1)), &WORK), (480, 1));
+        assert_eq!(adapt_box(480, 270, Some((100_000, 1)), 0, &WORK), (480, 1));
+    }
+
+    #[test]
+    fn adapt_box_unrepresentable_result_falls_back() {
+        // hostile 1 x i32::MAX token: the 256 floor forces h = 256*MAX, unrepresentable
+        assert_eq!(
+            adapt_box(480, 270, Some((1, i32::MAX)), 0, &WORK),
+            (480, 270)
+        );
     }
 
     #[test]

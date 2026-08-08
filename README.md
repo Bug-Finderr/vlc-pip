@@ -22,13 +22,13 @@ Restart VLC afterwards. Uninstall the same way with `scripts\uninstall.ps1`.
 
 ## Configure
 
-The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look) as startup-shortcut arguments, e.g. `daemon w=640 h=360 c=tr`. Defaults: 480x270, bottom-right, margin 16, `min=1` - minimal look clips the PiP to just the video, no menu or control bar.
+The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look) as startup-shortcut arguments, e.g. `daemon w=640 h=360 c=tr`. Defaults: 480x270, bottom-right, margin 16, `min=1` - minimal look clips the PiP to just the video, no menu or control bar. Entering from the View menu adapts the box to the playing video's aspect ratio (the configured width stays the size knob); the hotkey and CLI use the configured size as-is.
 
 ## Controls
 
 - **Move**: drag anywhere inside the PiP - it stays where you drop it.
 - **Resize**: drag the outer edge or corner band, about 16 px and DPI-scaled - aspect-locked, with a 256 px minimum and a nominal 80% work-area cap (the minimum wins on unusually small work areas).
-- Size and nearest corner persist to `%APPDATA%\vlc\pip\config.txt` on release and are reused on the next PiP enter (startup arguments still win; delete the file to reset).
+- Size and nearest corner persist to `%APPDATA%\vlc\pip\config.txt` on release and are reused on the next PiP enter (startup arguments still win; a menu enter re-derives the height from the playing video; delete the file to reset).
 - **Volume**: the mouse wheel already works over the PiP without focusing it (Windows' "scroll inactive windows" is on by default); Ctrl+wheel scales subtitles.
 
 ## Notes

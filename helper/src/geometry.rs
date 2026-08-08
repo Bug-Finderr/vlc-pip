@@ -184,9 +184,17 @@ pub fn plan_move(start: &Rect, dx: i64, dy: i64) -> Option<Rect> {
 
 /// Media-adapted PiP box for enter: keep the configured width as the size knob and
 /// follow the video's aspect, shrinking at that aspect when the height would exceed
-/// 80% of the work area; the 256px floor wins over the cap, matching plan_resize.
-/// No media or degenerate dimensions fall back to the configured box.
-pub fn adapt_box(o_w: i32, o_h: i32, media: Option<(i32, i32)>, work: &Rect) -> (i32, i32) {
+/// 80% of the work area minus `chrome_h` - the same envelope as plan_resize's cap, or
+/// an adapted enter would land a box the first resize drag immediately shrinks. The
+/// 256px floor wins over the cap, matching plan_resize. No media or degenerate
+/// dimensions fall back to the configured box.
+pub fn adapt_box(
+    o_w: i32,
+    o_h: i32,
+    media: Option<(i32, i32)>,
+    chrome_h: i32,
+    work: &Rect,
+) -> (i32, i32) {
     let Some((mw, mh)) = media else {
         return (o_w, o_h);
     };
@@ -195,7 +203,7 @@ pub fn adapt_box(o_w: i32, o_h: i32, media: Option<(i32, i32)>, work: &Rect) -> 
     }
     let mut w = i64::from(o_w);
     let mut h = (w * i64::from(mh) / i64::from(mw)).max(1);
-    let max_h = i64::from(work.bottom - work.top) * 4 / 5;
+    let max_h = i64::from(work.bottom - work.top) * 4 / 5 - i64::from(chrome_h);
     if h > max_h {
         h = max_h.max(1);
         w = (h * i64::from(mw) / i64::from(mh)).max(1);

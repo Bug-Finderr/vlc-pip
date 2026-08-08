@@ -500,12 +500,14 @@ pub fn enter(h: isize, o: &PipOptions, media: Option<(i32, i32)>) -> bool {
     }
 
     // With the restored geometry available, validate the complete landing before
-    // writing restoration state or applying any PiP mutation.
-    let (bw, bh) = geometry::adapt_box(o.w, o.h, media, &work_area(h));
+    // writing restoration state or applying any PiP mutation. The measured chrome
+    // feeds the adaptation cap so enter and plan_resize share one 80% envelope.
+    let chrome = if o.min { client_chrome(h) } else { None };
+    let chrome_h = chrome.map_or(0, |(_, t, _, b)| t + b);
+    let (bw, bh) = geometry::adapt_box(o.w, o.h, media, chrome_h, &work_area(h));
     let Some((vx, vy)) = geometry::compute_corner(&work_area(h), bw, bh, o.corner, o.margin) else {
         return false;
     };
-    let chrome = if o.min { client_chrome(h) } else { None };
     let (x, y, tw, th, clip) = match chrome {
         Some((cl, ct, cr, cb)) => {
             let Some(x) = vx.checked_sub(cl) else {
