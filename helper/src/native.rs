@@ -707,6 +707,28 @@ pub fn toggle(o: &PipOptions, media: Option<(i32, i32)>) -> bool {
     }
 }
 
+/// Retarget a live session to the playing video: the same box math as enter (configured
+/// width knob, media aspect, shared 80% envelope) with the chrome measured now. True
+/// when the box already matches or the new target was saved; false leaves the caller's
+/// last-settled dims unchanged so a transient save failure retries next tick.
+pub fn adapt_session(s: &mut PipState, media: (i32, i32), o: &PipOptions) -> bool {
+    let chrome_h = client_chrome(s.hwnd).map_or(0, |(_, t, _, b)| t + b);
+    let (bw, bh) = geometry::adapt_box(o.w, o.h, Some(media), chrome_h, &work_area(s.hwnd));
+    if (bw, bh) == (s.target_w, s.target_h) {
+        return true;
+    }
+    let updated = PipState {
+        target_w: bw,
+        target_h: bh,
+        ..*s
+    };
+    if state::save(&updated, &state::state_path()).is_err() {
+        return false;
+    }
+    *s = updated;
+    true
+}
+
 // ---- status -------------------------------------------------------------------------
 
 pub fn status() -> String {
@@ -743,6 +765,7 @@ pub fn status() -> String {
 pub struct RegionTracker {
     prev: Option<(geometry::Rect, geometry::Rect)>,
     alive_prev: Option<geometry::Rect>,
+    media: Option<(i32, i32)>,
     heal_tries: u32,
     heal_wait: u8,
 }
@@ -757,6 +780,17 @@ impl RegionTracker {
     pub(crate) fn reset_watch(&mut self) {
         self.prev = None;
         self.alive_prev = None;
+        self.media = None;
+    }
+
+    /// The last media dims the session settled its box to (None = not yet known,
+    /// so the first fresh publication always reconciles the box once).
+    pub(crate) fn media(&self) -> Option<(i32, i32)> {
+        self.media
+    }
+
+    pub(crate) fn set_media(&mut self, m: (i32, i32)) {
+        self.media = Some(m);
     }
 
     /// Our own legitimate move (gesture apply, enter landing): adopt the rect as the
@@ -1106,6 +1140,7 @@ mod internal_tests {
         let mut tracker = RegionTracker {
             prev: Some((previous, previous)),
             alive_prev: Some(baseline),
+            media: Some((1920, 800)),
             heal_tries: 9,
             heal_wait: 6,
         };
@@ -1114,6 +1149,7 @@ mod internal_tests {
 
         assert_eq!(tracker.prev, None);
         assert_eq!(tracker.alive_prev, Some(baseline));
+        assert_eq!(tracker.media(), Some((1920, 800)));
         assert_eq!(tracker.heal_tries, 9);
         assert_eq!(tracker.heal_wait, 6);
     }
@@ -1125,6 +1161,7 @@ mod internal_tests {
         let mut tracker = RegionTracker {
             prev: Some((previous, previous)),
             alive_prev: Some(baseline),
+            media: Some((1920, 800)),
             heal_tries: 9,
             heal_wait: 6,
         };
@@ -1133,6 +1170,7 @@ mod internal_tests {
 
         assert_eq!(tracker.prev, None);
         assert_eq!(tracker.alive_prev, None);
+        assert_eq!(tracker.media(), None);
         assert_eq!(tracker.heal_tries, 0);
         assert_eq!(tracker.heal_wait, 0);
     }
@@ -1143,6 +1181,7 @@ mod internal_tests {
         let mut tracker = RegionTracker {
             prev: Some((baseline, baseline)),
             alive_prev: Some(baseline),
+            media: Some((1920, 800)),
             heal_tries: 9,
             heal_wait: 6,
         };
@@ -1151,6 +1190,7 @@ mod internal_tests {
 
         assert_eq!(tracker.prev, None);
         assert_eq!(tracker.alive_prev, None);
+        assert_eq!(tracker.media(), None);
         assert_eq!(tracker.heal_tries, 9); // heal cadence is not session-scoped
         assert_eq!(tracker.heal_wait, 6);
     }

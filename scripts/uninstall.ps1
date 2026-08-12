@@ -17,11 +17,15 @@ catch {
     throw $restoreError
 }
 
+Disable-VlcIntfCompanion "$env:APPDATA\vlc\vlcrc"
+
 $files = @(
     "$env:APPDATA\vlc\lua\extensions\pip.lua",
+    "$env:APPDATA\vlc\lua\intf\pip.lua",
     ([Environment]::GetFolderPath("Startup") + "\VLC PiP Daemon.lnk"),
     $requestPath,
     $alivePath,
+    "$env:TEMP\vlc-pip-media.txt",
     "$env:TEMP\vlc-pip-status.json",
     "$env:TEMP\vlc-pip-crash.txt",
     "$env:TEMP\vlc-pip.json"

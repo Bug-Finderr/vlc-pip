@@ -47,12 +47,16 @@ fn run() -> i32 {
     match mode.as_str() {
         "toggle" => {
             let o = options::effective(tail);
-            one_shot(locked(|| native::toggle(&o, None)).unwrap_or(false), &o)
+            one_shot(
+                locked(|| native::toggle(&o, state::fresh_media())).unwrap_or(false),
+                &o,
+            )
         }
         "enter" => {
             let o = options::effective(tail);
             one_shot(
-                locked(|| native::enter(native::find_player(), &o, None)).unwrap_or(false),
+                locked(|| native::enter(native::find_player(), &o, state::fresh_media()))
+                    .unwrap_or(false),
                 &o,
             )
         }

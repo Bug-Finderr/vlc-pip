@@ -876,6 +876,28 @@ mod state {
 
     const FULL: &str = "66112 100 200 1000 640 349110272 256 480 270 br 16 1 12345\n";
 
+    #[test]
+    fn media_token_parses_only_positive_v_pairs() {
+        assert_eq!(parse_media(Some("v=1920x816")), Some((1920, 816)));
+        assert_eq!(parse_media(Some("v=0x816")), None);
+        assert_eq!(parse_media(Some("v=1920x-1")), None);
+        assert_eq!(parse_media(Some("1920x816")), None);
+        assert_eq!(parse_media(Some("v=1920")), None);
+        assert_eq!(parse_media(None), None);
+    }
+
+    #[test]
+    fn media_line_gates_on_epoch_freshness() {
+        assert_eq!(parse_media_line("1000 v=1920x816", 1000), Some((1920, 816)));
+        assert_eq!(parse_media_line("1000 v=1920x816", 1004), Some((1920, 816)));
+        assert_eq!(parse_media_line("1000 v=1920x816", 1005), None); // stale publisher
+        assert_eq!(parse_media_line("1004 v=1920x816", 1000), Some((1920, 816))); // skew
+        assert_eq!(parse_media_line("1000 -", 1000), None); // no sized video
+        assert_eq!(parse_media_line("v=1920x816", 1000), None); // no epoch
+        assert_eq!(parse_media_line("", 1000), None);
+        assert_eq!(parse_media_line("1000", 1000), None);
+    }
+
     fn tmp(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("pip-state-test-{name}-{}.txt", std::process::id()))
     }

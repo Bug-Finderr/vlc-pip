@@ -69,14 +69,13 @@ struct Click {
     swallow_next_up: bool,
 }
 
-/// Cached owned PiP (hwnd 0 = none). The snapshot detects external session changes
+/// Cached owned PiP (hwnd 0 = none). The (hwnd, pid) identity detects session changes
 /// before queued gesture work is applied.
 #[derive(Clone, Copy, Default)]
 struct Pip {
     hwnd: isize,
     fs: bool,
     pid: u32,
-    snapshot: Option<PipState>,
 }
 
 thread_local! {
@@ -112,11 +111,15 @@ fn sync_session(
             hwnd: s.hwnd,
             fs: native::fs_origin(s.style),
             pid: s.pid,
-            snapshot: Some(s),
         });
     PIP.set(pip);
 
-    if previous.snapshot != pip.snapshot {
+    // Reset on session IDENTITY change only (window/owner; a vacant session is (0, 0)).
+    // The daemon's own parameter rewrites - drag release, media retarget - must not
+    // read as a new session: that wiped the vout-death baseline exactly during
+    // playlist vout gaps, killed gestures armed around a media change, and let the
+    // retarget re-fire against argv options right after a resize drag.
+    if (previous.hwnd, previous.pid) != (pip.hwnd, pip.pid) {
         reset_input_state();
         tracker.reset_watch(); // a new session must not inherit the old vout-death baseline
     }
@@ -251,23 +254,39 @@ pub fn run(argv: &[String]) -> i32 {
             tracker.reset_debounce();
         }
         if msg.message == WM_HOTKEY {
-            native::toggle(&options::effective(argv), None);
+            let media = state::fresh_media();
+            native::toggle(&options::effective(argv), media);
             sync_session(&mut hooks, &mut tracker, state::load(&state::state_path()));
-            seed_watch(&mut tracker);
+            seed_watch(&mut tracker, media);
         } else if msg.message == WM_TIMER {
             let entered = poll_request(argv);
             // The normal tick shares one post-request snapshot between session sync and
             // maintenance. A terminal maintenance change alone triggers a second load.
-            let s = state::load(&state::state_path());
+            let mut s = state::load(&state::state_path());
             sync_session(&mut hooks, &mut tracker, s);
-            if entered {
-                seed_watch(&mut tracker);
+            if let Some(media) = entered {
+                seed_watch(&mut tracker, media);
             }
             let pip = PIP.get();
             if pip.fs {
                 native::veil_fs_controller(pip.pid);
             }
-            let state_dropped = if DRAG.get().state == DragState::Active {
+            let dragging = DRAG.get().state == DragState::Active;
+            // follow the playing video: freshly published dims that differ from the
+            // last settled ones retarget the box; the converger executes the resize.
+            // Gestures own the window while dragging, and the release overwrites the
+            // target anyway.
+            if !dragging
+                && pip.hwnd != 0
+                && let Some(st) = s.as_mut()
+                && st.min
+                && let Some(m) = state::fresh_media()
+                && tracker.media() != Some(m)
+                && native::adapt_session(st, m, &options::effective(argv))
+            {
+                tracker.set_media(m);
+            }
+            let state_dropped = if dragging {
                 tracker.reset_debounce(); // gestures own the window while dragging
                 false
             } else {
@@ -363,55 +382,51 @@ fn pointer_delta(current: i32, origin: i32) -> i64 {
     i64::from(current) - i64::from(origin)
 }
 
-/// True when the request may have STARTED a session - the caller then seeds the watch.
-fn poll_request(argv: &[String]) -> bool {
-    let Some(req) = state::consume_request(&state::request_path()) else {
-        return false;
-    };
+/// Some(dims) when the request may have STARTED a session with those media dims - the
+/// caller then seeds the watch; None for exit/stop/garbage.
+fn poll_request(argv: &[String]) -> Option<Option<(i32, i32)>> {
+    let req = state::consume_request(&state::request_path())?;
     let mut tokens = req.split_whitespace();
+    // explicit v= from the menu trigger wins (probed at the click); the intf script's
+    // published dims cover hotkey/CLI/bare requests
     match tokens.next() {
         Some("toggle") => {
-            native::toggle(&options::effective(argv), parse_media(tokens.next()));
-            true
+            let media = state::parse_media(tokens.next()).or_else(state::fresh_media);
+            native::toggle(&options::effective(argv), media);
+            Some(media)
         }
         Some("enter") => {
-            native::enter(
-                native::find_player(),
-                &options::effective(argv),
-                parse_media(tokens.next()),
-            );
-            true
+            let media = state::parse_media(tokens.next()).or_else(state::fresh_media);
+            native::enter(native::find_player(), &options::effective(argv), media);
+            Some(media)
         }
         Some("exit") => {
             native::exit_pip();
-            false
+            None
         }
         Some("stop") => {
             unsafe { PostQuitMessage(0) };
-            false
+            None
         }
-        _ => false,
+        _ => None,
     }
 }
 
-/// Seed the vout-death baseline with a fresh enter's landing rect: Qt's balloon can
-/// arrive before the first tick ever sees a live video child (enter while stopped, or
-/// media ending within the same tick as the enter).
-fn seed_watch(tracker: &mut native::RegionTracker) {
+/// Seed the fresh session: the vout-death baseline gets the landing rect (Qt's balloon
+/// can arrive before the first tick ever sees a live video child), and the dims the
+/// enter shaped the box to become the settled media - the intf publication lags item
+/// changes by up to ~300ms, and a staler line must not retarget the fresh box backwards.
+fn seed_watch(tracker: &mut native::RegionTracker, media: Option<(i32, i32)>) {
     let pip = PIP.get();
-    if pip.hwnd != 0
-        && let Some(r) = native::window_rect(pip.hwnd)
-    {
+    if pip.hwnd == 0 {
+        return;
+    }
+    if let Some(r) = native::window_rect(pip.hwnd) {
         tracker.note_own_rect(&r);
     }
-}
-
-/// Optional `v=WxH` request token: the extension's media video dimensions. Anything
-/// malformed or nonpositive is None - the enter then keeps the configured box.
-fn parse_media(token: Option<&str>) -> Option<(i32, i32)> {
-    let (w, h) = token?.strip_prefix("v=")?.split_once('x')?;
-    let (w, h) = (w.parse().ok()?, h.parse().ok()?);
-    (w > 0 && h > 0).then_some((w, h))
+    if let Some(m) = media {
+        tracker.set_media(m);
+    }
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -610,16 +625,6 @@ mod internal_tests {
         assert_eq!(click.x, 20);
         assert_eq!(click.y, 30);
         assert!(!click.swallow_next_up);
-    }
-
-    #[test]
-    fn media_token_parses_only_positive_v_pairs() {
-        assert_eq!(parse_media(Some("v=1920x816")), Some((1920, 816)));
-        assert_eq!(parse_media(Some("v=0x816")), None);
-        assert_eq!(parse_media(Some("v=1920x-1")), None);
-        assert_eq!(parse_media(Some("1920x816")), None);
-        assert_eq!(parse_media(Some("v=1920")), None);
-        assert_eq!(parse_media(None), None);
     }
 
     #[test]

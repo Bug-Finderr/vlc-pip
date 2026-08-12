@@ -14,6 +14,8 @@ if ($null -eq $exeSource) {
 
 $luaSource = "$root\extension\pip.lua"
 if (-not (Test-Path -LiteralPath $luaSource -PathType Leaf)) { throw "extension\pip.lua is missing" }
+$intfSource = "$root\extension\pip-intf.lua"
+if (-not (Test-Path -LiteralPath $intfSource -PathType Leaf)) { throw "extension\pip-intf.lua is missing" }
 
 $pipDir = "$env:APPDATA\vlc\pip"
 $installedExe = "$pipDir\pip-helper.exe"
@@ -36,10 +38,14 @@ foreach ($path in @($requestPath, $alivePath, "$env:TEMP\vlc-pip.json")) {
 }
 
 $extensionDir = "$env:APPDATA\vlc\lua\extensions"
+$intfDir = "$env:APPDATA\vlc\lua\intf"
 New-Item -ItemType Directory -Path $pipDir -Force | Out-Null
 New-Item -ItemType Directory -Path $extensionDir -Force | Out-Null
+New-Item -ItemType Directory -Path $intfDir -Force | Out-Null
 Copy-Item -LiteralPath $exeSource -Destination $installedExe -Force
 Copy-Item -LiteralPath $luaSource -Destination "$extensionDir\pip.lua" -Force
+Copy-Item -LiteralPath $intfSource -Destination "$intfDir\pip.lua" -Force
+$null = Enable-VlcIntfCompanion "$env:APPDATA\vlc\vlcrc"
 
 $startup = [Environment]::GetFolderPath("Startup")
 $shell = New-Object -ComObject WScript.Shell

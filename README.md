@@ -22,7 +22,7 @@ Restart VLC afterwards. Uninstall the same way with `scripts\uninstall.ps1`.
 
 ## Configure
 
-The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look) as startup-shortcut arguments, e.g. `daemon w=640 h=360 c=tr`. Defaults: 480x270, bottom-right, margin 16, `min=1` - minimal look clips the PiP to just the video, no menu or control bar. Entering from the View menu adapts the box to the playing video's aspect ratio (the configured width stays the size knob); the hotkey and CLI use the configured size as-is.
+The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal look) as startup-shortcut arguments, e.g. `daemon w=640 h=360 c=tr`. Defaults: 480x270, bottom-right, margin 16, `min=1` - minimal look clips the PiP to just the video, no menu or control bar. The box follows the playing video's aspect ratio (the configured width stays the size knob): every enter adapts to what is playing, and a playlist moving to a differently shaped video reshapes the live box. That tracking comes from a small VLC interface script the installer enables in VLC's config (`vlcrc`: `extraintf=luaintf`, `lua-intf=pip`). If VLC's config already runs its own Lua interface, the installer leaves it alone: the View-menu toggle still adapts, while hotkey/CLI enters use the configured size. On a non-English VLC no adaptation is available at all (the size probe matches VLC's English info key), and everything simply uses the configured size.
 
 ## Controls
 

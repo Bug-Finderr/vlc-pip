@@ -132,6 +132,45 @@ pub fn status_path() -> PathBuf {
     temp_path("vlc-pip-status.json")
 }
 
+// ---- media file (the intf script's continuous now-playing dims) ----------------------
+
+pub fn media_path() -> PathBuf {
+    temp_path("vlc-pip-media.txt")
+}
+
+/// Media token parse, shared by the request channel and the media file: `v=WxH` with
+/// both in 1..=16384, anything else None (the enter then keeps the configured box).
+/// The upper bound rejects hybrid lines from two VLC instances' interleaved buffered
+/// writes (e.g. "v=640x48060"), which parse cleanly but would steer an absurd box.
+pub fn parse_media(token: Option<&str>) -> Option<(i32, i32)> {
+    let (w, h) = token?.strip_prefix("v=")?.split_once('x')?;
+    let (w, h): (i32, i32) = (w.parse().ok()?, h.parse().ok()?);
+    let sane = 1..=16384;
+    (sane.contains(&w) && sane.contains(&h)).then_some((w, h))
+}
+
+/// One line "epoch v=WxH" or "epoch -", rewritten ~3x/second by the intf script. The
+/// epoch gates freshness like the daemon heartbeat: a VLC without the intf (or a dead
+/// one) must never steer the box with stale dimensions.
+pub(crate) fn parse_media_line(line: &str, now_epoch: u64) -> Option<(i32, i32)> {
+    let mut tokens = line.split_whitespace();
+    let epoch: u64 = tokens.next()?.parse().ok()?;
+    if now_epoch.abs_diff(epoch) >= 5 {
+        return None;
+    }
+    parse_media(tokens.next())
+}
+
+/// The currently playing video's dimensions, when the intf script is publishing.
+pub fn fresh_media() -> Option<(i32, i32)> {
+    let line = std::fs::read_to_string(media_path()).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    parse_media_line(&line, now)
+}
+
 pub fn consume_request(path: &Path) -> Option<String> {
     let cmd = std::fs::read_to_string(path).ok()?; // missing or mid-write: retry next poll
     std::fs::remove_file(path).ok()?; // couldn't delete: leave the command for next poll

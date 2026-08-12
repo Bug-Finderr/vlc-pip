@@ -40,12 +40,13 @@ jobs:
           New-Item -ItemType Directory -Path $stage, "$stage\extension", "$stage\scripts", "$stage\docs" | Out-Null
           Copy-Item helper\target\release\pip-helper.exe "$stage\pip-helper.exe"
           Copy-Item extension\pip.lua "$stage\extension\pip.lua"
+          Copy-Item extension\pip-intf.lua "$stage\extension\pip-intf.lua"
           Copy-Item scripts\common.ps1, scripts\install.ps1, scripts\uninstall.ps1, scripts\smoke-test.ps1 "$stage\scripts"
           Copy-Item docs\* "$stage\docs" -Recurse
           Copy-Item README.md, LICENSE $stage
 
           $required = @(
-            "pip-helper.exe", "extension\pip.lua", "scripts\common.ps1",
+            "pip-helper.exe", "extension\pip.lua", "extension\pip-intf.lua", "scripts\common.ps1",
             "scripts\install.ps1", "scripts\uninstall.ps1", "scripts\smoke-test.ps1",
             "README.md", "LICENSE", "docs\SPEC.md", "docs\ARCHITECTURE.md"
           )
