@@ -97,7 +97,11 @@ fn reset_input_state() {
     });
 }
 
-fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
+fn sync_session(
+    hooks: &mut (HHOOK, HHOOK),
+    tracker: &mut native::RegionTracker,
+    s: Option<PipState>,
+) {
     // full owner-PID guard (not just IsWindow): pending heal records keep stale states
     // alive indefinitely, so a recycled HWND must never re-arm the guards - or drags -
     // on a foreign window
@@ -114,6 +118,7 @@ fn sync_session(hooks: &mut (HHOOK, HHOOK), s: Option<PipState>) {
 
     if previous.snapshot != pip.snapshot {
         reset_input_state();
+        tracker.reset_watch(); // a new session must not inherit the old vout-death baseline
     }
 
     if pip.hwnd != 0 {
@@ -209,12 +214,12 @@ pub fn run(argv: &[String]) -> i32 {
         unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
         return 1;
     };
-    sync_session(&mut hooks, state::load(&state::state_path()));
+    let mut tracker = native::RegionTracker::default();
+    sync_session(&mut hooks, &mut tracker, state::load(&state::state_path()));
     drop(initial_transition);
     OWNS_ALIVE_FILE.store(true, Relaxed);
     beat(&mut last_beat, &hooks);
 
-    let mut tracker = native::RegionTracker::default();
     let mut transition_contended = false;
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -247,13 +252,17 @@ pub fn run(argv: &[String]) -> i32 {
         }
         if msg.message == WM_HOTKEY {
             native::toggle(&options::effective(argv), None);
-            sync_session(&mut hooks, state::load(&state::state_path()));
+            sync_session(&mut hooks, &mut tracker, state::load(&state::state_path()));
+            seed_watch(&mut tracker);
         } else if msg.message == WM_TIMER {
-            poll_request(argv);
+            let entered = poll_request(argv);
             // The normal tick shares one post-request snapshot between session sync and
             // maintenance. A terminal maintenance change alone triggers a second load.
             let s = state::load(&state::state_path());
-            sync_session(&mut hooks, s);
+            sync_session(&mut hooks, &mut tracker, s);
+            if entered {
+                seed_watch(&mut tracker);
+            }
             let pip = PIP.get();
             if pip.fs {
                 native::veil_fs_controller(pip.pid);
@@ -265,20 +274,20 @@ pub fn run(argv: &[String]) -> i32 {
                 native::maintain_region(&mut tracker, s)
             };
             if state_dropped {
-                sync_session(&mut hooks, state::load(&state::state_path()));
+                sync_session(&mut hooks, &mut tracker, state::load(&state::state_path()));
             }
             if last_beat.elapsed() > Duration::from_secs(3) {
                 beat(&mut last_beat, &hooks);
             }
         } else if msg.message == WM_APP_DRAG || msg.message == WM_APP_DRAGEND {
-            sync_session(&mut hooks, state::load(&state::state_path()));
+            sync_session(&mut hooks, &mut tracker, state::load(&state::state_path()));
             if PIP.get().hwnd != 0 {
                 on_drag_msg(&msg, &mut tracker);
             }
         }
     }
 
-    sync_session(&mut hooks, None);
+    sync_session(&mut hooks, &mut tracker, None);
     unsafe { UnregisterHotKey(std::ptr::null_mut(), 1) };
     let _ = std::fs::remove_file(&alive);
     OWNS_ALIVE_FILE.store(false, Relaxed);
@@ -333,6 +342,9 @@ fn on_drag_msg(msg: &MSG, tracker: &mut native::RegionTracker) {
     } else {
         native::drag_move(d.hwnd, &target);
     }
+    // our own move, not Qt taking over: keep the vout-death hold off a dragged
+    // childless (stopped) PiP
+    tracker.note_own_rect(&target);
     if msg.message == WM_APP_DRAGEND {
         // finalize from OUR computed rect: the async SetWindowPos above has not landed
         // in VLC yet, so a fresh GetWindowRect would be stale
@@ -351,14 +363,16 @@ fn pointer_delta(current: i32, origin: i32) -> i64 {
     i64::from(current) - i64::from(origin)
 }
 
-fn poll_request(argv: &[String]) {
+/// True when the request may have STARTED a session - the caller then seeds the watch.
+fn poll_request(argv: &[String]) -> bool {
     let Some(req) = state::consume_request(&state::request_path()) else {
-        return;
+        return false;
     };
     let mut tokens = req.split_whitespace();
     match tokens.next() {
         Some("toggle") => {
             native::toggle(&options::effective(argv), parse_media(tokens.next()));
+            true
         }
         Some("enter") => {
             native::enter(
@@ -366,12 +380,29 @@ fn poll_request(argv: &[String]) {
                 &options::effective(argv),
                 parse_media(tokens.next()),
             );
+            true
         }
         Some("exit") => {
             native::exit_pip();
+            false
         }
-        Some("stop") => unsafe { PostQuitMessage(0) },
-        _ => {}
+        Some("stop") => {
+            unsafe { PostQuitMessage(0) };
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Seed the vout-death baseline with a fresh enter's landing rect: Qt's balloon can
+/// arrive before the first tick ever sees a live video child (enter while stopped, or
+/// media ending within the same tick as the enter).
+fn seed_watch(tracker: &mut native::RegionTracker) {
+    let pip = PIP.get();
+    if pip.hwnd != 0
+        && let Some(r) = native::window_rect(pip.hwnd)
+    {
+        tracker.note_own_rect(&r);
     }
 }
 

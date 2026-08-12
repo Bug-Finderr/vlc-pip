@@ -80,6 +80,13 @@ fn run() -> i32 {
 fn one_shot(ok: bool, o: &options::PipOptions) -> i32 {
     if ok && o.min && native::in_pip() {
         let mut tracker = native::RegionTracker::default();
+        // seed the vout-death baseline with the landing rect - Qt's balloon can arrive
+        // before any iteration sees a live video child
+        if let Some(s) = state::load(&state::state_path()).filter(native::owns_state)
+            && let Some(r) = native::window_rect(s.hwnd)
+        {
+            tracker.note_own_rect(&r);
+        }
         for _ in 0..6 {
             // debounce needs ~4 ticks: measure, resize, measure, region
             std::thread::sleep(std::time::Duration::from_millis(150));

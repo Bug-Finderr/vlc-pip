@@ -787,6 +787,43 @@ try {
     $vlcProc.CloseMainWindow() | Out-Null
     if (-not $vlcProc.WaitForExit(8000)) { throw "healed VLC did not close cleanly" }
     $preserveHealAfterStop = $false
+
+    # stop inside a WINDOWED pip: Qt releases the video widget and balloons the window
+    # to its remembered pre-video size (qt-video-autoresize, default on) and drops
+    # topmost - the daemon must snap the frame back to the last live rect and keep the
+    # session, so the box never balloons for more than a tick and exit still restores
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    $stopBaseline = WaitForStableStatus { param($status) $status.found -and $status.caption } 6000 300
+    if (-not $stopBaseline.Matched) { throw "windowed-stop setup failed: window did not stabilize" }
+    $wsb = $stopBaseline.Status
+    Req "enter"
+    $wsReady = WaitForStableStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and (Test-Path "$env:TEMP\vlc-pip.state")
+    } 4000 150
+    if (-not $wsReady.Matched) { throw "windowed-stop precondition failed: PiP did not settle" }
+    $pipShape = $wsReady.Status
+    PostKey $pipShape.hwnd 0x53 0x1F                             # S = VLC stop
+    # region cleared = the vout actually died; without this gate a still-playing PiP
+    # would satisfy every hold predicate and the check would be vacuous
+    $stopLanded = WaitFor { -not (Status).minimal } 4000 150
+    if (-not $stopLanded) { throw "windowed-stop precondition failed: stop key did not land" }
+    $held = WaitForStableStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and $status.topmost -and
+            (-not $status.minimal) -and
+            (Test-Path "$env:TEMP\vlc-pip.state") -and (SameRect $status $pipShape)
+    } 3000 150
+    Check "stop in windowed pip: box holds against Qt's balloon (topmost, in pip)" $held.Matched
+    Req "exit"
+    $wsRestore = WaitForStatus {
+        param($status)
+        $status.caption -and (-not $status.inPip) -and (SameRect $status $wsb)
+    } 3000 150
+    Check "exit after stopped hold: exact windowed restore" `
+        ($wsRestore.Matched -and $wsRestore.Status.topmost -eq $wsb.topmost)
+    $vlcProc.CloseMainWindow() | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
 }
 finally {
     $cleanupErrors = @()
