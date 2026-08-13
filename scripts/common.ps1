@@ -112,6 +112,84 @@ function Test-DaemonHeartbeat(
     $reportedProcess -eq $processId -and $epoch -ge $notBefore -and [Math]::Abs($now - $epoch) -lt 15
 }
 
+# ---- vlcrc edits for the lua intf companion -------------------------------------------
+# Surgical first-match line edits over the raw text, written back as UTF-8 without BOM
+# (VLC reads vlcrc as UTF-8; PowerShell 5's Set-Content default is ANSI and would
+# corrupt non-ASCII values elsewhere in the file).
+
+function Update-FirstLine([string]$text, [string]$pattern, [string]$replacement) {
+    $rx = [regex]::new($pattern, [Text.RegularExpressions.RegexOptions]::Multiline)
+    if (-not $rx.IsMatch($text)) { return $null }
+    $rx.Replace($text, $replacement, 1)
+}
+
+function Enable-VlcIntfCompanion([string]$vlcrc) {
+    if (-not (Test-Path -LiteralPath $vlcrc -PathType Leaf)) {
+        # VLC runs fine without a vlcrc; a minimal one carrying just our keys is valid
+        New-Item -ItemType Directory -Path (Split-Path $vlcrc -Parent) -Force | Out-Null
+        [IO.File]::WriteAllText($vlcrc, "[lua]`nlua-intf=pip`n`n[core]`nextraintf=luaintf`n",
+            [Text.UTF8Encoding]::new($false))
+        return $true
+    }
+    $text = [IO.File]::ReadAllText($vlcrc)
+    $nl = if ($text -match "`r`n") { "`r`n" } else { "`n" }
+
+    $current = [regex]::Match($text, '(?m)^lua-intf=([^\r\n]*)')
+    if ($current.Success -and $current.Groups[1].Value.Trim() -ne 'pip') {
+        # never displace a lua interface the user configured themselves; the menu
+        # toggle still adapts, only hotkey/playlist adaptation is skipped
+        Write-Warning "vlcrc already sets lua-intf=$($current.Groups[1].Value.Trim()); skipping auto-adaptation setup"
+        return $false
+    }
+    if (-not $current.Success) {
+        $updated = Update-FirstLine $text '^#lua-intf=[^\r\n]*' 'lua-intf=pip'
+        if ($null -eq $updated) { $updated = Update-FirstLine $text '^\[lua\][^\r\n]*' ('$0' + $nl + 'lua-intf=pip') }
+        if ($null -eq $updated) { $updated = $text.TrimEnd() + $nl + $nl + '[lua]' + $nl + 'lua-intf=pip' + $nl }
+        $text = $updated
+    }
+
+    $extra = [regex]::Match($text, '(?m)^extraintf=([^\r\n]*)')
+    if ($extra.Success) {
+        $modules = @($extra.Groups[1].Value.Trim() -split ':' | Where-Object { $_ })
+        if ($modules -notcontains 'luaintf') {
+            $value = (@($modules) + 'luaintf') -join ':'
+            $text = Update-FirstLine $text '^extraintf=[^\r\n]*' ('extraintf=' + $value)
+        }
+    }
+    else {
+        $updated = Update-FirstLine $text '^#extraintf=[^\r\n]*' 'extraintf=luaintf'
+        if ($null -eq $updated) { $updated = Update-FirstLine $text '^\[core\][^\r\n]*' ('$0' + $nl + 'extraintf=luaintf') }
+        if ($null -eq $updated) { $updated = $text.TrimEnd() + $nl + $nl + '[core]' + $nl + 'extraintf=luaintf' + $nl }
+        $text = $updated
+    }
+    [IO.File]::WriteAllText($vlcrc, $text, [Text.UTF8Encoding]::new($false))
+    $true
+}
+
+function Disable-VlcIntfCompanion([string]$vlcrc) {
+    if (-not (Test-Path -LiteralPath $vlcrc -PathType Leaf)) { return }
+    $text = [IO.File]::ReadAllText($vlcrc)
+
+    # lua-intf=pip is the ownership marker: only when it reverts do we also strip
+    # luaintf from extraintf. A foreign lua-intf setup (enable declined) keeps both -
+    # that luaintf serves the user's own interface, not ours. The lookahead keeps a
+    # CRLF file's \r out of the replacement.
+    $updated = Update-FirstLine $text '^lua-intf=pip[ \t]*(?=\r?$)' '#lua-intf=dummy'
+    if ($null -eq $updated) { return }
+    $text = $updated
+
+    $extra = [regex]::Match($text, '(?m)^extraintf=([^\r\n]*)')
+    if ($extra.Success) {
+        $modules = @($extra.Groups[1].Value.Trim() -split ':' | Where-Object { $_ })
+        if ($modules -contains 'luaintf') {
+            $kept = @($modules | Where-Object { $_ -ne 'luaintf' })
+            $line = if ($kept.Count) { 'extraintf=' + ($kept -join ':') } else { '#extraintf=' }
+            $text = Update-FirstLine $text '^extraintf=[^\r\n]*' $line
+        }
+    }
+    [IO.File]::WriteAllText($vlcrc, $text, [Text.UTF8Encoding]::new($false))
+}
+
 function Start-InstalledDaemon([string]$executable, [string]$alivePath) {
     $startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $daemon = $null

@@ -421,10 +421,13 @@ try {
     $null = WaitFor { (Status).minimal } 4000 150
     $pip = Status
     $visible = VisibleRect $pip
+    # the intf companion publishes screen://'s size (the primary resolution), so the
+    # first enter adapts: default 480 width, height derived from the primary's aspect
+    $primaryEnterH = [math]::Floor(480 * [Smoke.Keys]::GetSystemMetrics(1) / [Smoke.Keys]::GetSystemMetrics(0))
     Check "enter: pip formed (borderless, topmost, video 480w, region, state)" `
         ((-not $pip.caption) -and $pip.topmost -and $pip.inPip -and $pip.minimal -and
             $visible.Found -and $visible.Right - $visible.Left -eq 480 -and
-            $visible.Bottom - $visible.Top -eq 270)
+            $visible.Bottom - $visible.Top -eq $primaryEnterH)
 
     # Keep separate terminal assertions: a broken five-click guard can fullscreen twice
     # and land back at the starting rect, hiding the regression in its final state.
@@ -787,6 +790,76 @@ try {
     $vlcProc.CloseMainWindow() | Out-Null
     if (-not $vlcProc.WaitForExit(8000)) { throw "healed VLC did not close cleanly" }
     $preserveHealAfterStop = $false
+
+    # stop inside a WINDOWED pip: Qt releases the video widget and balloons the window
+    # to its remembered pre-video size (qt-video-autoresize, default on) and drops
+    # topmost - the daemon must snap the frame back to the last live rect and keep the
+    # session, so the box never balloons for more than a tick and exit still restores
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    $stopBaseline = WaitForStableStatus { param($status) $status.found -and $status.caption } 6000 300
+    if (-not $stopBaseline.Matched) { throw "windowed-stop setup failed: window did not stabilize" }
+    $wsb = $stopBaseline.Status
+    Req "enter"
+    $wsReady = WaitForStableStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and (Test-Path "$env:TEMP\vlc-pip.state")
+    } 4000 150
+    if (-not $wsReady.Matched) { throw "windowed-stop precondition failed: PiP did not settle" }
+    $pipShape = $wsReady.Status
+    PostKey $pipShape.hwnd 0x53 0x1F                             # S = VLC stop
+    # region cleared = the vout actually died; without this gate a still-playing PiP
+    # would satisfy every hold predicate and the check would be vacuous
+    $stopLanded = WaitFor { -not (Status).minimal } 4000 150
+    if (-not $stopLanded) { throw "windowed-stop precondition failed: stop key did not land" }
+    $held = WaitForStableStatus {
+        param($status)
+        $status.inPip -and (-not $status.caption) -and $status.topmost -and
+            (-not $status.minimal) -and
+            (Test-Path "$env:TEMP\vlc-pip.state") -and (SameRect $status $pipShape)
+    } 3000 150
+    Check "stop in windowed pip: box holds against Qt's balloon (topmost, in pip)" $held.Matched
+    Req "exit"
+    $wsRestore = WaitForStatus {
+        param($status)
+        $status.caption -and (-not $status.inPip) -and (SameRect $status $wsb)
+    } 3000 150
+    Check "exit after stopped hold: exact windowed restore" `
+        ($wsRestore.Matched -and $wsRestore.Status.topmost -eq $wsb.topmost)
+    $vlcProc.CloseMainWindow() | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
+
+    # the intf companion publishes the playing video's size, and a bare (hotkey/CLI-
+    # class) enter adapts to it: with a deliberately non-16:9 configured box, the box
+    # must land at the configured width with the height derived from screen://'s
+    # aspect (the primary resolution). Also pins the vlcrc wiring end to end.
+    [IO.File]::WriteAllText($cfg, "w=480 h=200 c=br", [Text.UTF8Encoding]::new($false))
+    # bind the publication to THIS launch: clear any residue and require a newer epoch
+    $mediaPath = "$env:TEMP\vlc-pip-media.txt"
+    if (Test-Path -LiteralPath $mediaPath) { Remove-Item -LiteralPath $mediaPath -Force }
+    $launchedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $vlcProc = Start-Process $vlcPath 'screen://' -PassThru
+    $published = WaitFor {
+        try {
+            $line = [IO.File]::ReadAllText($mediaPath)
+            $line -match '^(\d+) v=\d+x\d+$' -and [long]$Matches[1] -ge $launchedAt -and
+                [Math]::Abs([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$Matches[1]) -lt 5
+        }
+        catch { $false }
+    } 12000 250
+    Check "intf companion: fresh media publication while playing" $published
+    $adaptBaseline = WaitForStableStatus { param($status) $status.found -and $status.caption } 6000 300
+    if (-not $adaptBaseline.Matched) { throw "adaptation setup failed: window did not stabilize" }
+    $sx = [Smoke.Keys]::GetSystemMetrics(0); $sy = [Smoke.Keys]::GetSystemMetrics(1)
+    $expectedH = [math]::Floor(480 * $sy / $sx)
+    Req "enter"
+    $adapted = WaitForStableVisibleRect { param($status) $status.inPip -and $status.minimal } 5000
+    $adaptedBox = $adapted.Rect
+    Check "bare enter adapts to the published video size" `
+        (($adaptedBox.Right - $adaptedBox.Left) -eq 480 -and ($adaptedBox.Bottom - $adaptedBox.Top) -eq $expectedH)
+    Req "exit"
+    $null = WaitForStatus { param($status) (-not $status.inPip) -and $status.caption } 3000 150
+    $vlcProc.CloseMainWindow() | Out-Null
+    if (-not $vlcProc.WaitForExit(8000)) { Stop-Process -Id $vlcProc.Id -Force -Confirm:$false }
 }
 finally {
     $cleanupErrors = @()

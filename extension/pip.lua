@@ -3,7 +3,7 @@
 function descriptor()
     return {
         title = "PiP Mode",
-        version = "2.1.3",
+        version = "2.1.4",
         author = "Sudharsan",
         shortdesc = "PiP Mode",
         description = "Toggle VLC into a borderless always-on-top corner window",
@@ -12,9 +12,11 @@ function descriptor()
 end
 
 -- Keep env lookups lazy: VLC probes descriptor() by executing the chunk top level,
--- where an error makes the extension disappear from the View menu.
+-- where an error makes the extension disappear from the View menu. TMP before TEMP:
+-- the daemon resolves %TEMP% via GetTempPath, which checks TMP first, and a machine
+-- where the two differ must not split the request channel.
 local function temp_dir()
-    return (os.getenv("TEMP") or os.getenv("TMP") or ".")
+    return (os.getenv("TMP") or os.getenv("TEMP") or ".")
 end
 
 local function appdata_dir()

@@ -707,6 +707,28 @@ pub fn toggle(o: &PipOptions, media: Option<(i32, i32)>) -> bool {
     }
 }
 
+/// Retarget a live session to the playing video: the same box math as enter (configured
+/// width knob, media aspect, shared 80% envelope) with the chrome measured now. True
+/// when the box already matches or the new target was saved; false leaves the caller's
+/// last-settled dims unchanged so a transient save failure retries next tick.
+pub fn adapt_session(s: &mut PipState, media: (i32, i32), o: &PipOptions) -> bool {
+    let chrome_h = client_chrome(s.hwnd).map_or(0, |(_, t, _, b)| t + b);
+    let (bw, bh) = geometry::adapt_box(o.w, o.h, Some(media), chrome_h, &work_area(s.hwnd));
+    if (bw, bh) == (s.target_w, s.target_h) {
+        return true;
+    }
+    let updated = PipState {
+        target_w: bw,
+        target_h: bh,
+        ..*s
+    };
+    if state::save(&updated, &state::state_path()).is_err() {
+        return false;
+    }
+    *s = updated;
+    true
+}
+
 // ---- status -------------------------------------------------------------------------
 
 pub fn status() -> String {
@@ -732,14 +754,18 @@ pub fn status() -> String {
 // ---- minimal look (Ctrl+H-like) via SetWindowRgn on the video child area -------------
 
 // Cross-tick converger memory. `prev` holds last tick's (window, child) rects for the
-// stability debounce; `fs_prev` is the fullscreen-origin dissolve watch's baseline (the
-// window rect last seen WITH a live video child); `heal_tries` bounds the reopen heal
-// so an unhealable window (e.g. elevated VLC: UIPI silently swallows the SetWindowPos)
-// is never fought forever; `heal_wait` throttles snapshots only while VLC is absent.
+// stability debounce; `alive_prev` is the vout-death watch's baseline (the window rect
+// last seen WITH a live video child, seeded by a daemon enter, or applied by our own
+// gesture) - the daemon resets it via reset_watch whenever its session snapshot
+// changes, so a fresh PiP never inherits a stale baseline; `heal_tries` bounds the
+// reopen heal so an unhealable window (e.g. elevated VLC: UIPI silently swallows the
+// SetWindowPos) is never fought forever; `heal_wait` throttles snapshots only while
+// VLC is absent.
 #[derive(Default)]
 pub struct RegionTracker {
     prev: Option<(geometry::Rect, geometry::Rect)>,
-    fs_prev: Option<geometry::Rect>,
+    alive_prev: Option<geometry::Rect>,
+    media: Option<(i32, i32)>,
     heal_tries: u32,
     heal_wait: u8,
 }
@@ -747,6 +773,30 @@ pub struct RegionTracker {
 impl RegionTracker {
     pub fn reset_debounce(&mut self) {
         self.prev = None;
+    }
+
+    /// Session changed (enter, exit, drag release, external transition): drop the
+    /// measurements scoped to the old session.
+    pub(crate) fn reset_watch(&mut self) {
+        self.prev = None;
+        self.alive_prev = None;
+        self.media = None;
+    }
+
+    /// The last media dims the session settled its box to (None = not yet known,
+    /// so the first fresh publication always reconciles the box once).
+    pub(crate) fn media(&self) -> Option<(i32, i32)> {
+        self.media
+    }
+
+    pub(crate) fn set_media(&mut self, m: (i32, i32)) {
+        self.media = Some(m);
+    }
+
+    /// Our own legitimate move (gesture apply, enter landing): adopt the rect as the
+    /// vout-death baseline so the watch never fights it.
+    pub(crate) fn note_own_rect(&mut self, r: &geometry::Rect) {
+        self.alive_prev = Some(*r);
     }
 
     fn finish_state_drop(&mut self, dropped: bool) -> bool {
@@ -801,19 +851,59 @@ pub fn maintain_region(t: &mut RegionTracker, s: Option<PipState>) -> bool {
     t.heal_tries = 0; // a live owned PiP ends any interrupted heal cleanly
     t.heal_wait = 0;
     let h = s.hwnd;
-    let child = find_video_child(h);
+    // rect BEFORE the child probe: if Qt releases the child between the two calls, the
+    // stale pairing is (old rect, no child) - a harmless one-tick delay - never
+    // (balloon rect, live child), which would poison the baseline
     let wr = window_rect(h).unwrap_or_default(); // one snapshot serves watch and debounce
+    let child = find_video_child(h);
 
-    // fullscreen-origin dissolve watch - BEFORE the min gate, it guards every fs session
-    if fs_origin(s.style) {
+    // vout-death watch - BEFORE the min gate, it guards every session. When playback
+    // ends, Qt restores its remembered pre-video interface size and drops topmost,
+    // with no input (SPEC 7). A fullscreen origin must dissolve - Qt left fullscreen
+    // internally. A windowed origin holds: snap the frame back and reassert topmost,
+    // so the box survives media end, stop, and audio-only playlist items. Iconic is
+    // skipped: the minimized shell rect is neither a baseline nor a takeover.
+    if unsafe { IsIconic(hw(h)) } == 0 {
         if child != 0 {
-            t.fs_prev = Some(wr);
-        } else if t.fs_prev.is_some_and(|p| p != wr) {
-            let dropped = dissolve_fs_pip(&s, &path);
-            return t.finish_state_drop(dropped);
+            t.alive_prev = Some(wr);
+        } else if let Some(p) = t.alive_prev.filter(|p| *p != wr) {
+            if fs_origin(s.style) {
+                let dropped = dissolve_fs_pip(&s, &path);
+                return t.finish_state_drop(dropped);
+            }
+            // a re-captioned frame is an exit whose state delete is pending retry,
+            // not Qt's balloon - never snap that back
+            if styles(h).0 & WS_CAPTION as isize != WS_CAPTION as isize {
+                let same_size = (p.right - p.left, p.bottom - p.top)
+                    == (wr.right - wr.left, wr.bottom - wr.top);
+                let anchor = RECT {
+                    left: p.left,
+                    top: p.top,
+                    right: p.right,
+                    bottom: p.bottom,
+                };
+                // Qt's takeover always RESIZES (it restores the remembered pre-video
+                // size): a same-size move is the OS or user relocating the stopped box
+                // (Win+Shift+arrow, monitor changes), and a baseline on a dead monitor
+                // means the OS moved us off it - adopt both instead of fighting them
+                if same_size || unsafe { MonitorFromRect(&anchor, MONITOR_DEFAULTTONULL) }.is_null()
+                {
+                    t.alive_prev = Some(wr);
+                } else {
+                    unsafe {
+                        SetWindowPos(
+                            hw(h),
+                            HWND_TOPMOST,
+                            p.left,
+                            p.top,
+                            p.right - p.left,
+                            p.bottom - p.top,
+                            SWP_NOACTIVATE,
+                        );
+                    }
+                }
+            }
         }
-    } else {
-        t.fs_prev = None;
     }
 
     if !s.min {
@@ -1030,26 +1120,27 @@ mod internal_tests {
         std::fs::create_dir(&path).unwrap();
         let baseline = rect(1, 2, 3, 4);
         let mut tracker = RegionTracker {
-            fs_prev: Some(baseline),
+            alive_prev: Some(baseline),
             ..RegionTracker::default()
         };
 
         assert!(!tracker.finish_state_drop(drop_state(&state(42), &path)));
-        assert_eq!(tracker.fs_prev, Some(baseline));
+        assert_eq!(tracker.alive_prev, Some(baseline));
 
         std::fs::remove_dir(&path).unwrap();
         std::fs::write(&path, "pending").unwrap();
         assert!(tracker.finish_state_drop(drop_state(&state(42), &path)));
-        assert_eq!(tracker.fs_prev, None);
+        assert_eq!(tracker.alive_prev, None);
     }
 
     #[test]
-    fn reset_debounce_preserves_dissolve_and_heal_tracking() {
+    fn reset_debounce_preserves_hold_and_heal_tracking() {
         let previous = rect(1, 2, 3, 4);
         let baseline = rect(5, 6, 7, 8);
         let mut tracker = RegionTracker {
             prev: Some((previous, previous)),
-            fs_prev: Some(baseline),
+            alive_prev: Some(baseline),
+            media: Some((1920, 800)),
             heal_tries: 9,
             heal_wait: 6,
         };
@@ -1057,7 +1148,8 @@ mod internal_tests {
         tracker.reset_debounce();
 
         assert_eq!(tracker.prev, None);
-        assert_eq!(tracker.fs_prev, Some(baseline));
+        assert_eq!(tracker.alive_prev, Some(baseline));
+        assert_eq!(tracker.media(), Some((1920, 800)));
         assert_eq!(tracker.heal_tries, 9);
         assert_eq!(tracker.heal_wait, 6);
     }
@@ -1068,7 +1160,8 @@ mod internal_tests {
         let baseline = rect(5, 6, 7, 8);
         let mut tracker = RegionTracker {
             prev: Some((previous, previous)),
-            fs_prev: Some(baseline),
+            alive_prev: Some(baseline),
+            media: Some((1920, 800)),
             heal_tries: 9,
             heal_wait: 6,
         };
@@ -1076,8 +1169,42 @@ mod internal_tests {
         assert!(!maintain_region(&mut tracker, None));
 
         assert_eq!(tracker.prev, None);
-        assert_eq!(tracker.fs_prev, None);
+        assert_eq!(tracker.alive_prev, None);
+        assert_eq!(tracker.media(), None);
         assert_eq!(tracker.heal_tries, 0);
         assert_eq!(tracker.heal_wait, 0);
+    }
+
+    #[test]
+    fn watch_reset_drops_baselines_but_keeps_heal_cadence() {
+        let baseline = rect(1, 2, 3, 4);
+        let mut tracker = RegionTracker {
+            prev: Some((baseline, baseline)),
+            alive_prev: Some(baseline),
+            media: Some((1920, 800)),
+            heal_tries: 9,
+            heal_wait: 6,
+        };
+
+        tracker.reset_watch();
+
+        assert_eq!(tracker.prev, None);
+        assert_eq!(tracker.alive_prev, None);
+        assert_eq!(tracker.media(), None);
+        assert_eq!(tracker.heal_tries, 9); // heal cadence is not session-scoped
+        assert_eq!(tracker.heal_wait, 6);
+    }
+
+    #[test]
+    fn own_rect_note_adopts_the_applied_rect_as_hold_baseline() {
+        let mut tracker = RegionTracker {
+            alive_prev: Some(rect(1, 2, 3, 4)),
+            ..RegionTracker::default()
+        };
+
+        let applied = rect(10, 20, 30, 40);
+        tracker.note_own_rect(&applied);
+
+        assert_eq!(tracker.alive_prev, Some(applied));
     }
 }

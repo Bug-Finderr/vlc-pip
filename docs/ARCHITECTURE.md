@@ -8,14 +8,17 @@ VLC's Lua extension API has no window-management surface, so the extension is on
 sequenceDiagram
     participant U as User
     participant L as pip.lua (VLC View menu)
+    participant I as pip-intf.lua (Lua interface, auto-started)
     participant R as vlc-pip-request.txt
     participant D as pip-helper.exe daemon
     participant V as VLC window
 
+    I->>D: publish playing video size to vlc-pip-media.txt every ~300 ms
     U->>L: click "PiP Mode" (or Ctrl+Alt+P straight to D)
     L->>R: write "toggle v=WxH" (playing video size when known; pure Lua I/O, no console flash)
-    D->>R: consume on next 150 ms tick
+    D->>R: consume on next 150 ms tick (bare enters fall back to the published size)
     D->>V: Enter: save rect+styles to vlc-pip.state, strip caption/frame, topmost, park in corner
+    D->>V: playlist item changes shape: retarget the box to the published size
     D->>V: Exit: restore saved styles, topmost state, and exact rect, then delete state on success
 ```
 
@@ -52,16 +55,18 @@ Key mechanisms, each earned by a v1 bug (details in [SPEC.md](SPEC.md) §7-8):
 - **Fullscreen-origin PiP (v2.1.1).** Entering PiP from a fullscreen VLC is the same instant reshape as any enter - VLC's internal fullscreen state stays on for the whole PiP session because Qt only restores its windowed geometry from an untouched fullscreen window. Entry hides a currently visible controller strip once and applies an empty-region veil; ticks only repair that persistent veil if VLC recreates or reshapes a controller. The keyboard hook swallows Esc alongside F. Exit restores the saved fullscreen style, topmost state, and rect. When playback ends or stops, the daemon detects Qt's own windowed re-layout and dissolves the session there ([SPEC.md](SPEC.md) §7).
 - **Drag gestures (v2.1) ride the same mouse hook.** An allowed button-down over the PiP arms a gesture (interior `(0, 0)` = free move; each `-1|0|1` axis selects a low edge, interior, or high edge for aspect-locked resize); the hook stores the latest cursor position and posts one coalesced `WM_APP` message with a generation counter. The pump widens pointer deltas, revalidates HWND ownership, rejects unrepresentable move rects, computes and applies the target - finalizing on release from its own computed rect, never `GetWindowRect` after the async `SetWindowPos` - and persists size + nearest corner to `config.txt`. Full contract: [SPEC.md](SPEC.md) §12.
 - **Close-in-PiP heal (v2.1).** VLC closed while in PiP saves the PiP geometry as its own; the daemon keeps the stale state as a pending-restore record and re-applies the pre-PiP rect once a new player window appears, deleting the state only when the rect sticks ([SPEC.md](SPEC.md) §12).
-- **Media-adapted enter.** The menu trigger reports the playing video's visible size (`v=WxH`; exact English `Video resolution` info key, transposed orientations swap the axes), and enter keeps the configured width while deriving the height from that aspect, inside the same 80% chrome-aware envelope as resize. Hotkey and CLI enters keep the configured box - VLC exposes the true video size only to Lua ([SPEC.md](SPEC.md) §7, §12).
+- **The box follows the playing video.** VLC exposes the true video size only to Lua, and extension listeners require manual activation each session - so a small Lua INTERFACE script (auto-started via `vlcrc` `extraintf=luaintf` + `lua-intf=pip`) publishes the playing video's visible size every ~300 ms (exact English `Video resolution` info key, transposed orientations swap the axes) to a freshness-gated file. Every enter adapts to it (a menu toggle's own `v=WxH` probe wins), keeping the configured width while deriving the height from the video's aspect inside the same 80% chrome-aware envelope as resize; mid-session, dims that change retarget the box and the converger reshapes it. Without a fresh publication, enters keep the configured box ([SPEC.md](SPEC.md) §5.1b, §6.6, §7).
+- **Windowed PiP survives media end.** When playback ends or stops, Qt releases the video widget, resizes the window to its remembered pre-video size, and drops topmost - with no input. The tick snaps a windowed-origin frame back to the last rect seen with live video and reasserts topmost, so the box holds through stops, playlist gaps, and audio-only items, and the next video re-clips into the same box. A fullscreen-origin session dissolves instead - Qt left fullscreen internally and its shell must not be restored ([SPEC.md](SPEC.md) §7).
 
 ## Layout
 
 | Piece | Lives at |
 |---|---|
 | `pip.lua` trigger extension | `%APPDATA%\vlc\lua\extensions\` (only the .lua - a stray exe breaks VLC's extension scan) |
+| `pip-intf.lua` publisher | `%APPDATA%\vlc\lua\intf\pip.lua`, auto-started via `vlcrc` (`extraintf=luaintf`, `lua-intf=pip`; installer edits, uninstaller reverts) |
 | `pip-helper.exe` | `%APPDATA%\vlc\pip\` |
 | Autostart | `shell:startup\VLC PiP Daemon.lnk` → `pip-helper.exe daemon` |
-| Runtime state | `%TEMP%\vlc-pip*` (state, request, heartbeat, status, crash) |
+| Runtime state | `%TEMP%\vlc-pip*` (state, request, media, heartbeat, status, crash) |
 | Persisted size/corner | `%APPDATA%\vlc\pip\config.txt` (written on drag release) |
 
 CLI modes: `toggle|enter|exit|restore|status|daemon|stop`. `restore` is the installer's non-destructive owned-state restore; `status` writes `%TEMP%\vlc-pip-status.json` because a GUI-subsystem exe's stdout is unreliable.
