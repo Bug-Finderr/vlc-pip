@@ -6,7 +6,7 @@ The Windows version uses no mirroring or second player: the genuine hardware-dec
 
 ![vlc-pip demo](docs/demo.webp)
 
-On macOS 14+, a separate menu-bar app mirrors VLC video into the system Picture in Picture window. It requires VLC 3.x, a source build, Screen Recording permission, and permission to control VLC. See [macOS setup and controls](macos/README.md).
+On macOS 14+, a separate menu-bar app mirrors VLC video into the system Picture in Picture window. It requires VLC 3.x, Screen Recording permission, and permission to control VLC. See [macOS setup and controls](macos/README.md) for the download and source-build options.
 
 ## Install on Windows
 
