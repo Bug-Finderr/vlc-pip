@@ -13,10 +13,10 @@ jobs:
   close:
     runs-on: ubuntu-latest
     steps:
-      - name: Close external PRs
+      - name: Close untrusted PRs
         # exact match on the PR AUTHOR (not github.actor: that's whoever triggered the
         # event, and substring contains() would also pass e.g. a user named "Bug")
-        if: ${{ github.event.pull_request.user.login != 'Bug-Finderr' }}
-        run: gh pr close ${{ github.event.number }} --comment "This repo does not accept external PRs. Please open an issue instead." --repo ${{ github.repository }}
+        if: ${{ github.event.pull_request.user.login != 'Bug-Finderr' && github.event.pull_request.user.login != 'Jenish-1235' }}
+        run: gh pr close ${{ github.event.number }} --comment "This repo accepts PRs from trusted contributors only. Please open an issue instead." --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

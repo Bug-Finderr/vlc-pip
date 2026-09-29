@@ -1,12 +1,14 @@
 # vlc-pip
 
-Turns the **real** VLC 3.x window into a borderless, always-on-top, corner-parked mini player - toggled from **View → PiP Mode** or **Ctrl+Alt+P** - and restores it to its exact original size, position, and borders on toggle back.
+On Windows, turns the **real** VLC 3.x window into a borderless, always-on-top, corner-parked mini player - toggled from **View → PiP Mode** or **Ctrl+Alt+P** - and restores it to its exact original size, position, and borders on toggle back.
 
-No mirroring, no second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and ordinary playback features and shortcuts keep working inside the PiP. The fullscreen guards deliberately suppress F, fullscreen-origin Esc, and click bursts. A tiny Rust daemon with no extra runtime dependency does the work; a Lua extension adds the menu entry. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
+The Windows version uses no mirroring or second player: the genuine hardware-decoding VLC window is reshaped via Win32, so there is zero added latency and ordinary playback features and shortcuts keep working inside the PiP. The fullscreen guards deliberately suppress F, fullscreen-origin Esc, and click bursts. A tiny Rust daemon with no extra runtime dependency does the work; a Lua extension adds the menu entry. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works.
 
 ![vlc-pip demo](docs/demo.webp)
 
-## Install
+On macOS 14+, a separate menu-bar app mirrors VLC video into the system Picture in Picture window. It requires VLC 3.x, a source build, Screen Recording permission, and permission to control VLC. See [macOS setup and controls](macos/README.md).
+
+## Install on Windows
 
 Download and extract the [latest release](https://github.com/Bug-Finderr/vlc-pip/releases), then run:
 
@@ -41,4 +43,4 @@ The daemon accepts `w= h= c=br|bl|tr|tl m= min=` (size, corner, margin, minimal 
 
 ## Contributing
 
-Issues are welcome. PRs are not accepted and will be auto-closed.
+Issues are welcome. PRs from users outside the trusted list are auto-closed.
