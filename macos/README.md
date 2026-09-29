@@ -5,10 +5,18 @@ Space, including other apps' fullscreen ones. It is a separate menu-bar app: it 
 VLC's video area with ScreenCaptureKit and drives VLC's own play/pause and seek through
 Apple Events. VLC itself is untouched.
 
+Download the zip from the [releases](https://github.com/Jenish-1235/vlc-pip/releases), unzip,
+and move **VLC PiP.app** to Applications. Or build it (universal, Apple Silicon + Intel):
+
 ```sh
 ./build.sh           # → build/VLC PiP.app
 ./build.sh install   # also copies it to /Applications
+./build.sh package   # also zips it for a release
 ```
+
+The app is not notarized: on first open macOS says it can't verify it. Go to System
+Settings → Privacy & Security and click **Open Anyway** (or run
+`xattr -dr com.apple.quarantine "/Applications/VLC PiP.app"`).
 
 On first use, allow **Screen Recording** (then reopen the app) and the **Automation → VLC**
 prompt. The build is ad-hoc signed, so macOS asks for Screen Recording again after a rebuild.
